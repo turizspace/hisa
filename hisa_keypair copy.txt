@@ -1,0 +1,4 @@
+Private key (hex): 6734301312b3cb4612b864115e7bc1f91ee8165b4667bdb203580ac7dc1b61d7
+Public key (hex): bc3a3b82f3eae4035923c18338c6dcc6dd134867013ab5fd910222af32be5f39
+Public key (bech32): npub1hsarhqhnatjqxkfrcxpn33kucmw3xjr8qyattlv3qg327v47tuusx949md
+Private key (bech32): nsec1vu6rqycjk095vy4cvsg4u77ply0ws9jmgenmmvsrtq9v0hqmv8ts4d5jpt

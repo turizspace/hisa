@@ -1,0 +1,7 @@
+<resources>
+    <string name="app_name">Hisa</string>
+    <string name="login_with_nostr_nsec">Login with Nostr nsec</string>
+    <string name="nsec">nsec</string>
+    <string name="login">Login</string>
+    <string name="invalid_nsec_or_login_failed">Invalid nsec or login failed.</string>
+</resources>

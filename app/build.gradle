@@ -1,0 +1,179 @@
+plugins {
+    id 'com.android.application'
+    id 'org.jetbrains.kotlin.android'
+    id 'org.jetbrains.kotlin.plugin.serialization' version '2.0.21'
+    // Compose compiler plugin required for Kotlin 2.0+
+    id 'org.jetbrains.kotlin.plugin.compose' version '2.0.21'
+    id 'com.google.dagger.hilt.android'
+    id 'kotlin-kapt'
+}
+
+
+
+
+android {
+    namespace 'com.hisa'
+    compileSdk 35
+
+    defaultConfig {
+        applicationId "com.hisa"
+        minSdk 24
+        targetSdk 35
+        versionCode 2
+        versionName "0.1.6"
+    }
+
+    buildFeatures {
+        compose true
+    }
+
+    composeOptions {
+        // Compose compiler compatible with Kotlin 2.0.x
+        kotlinCompilerExtensionVersion = "1.6.1"
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+    signingConfigs {
+        
+    }
+
+    signingConfigs {
+        // Placeholder signing config for CI. Provide signing properties via
+        // environment variables or gradle.properties in CI and do NOT commit
+        // production keystore files to the repo.
+        release {
+            // First, try environment variables or project properties
+            def ksPath = System.getenv("CI_ANDROID_KEYSTORE_PATH") ?: project.findProperty("CI_ANDROID_KEYSTORE_PATH") ?: project.findProperty("RELEASE_STORE_FILE")
+            def ksStorePassword = System.getenv("CI_ANDROID_KEYSTORE_PASSWORD") ?: project.findProperty("RELEASE_STORE_PASSWORD")
+            def ksKeyAlias = System.getenv("CI_ANDROID_KEY_ALIAS") ?: project.findProperty("RELEASE_KEY_ALIAS")
+            def ksKeyPassword = System.getenv("CI_ANDROID_KEY_PASSWORD") ?: project.findProperty("RELEASE_KEY_PASSWORD")
+
+            if (ksPath) {
+                storeFile file(ksPath)
+            } else {
+                storeFile file("turiz.keystore")
+            }
+
+            storePassword ksStorePassword ?: "ch0wd3r@t"
+            keyAlias ksKeyAlias ?: "mykey"
+            keyPassword ksKeyPassword ?: "ch0wd3r@t"
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled true
+            shrinkResources true
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro', 'proguard-secp256k1.pro', 'proguard-serialization.pro'
+            // Use the configured release signing config when a keystore is provided.
+            // Fall back to the debug signing config for local/dev builds where a release
+            // keystore isn't available (avoid committing keystore files to repo).
+            if (signingConfigs.release.storeFile != null) {
+                signingConfig signingConfigs.release
+            } else {
+                println "[build.gradle] WARNING: Release keystore not configured. Falling back to debug signing config for local build."
+                signingConfig signingConfigs.debug
+            }
+        }
+        debug {
+            // Keep debug readable but still allow some checks
+            minifyEnabled false
+        }
+    }
+
+    applicationVariants.all { variant ->
+        variant.outputs.all { output ->
+            def newName = "hisa-v${variant.versionName}-${variant.buildType.name}.apk"
+            output.outputFileName = newName
+        }
+    }
+}
+
+tasks.withType(org.jetbrains.kotlin.gradle.tasks.KotlinCompile).configureEach {
+    kotlinOptions {
+        jvmTarget = "17"
+    }
+}
+
+dependencies {
+    def compose_version = "1.6.1"
+
+    // Hilt
+    implementation "com.google.dagger:hilt-android:2.48"
+    kapt "com.google.dagger:hilt-compiler:2.48"
+    implementation 'androidx.hilt:hilt-navigation-compose:1.1.0'
+
+    // Bitcoin + BouncyCastle
+    implementation("org.bitcoinj:bitcoinj-core:0.16.3") {
+        exclude group: 'org.bouncycastle', module: 'bcprov-jdk15to18'
+    }
+    implementation "org.bouncycastle:bcprov-jdk18on:1.77"
+
+    // ACINQ secp256k1 Schnorr support (native JNI)
+    implementation "fr.acinq.secp256k1:secp256k1-kmp-jni-android:0.10.0"
+
+    // Core AndroidX
+    implementation "androidx.core:core-ktx:1.12.0"
+    implementation "androidx.lifecycle:lifecycle-runtime-ktx:2.6.2"
+    implementation "androidx.lifecycle:lifecycle-viewmodel-ktx:2.6.2"
+    implementation "androidx.activity:activity-compose:1.8.2"
+    implementation "androidx.core:core-splashscreen:1.0.1"
+
+    // Compose + Material3
+    implementation platform('androidx.compose:compose-bom:2024.05.00')
+    implementation "androidx.compose.ui:ui"
+    implementation "androidx.compose.material3:material3"
+    implementation "androidx.compose.ui:ui-tooling-preview"
+    implementation "androidx.compose.ui:ui-tooling"
+    implementation "androidx.compose.material:material-icons-extended:$compose_version"
+    implementation "androidx.compose.foundation:foundation:$compose_version"
+    implementation "androidx.compose.foundation:foundation-layout:$compose_version"
+    implementation "androidx.compose.runtime:runtime:$compose_version"
+    implementation "androidx.compose.runtime:runtime-livedata:$compose_version"
+    implementation "androidx.compose.runtime:runtime-rxjava2:$compose_version"
+    implementation "androidx.compose.ui:ui-util:$compose_version"
+    implementation "androidx.navigation:navigation-compose:2.7.7"
+
+    // Security
+    implementation "androidx.security:security-crypto:1.1.0-alpha06"
+
+    // Coroutines
+    implementation "org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3"
+    implementation "org.jetbrains.kotlinx:kotlinx-coroutines-core:1.7.3"
+
+    // Logging
+    implementation "com.jakewharton.timber:timber:5.0.1"
+    // Add SLF4J Android binding to satisfy libraries that reference SLF4J
+    implementation 'org.slf4j:slf4j-android:1.7.36'
+
+    // Serialization + Networking
+    implementation "org.jetbrains.kotlinx:kotlinx-serialization-json:1.6.3"
+    implementation "com.squareup.okhttp3:okhttp:4.12.0"
+    implementation "com.squareup.retrofit2:retrofit:2.9.0"
+    implementation "com.jakewharton.retrofit:retrofit2-kotlinx-serialization-converter:0.8.0"
+
+    // Misc
+    implementation "io.coil-kt:coil-compose:2.4.0"
+    implementation "com.squareup.okio:okio:3.7.0"
+    implementation 'androidx.datastore:datastore-core-android:1.1.7'
+    implementation 'com.google.android.datatransport:transport-api:4.0.0'
+    implementation "androidx.work:work-runtime-ktx:2.9.0"
+
+    implementation "androidx.media3:media3-exoplayer:1.8.0"
+    implementation "androidx.media3:media3-ui:1.8.0"
+
+    // Note: quartz module not added as project dependency automatically to avoid version-catalog plugin issues.
+
+
+    // ZXing QR
+    implementation 'com.google.zxing:core:3.5.2'
+    implementation 'com.journeyapps:zxing-android-embedded:4.3.0'
+
+    // Unit testing
+    testImplementation 'junit:junit:4.13.2'
+    // Add test dependency to provide org.json on the JVM test classpath
+    testImplementation 'org.json:json:20230227'
+}

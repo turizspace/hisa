@@ -1,0 +1,23 @@
+<resources>
+    <!-- Base application theme -->
+    <style name="Theme.App" parent="@android:style/Theme.DeviceDefault.NoActionBar">
+        <item name="android:windowDisablePreview">true</item>
+        <item name="android:windowNoDisplay">false</item>
+        <item name="android:windowContentOverlay">@null</item>
+    </style>
+
+    <!-- Splash Screen theme -->
+    <style name="Theme.App.Starting" parent="Theme.SplashScreen">
+        <item name="windowSplashScreenBackground">@color/white</item>
+        <item name="windowSplashScreenAnimatedIcon">@mipmap/png_hisa</item>
+        <item name="windowSplashScreenAnimationDuration">0</item>
+        <item name="postSplashScreenTheme">@style/Theme.App</item>
+    </style>
+
+    <!-- No Animation theme for transitions -->
+    <style name="Theme.App.NoAnimation" parent="Theme.App">
+        <item name="android:windowAnimationStyle">@null</item>
+        <item name="android:windowIsTranslucent">true</item>
+        <item name="android:windowBackground">@android:color/white</item>
+    </style>
+</resources>

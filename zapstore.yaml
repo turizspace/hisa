@@ -3,9 +3,9 @@ repository: https://github.com/turizspace/hisa
 name: Hisa
 summary: Hisa Android app
 description: Hisa is a community marketplace built on the Nostr protocol (NIP-99). Hisa aims to connect community members who need help with daily tasks with capable individuals willing to provide these services.
-icon: png_hisa.png
+icon: png_hisa.jpeg
 license: MIT
-tags: nostr android hisa
+tags: nostr android hisa nip99 nip28
 remote_metadata:
   - github
 assets:
