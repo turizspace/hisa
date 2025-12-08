@@ -96,18 +96,19 @@ android {
         density.enableSplit = true
         abi.enableSplit = true
     }
+}
 
-    afterEvaluate {
-        tasks.whenTaskAdded { task ->
-            if (task.name == 'bundleRelease' || task.name == 'bundleDebug') {
-                task.doLast {
-                    def bundleDir = file("${buildDir}/outputs/bundle/${task.name.replace('bundle', '').toLowerCase()}")
-                    def oldBundle = new File(bundleDir, "app-${task.name.replace('bundle', '').toLowerCase()}.aab")
-                    if (oldBundle.exists()) {
-                        def newBundle = new File(bundleDir, "hisa-v${android.defaultConfig.versionName}-${task.name.replace('bundle', '').toLowerCase()}.aab")
-                        oldBundle.renameTo(newBundle)
-                        println "Renamed bundle: ${oldBundle.name} -> ${newBundle.name}"
-                    }
+afterEvaluate {
+    tasks.matching { it.name == 'bundleRelease' }.configureEach {
+        doLast {
+            def bundleDir = file("${buildDir}/outputs/bundle/release")
+            if (bundleDir.exists()) {
+                def oldFile = file("${bundleDir}/app-release.aab")
+                def versionName = android.defaultConfig.versionName
+                def newFile = file("${bundleDir}/hisa-v${versionName}-release.aab")
+                if (oldFile.exists()) {
+                    oldFile.renameTo(newFile)
+                    println "✅ Renamed: app-release.aab → hisa-v${versionName}-release.aab"
                 }
             }
         }
