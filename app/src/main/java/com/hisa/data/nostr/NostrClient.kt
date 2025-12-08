@@ -103,6 +103,9 @@ class NostrClient @Inject constructor(
     private val maxRetries = 5
     private val retryDelay = 3000L // ms
     private val pendingMessages = Collections.synchronizedList(mutableListOf<String>())
+    // Throttle map to avoid sending too many REQ messages to the same relay in a short time
+    private val lastSubscriptionSent = ConcurrentHashMap<String, Long>()
+    private val SUBSCRIPTION_MIN_INTERVAL_MS = 250L
 
     private val _connectionState = MutableStateFlow(ConnectionState.DISCONNECTED)
     val connectionState: StateFlow<ConnectionState> = _connectionState
@@ -311,9 +314,48 @@ class NostrClient @Inject constructor(
 
             if (webSockets.isNotEmpty() && _connectionState.value == ConnectionState.CONNECTED) {
                 webSockets.forEach { (relayUrl, ws) ->
-                    ws.send(reqString)
-                    Timber.d("Sent subscription to %s: %s", relayUrl, reqString)
-                    scheduleResubscribeWorker(context, relayUrl, id, filterJson)
+                    // Throttle per-relay to avoid flooding and triggering relay rate limits
+                    val now = System.currentTimeMillis()
+                    val last = lastSubscriptionSent[relayUrl] ?: 0L
+                    val elapsed = now - last
+                    val jitter = kotlin.random.Random.nextLong(0, 200)
+
+                    if (elapsed >= SUBSCRIPTION_MIN_INTERVAL_MS) {
+                        try {
+                            ws.send(reqString)
+                            lastSubscriptionSent[relayUrl] = System.currentTimeMillis()
+                            Timber.d("Sent subscription to %s: %s", relayUrl, reqString)
+                            scheduleResubscribeWorker(context, relayUrl, id, filterJson)
+                        } catch (e: Exception) {
+                            Timber.w(e, "Failed to send subscription immediately to %s", relayUrl)
+                            // Fallback: schedule a delayed send
+                            scope.launch {
+                                kotlinx.coroutines.delay(SUBSCRIPTION_MIN_INTERVAL_MS + jitter)
+                                try {
+                                    ws.send(reqString)
+                                    lastSubscriptionSent[relayUrl] = System.currentTimeMillis()
+                                    Timber.d("Delayed sent subscription to %s: %s", relayUrl, reqString)
+                                    scheduleResubscribeWorker(context, relayUrl, id, filterJson)
+                                } catch (ex: Exception) {
+                                    Timber.e(ex, "Delayed send failed for %s", relayUrl)
+                                }
+                            }
+                        }
+                    } else {
+                        // Too soon since last send — schedule a delayed send with small jitter
+                        val wait = (SUBSCRIPTION_MIN_INTERVAL_MS - elapsed).coerceAtLeast(0L) + jitter
+                        scope.launch {
+                            kotlinx.coroutines.delay(wait)
+                            try {
+                                ws.send(reqString)
+                                lastSubscriptionSent[relayUrl] = System.currentTimeMillis()
+                                Timber.d("Scheduled sent subscription to %s after %dms: %s", relayUrl, wait, reqString)
+                                scheduleResubscribeWorker(context, relayUrl, id, filterJson)
+                            } catch (ex: Exception) {
+                                Timber.e(ex, "Scheduled send failed for %s", relayUrl)
+                            }
+                        }
+                    }
                 }
             } else {
                 Timber.w("No active WebSockets, attempting to connect...")

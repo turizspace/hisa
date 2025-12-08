@@ -333,7 +333,9 @@ fun AppNavGraph(
             val vm: com.hisa.ui.screens.create.CreateServiceViewModel = androidx.hilt.navigation.compose.hiltViewModel()
             CreateServiceScreen(
                 onCreateService = { title, summary, description, tags, onSuccess ->
-                    vm.createService(title, summary, description, tags, privateKey, pubKey, onSuccess)
+                    // If there is no local private key (external signer login), pass null so
+                    // CreateServiceViewModel delegates to the external signer path.
+                    vm.createService(title, summary, description, tags, if (privateKey.isBlank()) null else privateKey, pubKey, onSuccess)
                 },
                 onNavigateBack = { navController.popBackStack() },
                 navController = navController

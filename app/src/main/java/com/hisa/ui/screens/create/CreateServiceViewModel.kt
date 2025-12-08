@@ -32,7 +32,7 @@ class CreateServiceViewModel @Inject constructor(
         summary: String,
         description: String,
         tags: List<List<String>>,
-        privateKeyHex: String,
+        privateKeyHex: String?,
         pubKey: String,
         onSuccess: () -> Unit
     ) {
@@ -56,7 +56,17 @@ class CreateServiceViewModel @Inject constructor(
                     sig = "" // Will be set during signing
                 )
 
-                val privKeyBytes = privateKeyHex.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
+                // If privateKeyHex is null or blank, treat this as an external-signer login
+                // and pass null so NostrEventSigner will delegate to ExternalSignerManager.
+                val privKeyBytes: ByteArray? = if (!privateKeyHex.isNullOrBlank()) {
+                    try {
+                        privateKeyHex.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
+                    } catch (e: Exception) {
+                        null
+                    }
+                } else {
+                    null
+                }
 
                 val eventJson = NostrEventSigner.signEvent(
                     kind = event.kind,

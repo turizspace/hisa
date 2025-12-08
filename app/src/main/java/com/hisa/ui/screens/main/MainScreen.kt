@@ -400,20 +400,4 @@ fun MainScreen(
         }
     }
 }
-// Preview for Compose UI visualization
-@RequiresApi(Build.VERSION_CODES.O)
-@Composable
-fun MainScreen(
-    navController: NavController,
-    userPubkey: String,
-    privateKey: String,
-    viewModel: MainViewModel = hiltViewModel()
-) {
-    val isConnected by viewModel.isConnected.collectAsState()
-
-    LaunchedEffect(Unit) {
-        viewModel.connect()
-    }
-
-    // Rest of your MainScreen implementation
-}
+// (Only one MainScreen composable is used by AppNavGraph; the full signature above is the canonical entrypoint.)

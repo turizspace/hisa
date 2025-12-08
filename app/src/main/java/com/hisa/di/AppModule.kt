@@ -81,9 +81,10 @@ object AppModule {
     @Provides
     @Singleton
     fun provideMetadataRepository(
-        nostrClient: NostrClient
+        nostrClient: NostrClient,
+        subscriptionManager: com.hisa.data.nostr.SubscriptionManager
     ): MetadataRepository {
-        return MetadataRepository(nostrClient)
+        return MetadataRepository(nostrClient, subscriptionManager)
     }
 
     // MessagesViewModel factory is provided by MessagesViewModelModule

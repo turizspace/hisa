@@ -53,7 +53,7 @@ fun SignupScreen(
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
             LinearProgressIndicator(
-                progress = { 0.5f },
+                progress = 0.5f,
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(vertical = 8.dp)

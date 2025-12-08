@@ -14,11 +14,13 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import javax.inject.Inject
+import kotlinx.coroutines.CompletableDeferred
 import javax.inject.Singleton
 
 @Singleton
 class MetadataRepository @Inject constructor(
-    private val nostrClient: NostrClient
+    private val nostrClient: NostrClient,
+    private val subscriptionManager: com.hisa.data.nostr.SubscriptionManager
 ) {
     companion object {
         @Volatile
@@ -38,52 +40,38 @@ class MetadataRepository @Inject constructor(
     }
     suspend fun getMetadataForPubkey(pubkey: String, beforeTimestamp: Long? = null): Metadata? = withContext(Dispatchers.IO) {
         var result: Metadata? = null
-        val subId = "meta_${UUID.randomUUID().toString().take(8)}"
-        // Build a filter requesting kind=0 events from the author. Include an optional 'until' when provided.
-        val filterObj = kotlinx.serialization.json.buildJsonObject {
-            put("kinds", kotlinx.serialization.json.JsonArray(listOf(kotlinx.serialization.json.JsonPrimitive(0))))
-            put("authors", kotlinx.serialization.json.JsonArray(listOf(kotlinx.serialization.json.JsonPrimitive(pubkey))))
-            beforeTimestamp?.let { put("until", kotlinx.serialization.json.JsonPrimitive(it)) }
+        val filterObj = org.json.JSONObject().apply {
+            put("kinds", org.json.JSONArray().put(0))
+            put("authors", org.json.JSONArray().put(pubkey))
+            beforeTimestamp?.let { put("until", it) }
         }
-        val filter = filterObj.toString()
-        println("[MetadataRepository] Subscribing for pubkey: $pubkey with filter: $filter id=$subId")
 
-        nostrClient.sendSubscription(subId, filter)
-        val events = mutableListOf<Pair<Long, String>>() // (created_at, content)
-        try {
-            // Collect until EOSE for our subId or timeout (5s)
-            var ended = false
-            withTimeoutOrNull(TimeUnit.SECONDS.toMillis(5)) {
-                nostrClient.incomingMessages.takeWhile { !ended }.collect { message ->
-                    try {
-                        val parsed = kotlinx.serialization.json.Json.parseToJsonElement(message)
-                        if (parsed is kotlinx.serialization.json.JsonArray && parsed.size > 0) {
-                            val msgType = parsed[0].jsonPrimitive.content
-                            if (msgType == "EVENT" && parsed.size > 2) {
-                                val incomingSubId = parsed[1].jsonPrimitive.content
-                                if (incomingSubId != subId) return@collect
-                                val obj = parsed[2].jsonObject
-                                val kindVal = obj["kind"]?.toString()
-                                if (kindVal == "0") {
-                                    val createdAt = obj["created_at"]?.jsonPrimitive?.content?.toLongOrNull() ?: 0L
-                                    val content = obj["content"]?.jsonPrimitive?.content ?: ""
-                                    events.add(Pair(createdAt, content))
-                                }
-                            } else if (msgType == "EOSE" && parsed.size > 1) {
-                                val incomingSubId = parsed[1].jsonPrimitive.content
-                                if (incomingSubId == subId) {
-                                    // signal to stop collecting after this element
-                                    ended = true
-                                }
-                            }
-                        }
-                    } catch (e: Exception) {
-                        println("[MetadataRepository] Exception parsing message: ${e.localizedMessage}")
+        val events = mutableListOf<Pair<Long, String>>()
+        val finished = CompletableDeferred<Unit>()
+
+        // Subscribe via SubscriptionManager so dedupe/throttling/backoff is applied
+        val subId = subscriptionManager.subscribe(filterObj,
+            onEvent = { event ->
+                try {
+                    if (event.kind == 0) {
+                        events.add(Pair(event.createdAt, event.content))
                     }
+                } catch (e: Exception) {
+                    println("[MetadataRepository] Error handling event callback: ${e.localizedMessage}")
                 }
+            },
+            onEndOfStoredEvents = {
+                // Signal that EOSE arrived
+                if (!finished.isCompleted) finished.complete(Unit)
+            }
+        )
+
+        try {
+            // Wait for EOSE or timeout
+            withTimeoutOrNull(TimeUnit.SECONDS.toMillis(5)) {
+                finished.await()
             }
 
-            // Choose the metadata event that is the latest at or before beforeTimestamp (if given)
             val chosen = events
                 .filter { (createdAt, _) -> beforeTimestamp?.let { createdAt <= it } ?: true }
                 .maxByOrNull { it.first }
@@ -100,17 +88,14 @@ class MetadataRepository @Inject constructor(
                 println("[MetadataRepository] No matching metadata events found for $pubkey")
             }
 
-            // Ensure we clean up our subscription on the shared client
-            try {
-                nostrClient.closeSubscription(subId)
-            } catch (e: Exception) {
-                println("[MetadataRepository] Failed to close subscription $subId: ${e.localizedMessage}")
-            }
-
             println("[MetadataRepository] Returning result: $result")
             return@withContext result
         } finally {
-            // nothing else to unregister
+            try {
+                subscriptionManager.unsubscribe(subId)
+            } catch (e: Exception) {
+                println("[MetadataRepository] Failed to unsubscribe $subId: ${e.localizedMessage}")
+            }
         }
     }
 

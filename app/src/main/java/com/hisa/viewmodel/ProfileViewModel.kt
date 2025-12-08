@@ -18,6 +18,7 @@ import kotlinx.serialization.json.Json
 @HiltViewModel
 class ProfileViewModel @Inject constructor(
     private val nostrClient: NostrClient,
+    private val subscriptionManager: com.hisa.data.nostr.SubscriptionManager,
     private val profileCache: ProfileCache,
     savedStateHandle: SavedStateHandle
 ) : ViewModel() {
@@ -41,6 +42,8 @@ class ProfileViewModel @Inject constructor(
         object Success : SaveStatus()
         data class Error(val message: String) : SaveStatus()
     }
+
+    private var profileSubscriptionId: String? = null
 
     init {
         // Load from cache first
@@ -155,9 +158,33 @@ class ProfileViewModel @Inject constructor(
                     put("kinds", org.json.JSONArray().put(0))
                     put("authors", org.json.JSONArray().put(pubkey))
                 }
-                val filtersArray = org.json.JSONArray().put(filter)
-                android.util.Log.d("ProfileViewModel", "Sending subscription for profile: $filtersArray")
-                nostrClient.sendSubscription("profile", filtersArray.toString())
+                // Subscribe using SubscriptionManager so dedupe/throttling applies
+                profileSubscriptionId = subscriptionManager.subscribe(filter, onEvent = { event ->
+                    try {
+                        if (event.kind == 0 && event.pubkey == pubkey) {
+                            val content = event.content
+                            val meta = try {
+                                Json { ignoreUnknownKeys = true }.decodeFromString<Metadata>(content)
+                            } catch (e: Exception) {
+                                android.util.Log.w("ProfileViewModel", "Failed to decode metadata content for pubkey $pubkey: ${e.localizedMessage}")
+                                null
+                            }
+                            if (meta != null) {
+                                if (_allMetadata.value.none { it == meta }) {
+                                    val newHistory = _allMetadata.value + meta
+                                    _allMetadata.value = newHistory
+                                    _metadata.value = meta
+                                    profileCache.cacheProfile(pubkey, meta)
+                                    profileCache.cacheProfileHistory(pubkey, newHistory)
+                                }
+                            }
+                        }
+                    } catch (e: Exception) {
+                        android.util.Log.e("ProfileViewModel", "Error handling profile event: ${e.localizedMessage}")
+                    }
+                }, onEndOfStoredEvents = {
+                    // no-op
+                })
             } catch (e: Exception) {
                 android.util.Log.e("ProfileViewModel", "Failed to fetch metadata: ${e.localizedMessage}")
                 _saveStatus.value = SaveStatus.Error("Failed to fetch metadata: ${e.localizedMessage}")
@@ -208,6 +235,15 @@ class ProfileViewModel @Inject constructor(
             } catch (e: Exception) {
                 _saveStatus.value = SaveStatus.Error("Failed to save: ${e.localizedMessage}")
             }
+        }
+    }
+
+    override fun onCleared() {
+        super.onCleared()
+        try {
+            profileSubscriptionId?.let { subscriptionManager.unsubscribe(it) }
+        } catch (e: Exception) {
+            android.util.Log.w("ProfileViewModel", "Failed to unsubscribe profile subscription: ${e.localizedMessage}")
         }
     }
 

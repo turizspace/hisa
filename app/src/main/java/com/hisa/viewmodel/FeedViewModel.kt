@@ -5,6 +5,7 @@ import androidx.lifecycle.viewModelScope
 import com.hisa.data.model.ServiceListing
 import com.hisa.data.nostr.NostrClient
 import com.hisa.data.nostr.SubscriptionManager
+import com.hisa.data.nostr.NostrEvent
 import com.hisa.data.repository.ServiceRepository
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -47,6 +48,8 @@ class FeedViewModel @Inject constructor(
             connectAndFetch()
         }
 
+    private var feedSubscriptionId: String? = null
+
     private fun connectAndFetch() {
         viewModelScope.launch {
             _isLoading.value = true
@@ -58,48 +61,55 @@ class FeedViewModel @Inject constructor(
                 nostrClient.connectionState.collect { state ->
                     when (state) {
                         NostrClient.ConnectionState.CONNECTED -> {
-                            // Only subscribe once we're connected
-                            nostrClient.registerMessageHandler { message ->
-                                try {
-                                    val arr = JSONArray(message)
-                                    if (arr.length() > 2 && arr.getString(0) == "EVENT") {
-                                        val eventJson = arr.getJSONObject(2).toString()
-                                        val service = ServiceRepository.parseServiceEvent(eventJson)
-                                        if (service != null) {
-                                           
-                                            // Check if service already exists before adding
-                                            val exists = _services.value.any { 
-                                                it.eventId == service.eventId && it.pubkey == service.pubkey 
-                                            }
-                                            if (!exists) {
-                                                val updatedList = _services.value + service
-                                                _services.value = updatedList
-                                                // Update categories derived from topic tags ("t" tags)
-                                                val allTags = updatedList.flatMap { svc ->
-                                                    svc.rawTags.filter { it.isNotEmpty() && it[0] == "t" }
-                                                        .mapNotNull { it.getOrNull(1) as? String }
+                            // Use SubscriptionManager.subscribe so dedupe/throttling applies
+                            if (feedSubscriptionId == null) {
+                                val filterObj = SubscriptionManager.filterNIP99()
+                                feedSubscriptionId = subscriptionManager.subscribe(
+                                    filter = filterObj,
+                                    onEvent = { event: NostrEvent ->
+                                        try {
+                                            // Reconstruct a JSONObject similar to the raw event for parsing
+                                            val eventJsonObj = org.json.JSONObject().apply {
+                                                put("id", event.id)
+                                                put("pubkey", event.pubkey)
+                                                put("created_at", event.createdAt)
+                                                put("kind", event.kind)
+                                                // tags as array of arrays
+                                                val tagsArray = org.json.JSONArray()
+                                                event.tags.forEach { tagList ->
+                                                    val inner = org.json.JSONArray()
+                                                    tagList.forEach { inner.put(it) }
+                                                    tagsArray.put(inner)
                                                 }
-                                                    .distinct()
-                                                    // Remove tags that are strictly integer values
-                                                    .filter { tag -> tag.toIntOrNull() == null }
-                                                    .sorted()
-                                                _categories.value = allTags
-                                                _isLoading.value = false // Data received, stop loading
-                                            } else {
+                                                put("tags", tagsArray)
+                                                put("content", event.content)
+                                                put("sig", event.sig)
                                             }
+                                            val service = ServiceRepository.parseServiceEvent(eventJsonObj.toString())
+                                            if (service != null) {
+                                                val exists = _services.value.any { it.eventId == service.eventId && it.pubkey == service.pubkey }
+                                                if (!exists) {
+                                                    val updatedList = _services.value + service
+                                                    _services.value = updatedList
+                                                    // Update categories derived from topic tags ("t" tags)
+                                                    val allTags = updatedList.flatMap { svc ->
+                                                        svc.rawTags.filter { it.isNotEmpty() && it[0] == "t" }
+                                                            .mapNotNull { it.getOrNull(1) as? String }
+                                                    }
+                                                        .distinct()
+                                                        .filter { tag -> tag.toIntOrNull() == null }
+                                                        .sorted()
+                                                    _categories.value = allTags
+                                                    _isLoading.value = false
+                                                }
+                                            }
+                                        } catch (e: Exception) {
+                                            android.util.Log.e("FeedViewModel", "Error handling event: ${e.message}", e)
                                         }
-                                    } else if (arr.length() > 1 && arr.getString(0) == "EOSE") {
-                                        // End of stored events
-                                        if (_services.value.isEmpty()) {
-                                            _isLoading.value = false // No data available
-                                        }
-                                    }
-                                } catch (e: Exception) {
-                                    android.util.Log.e("FeedViewModel", "Error parsing message: ${e.message}", e)
-                                }
+                                    },
+                                    onEndOfStoredEvents = {}
+                                )
                             }
-                            // Subscribe to NIP-99 events
-                            nostrClient.sendSubscription("feed", SubscriptionManager.filterNIP99().toString())
                         }
                         NostrClient.ConnectionState.ERROR -> {
                             _isLoading.value = false // Show error state
@@ -117,9 +127,55 @@ class FeedViewModel @Inject constructor(
             _isLoading.value = true
             _services.value = emptyList() // Clear current services
             _categories.value = emptyList()
-            
-            // Resubscribe to get fresh data (this will automatically replace the existing subscription)
-            nostrClient.sendSubscription("feed", SubscriptionManager.filterNIP99().toString())
+            // Resubscribe to get fresh data (unsubscribe then subscribe again)
+            feedSubscriptionId?.let { subscriptionManager.unsubscribe(it); feedSubscriptionId = null }
+            val filterObj = SubscriptionManager.filterNIP99()
+            feedSubscriptionId = subscriptionManager.subscribe(
+                filter = filterObj,
+                onEvent = { event: NostrEvent ->
+                    try {
+                        val eventJsonObj = org.json.JSONObject().apply {
+                            put("id", event.id)
+                            put("pubkey", event.pubkey)
+                            put("created_at", event.createdAt)
+                            put("kind", event.kind)
+                            val tagsArray = org.json.JSONArray()
+                            event.tags.forEach { tagList ->
+                                val inner = org.json.JSONArray()
+                                tagList.forEach { inner.put(it) }
+                                tagsArray.put(inner)
+                            }
+                            put("tags", tagsArray)
+                            put("content", event.content)
+                            put("sig", event.sig)
+                        }
+                        val service = ServiceRepository.parseServiceEvent(eventJsonObj.toString())
+                        if (service != null) {
+                            val exists = _services.value.any { it.eventId == service.eventId && it.pubkey == service.pubkey }
+                            if (!exists) {
+                                val updatedList = _services.value + service
+                                _services.value = updatedList
+                                val allTags = updatedList.flatMap { svc ->
+                                    svc.rawTags.filter { it.isNotEmpty() && it[0] == "t" }
+                                        .mapNotNull { it.getOrNull(1) as? String }
+                                }
+                                    .distinct()
+                                    .filter { tag -> tag.toIntOrNull() == null }
+                                    .sorted()
+                                _categories.value = allTags
+                            }
+                        }
+                    } catch (e: Exception) {
+                        android.util.Log.e("FeedViewModel", "Error handling refreshed event: ${e.message}", e)
+                    }
+                },
+                onEndOfStoredEvents = {}
+            )
         }
+    }
+
+    override fun onCleared() {
+        super.onCleared()
+        feedSubscriptionId?.let { subscriptionManager.unsubscribe(it); feedSubscriptionId = null }
     }
 }

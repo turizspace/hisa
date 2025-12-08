@@ -116,8 +116,13 @@ class SubscriptionManager @Inject constructor(
         onEvent: (NostrEvent) -> Unit,
         onEndOfStoredEvents: () -> Unit = {}
     ): String {
-        // Prevent duplicate subscriptions for the exact same filter string
-        val filterKey = filter.toString()
+        // Prevent duplicate subscriptions for equivalent filter objects by normalizing the JSON
+        val filterKey = try {
+            // Re-serialize with a stable ordering by parsing and constructing a JSONObject
+            JSONObject(filter.toString()).toString()
+        } catch (e: Exception) {
+            filter.toString()
+        }
         val existing = activeSubscriptions.entries.find { (_, info) ->
             try {
                 info.filter == filterKey
@@ -146,7 +151,12 @@ class SubscriptionManager @Inject constructor(
         onEvent: (NostrEvent) -> Unit,
         onEndOfStoredEvents: () -> Unit = {}
     ): String {
-        val filterKey = filtersArray.toString()
+        val filterKey = try {
+            // Normalize by parsing then re-serializing
+            JSONArray(filtersArray.toString()).toString()
+        } catch (e: Exception) {
+            filtersArray.toString()
+        }
         val existing = activeSubscriptions.entries.find { (_, info) ->
             try {
                 info.filter == filterKey

@@ -34,7 +34,6 @@ class MainActivity : ComponentActivity() {
         setContent {
             val navController = rememberNavController()
             val pubKeyState = authViewModel.pubKey.collectAsState(initial = "")
-            val navHostKey = pubKeyState.value ?: ""
 
             // App-level dark theme state (persisted via AuthViewModel)
             val isDarkThemeState = authViewModel.darkTheme.collectAsState()

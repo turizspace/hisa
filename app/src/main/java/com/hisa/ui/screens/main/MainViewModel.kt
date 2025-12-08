@@ -15,8 +15,7 @@ class MainViewModel @Inject constructor(
     private val nostrClient: NostrClient,
     private val subscriptionManager: SubscriptionManager
 ) : BaseViewModel() {
-    // Hold a strong reference to the registered handler so it can be unregistered
-    private var messageHandlerRef: ((String) -> Unit)? = null
+    // (No direct message handler registered here; SubscriptionManager centralizes message dispatch)
 
     private val _isConnected = MutableStateFlow(false)
     val isConnected: StateFlow<Boolean> = _isConnected
@@ -52,5 +51,5 @@ class MainViewModel @Inject constructor(
         disconnect()
     }
 
-    // Hold a strong reference to the registered handler so it can be unregistered
+    
 }
