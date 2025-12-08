@@ -90,6 +90,28 @@ android {
             output.outputFileName = newName
         }
     }
+
+    bundle {
+        language.enableSplit = true
+        density.enableSplit = true
+        abi.enableSplit = true
+    }
+
+    afterEvaluate {
+        tasks.whenTaskAdded { task ->
+            if (task.name == 'bundleRelease' || task.name == 'bundleDebug') {
+                task.doLast {
+                    def bundleDir = file("${buildDir}/outputs/bundle/${task.name.replace('bundle', '').toLowerCase()}")
+                    def oldBundle = new File(bundleDir, "app-${task.name.replace('bundle', '').toLowerCase()}.aab")
+                    if (oldBundle.exists()) {
+                        def newBundle = new File(bundleDir, "hisa-v${android.defaultConfig.versionName}-${task.name.replace('bundle', '').toLowerCase()}.aab")
+                        oldBundle.renameTo(newBundle)
+                        println "Renamed bundle: ${oldBundle.name} -> ${newBundle.name}"
+                    }
+                }
+            }
+        }
+    }
 }
 
 tasks.withType(org.jetbrains.kotlin.gradle.tasks.KotlinCompile).configureEach {
