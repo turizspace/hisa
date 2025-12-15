@@ -82,12 +82,12 @@ fun ServiceCard(
         shape = RoundedCornerShape(12.dp)
     ) {
         Column {
-            // Hero image area (optional) - clean and simple
+            // Hero image area - full width, prominent
             if (!imageUrl.isNullOrBlank()) {
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .height(120.dp)
+                        .height(160.dp)
                         .clip(RoundedCornerShape(topStart = 12.dp, topEnd = 12.dp))
                         .background(MaterialTheme.colorScheme.surfaceVariant)
                 ) {
@@ -97,30 +97,89 @@ fun ServiceCard(
                         modifier = Modifier.fillMaxSize(),
                         contentScale = ContentScale.Crop
                     )
+                    
+                    // Overlay gradient for better text visibility
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .background(
+                                Brush.verticalGradient(
+                                    colors = listOf(
+                                        Color.Transparent,
+                                        Color.Black.copy(alpha = 0.3f)
+                                    ),
+                                    startY = 80f
+                                )
+                            )
+                    )
                 }
             }
 
-            // Main content area - simplified with fixed heights for consistency
-            Column(modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp)) {
-                // Title - fixed height container for consistent card sizing
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(40.dp),
-                    contentAlignment = Alignment.TopStart
+            // Compact content area below image
+            Column(modifier = Modifier.padding(10.dp)) {
+                // Title chip - compact
+                Surface(
+                    color = MaterialTheme.colorScheme.primaryContainer,
+                    shape = RoundedCornerShape(8.dp)
                 ) {
                     Text(
                         text = service.title,
-                        style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
-                        color = MaterialTheme.colorScheme.onSurface,
-                        maxLines = 2,
-                        overflow = TextOverflow.Ellipsis
+                        style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold),
+                        color = MaterialTheme.colorScheme.onPrimaryContainer,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
                     )
                 }
 
                 Spacer(modifier = Modifier.height(6.dp))
 
-                // Price chip - in content area
+                // Tags row - smaller font
+                if (showTags) {
+                    val topicTags = service.rawTags.filter { it.isNotEmpty() && it[0] == "t" }
+                        .mapNotNull { it.getOrNull(1) as? String }
+                        .distinct()
+                    if (topicTags.isNotEmpty()) {
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(4.dp),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(24.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            topicTags.take(2).forEach { tag ->
+                                Surface(
+                                    color = MaterialTheme.colorScheme.primary.copy(alpha = 0.12f),
+                                    shape = RoundedCornerShape(12.dp),
+                                    tonalElevation = 0.dp
+                                ) {
+                                    Text(
+                                        text = if (tag.length > 10) tag.take(8) + ".." else tag,
+                                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                                        style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Medium),
+                                        color = MaterialTheme.colorScheme.primary
+                                    )
+                                }
+                            }
+                            if (topicTags.size > 2) {
+                                Surface(
+                                    color = MaterialTheme.colorScheme.surfaceVariant,
+                                    shape = RoundedCornerShape(12.dp)
+                                ) {
+                                    Text(
+                                        text = "+${topicTags.size - 2}",
+                                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                            }
+                        }
+                        Spacer(modifier = Modifier.height(4.dp))
+                    }
+                }
+
+                // Price chip
                 val priceChip = run {
                     val priceTag =
                         (service.tags as? List<*>)?.mapNotNull {
@@ -157,107 +216,62 @@ fun ServiceCard(
 
                 if (!priceChip.isNullOrBlank()) {
                     Surface(
-                        color = MaterialTheme.colorScheme.primary,
-                        shape = RoundedCornerShape(8.dp)
+                        color = MaterialTheme.colorScheme.primary.copy(alpha = 0.15f),
+                        shape = RoundedCornerShape(6.dp)
                     ) {
                         Text(
                             text = priceChip,
-                            color = MaterialTheme.colorScheme.onPrimary,
-                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
-                            style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.SemiBold)
+                            color = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 3.dp),
+                            style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.SemiBold)
                         )
                     }
-
-                    Spacer(modifier = Modifier.height(6.dp))
+                    Spacer(modifier = Modifier.height(4.dp))
                 }
 
-                // Summary/content preview - fixed height for consistency
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(24.dp),
-                    contentAlignment = Alignment.TopStart
-                ) {
-                    val summaryText = service.summary.takeIf { it.isNotBlank() }
-                    val contentPreview = service.content?.replace("\n", " ")?.trim()?.takeIf { it.isNotBlank() }
-
-                    if (!summaryText.isNullOrBlank()) {
+                // Location chip - below price
+                val location = service.rawTags
+                    .filter { it.isNotEmpty() && it[0] == "location" }
+                    .mapNotNull { it.getOrNull(1) as? String }
+                    .firstOrNull()
+                
+                if (!location.isNullOrBlank()) {
+                    Surface(
+                        color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.6f),
+                        shape = RoundedCornerShape(6.dp)
+                    ) {
                         Text(
-                            text = summaryText,
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurface,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                    } else if (!contentPreview.isNullOrBlank()) {
-                        Text(
-                            text = contentPreview,
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
+                            text = location.take(20) + if (location.length > 20) ".." else "",
+                            color = MaterialTheme.colorScheme.onSecondaryContainer,
+                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 3.dp),
+                            style = MaterialTheme.typography.labelSmall
                         )
                     }
+                    Spacer(modifier = Modifier.height(4.dp))
+                }
+
+                // Posted time chip - below location
+                val timeAgo = formatTimeAgo(service.createdAt)
+                Surface(
+                    color = MaterialTheme.colorScheme.tertiary.copy(alpha = 0.15f),
+                    shape = RoundedCornerShape(6.dp)
+                ) {
+                    Text(
+                        text = timeAgo,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 3.dp),
+                        style = MaterialTheme.typography.labelSmall
+                    )
                 }
 
                 Spacer(modifier = Modifier.height(6.dp))
 
-                // Tags (compact) - fixed height container
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(32.dp),
-                    contentAlignment = Alignment.TopStart
-                ) {
-                    if (showTags) {
-                        val topicTags = service.rawTags.filter { it.isNotEmpty() && it[0] == "t" }
-                            .mapNotNull { it.getOrNull(1) as? String }
-                            .distinct()
-                        if (topicTags.isNotEmpty()) {
-                            Row(
-                                horizontalArrangement = Arrangement.spacedBy(4.dp),
-                                modifier = Modifier.fillMaxWidth()
-                            ) {
-                                topicTags.take(2).forEach { tag ->
-                                    Surface(
-                                        color = MaterialTheme.colorScheme.primary.copy(alpha = 0.12f),
-                                        shape = RoundedCornerShape(16.dp),
-                                        tonalElevation = 0.dp
-                                    ) {
-                                        Text(
-                                            text = if (tag.length > 12) tag.take(10) + ".." else tag,
-                                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
-                                            style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Medium),
-                                            color = MaterialTheme.colorScheme.primary
-                                        )
-                                    }
-                                }
-                                if (topicTags.size > 2) {
-                                    Surface(
-                                        color = MaterialTheme.colorScheme.surfaceVariant,
-                                        shape = RoundedCornerShape(16.dp)
-                                    ) {
-                                        Text(
-                                            text = "+${topicTags.size - 2}",
-                                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
-                                            style = MaterialTheme.typography.labelSmall,
-                                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                                        )
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-
-                Spacer(modifier = Modifier.height(6.dp))
-
-                // Message button
+                // Message button - full width
                 Button(
                     onClick = { onMessageClick?.invoke(service.pubkey, metadata?.picture) },
                     modifier = Modifier
                         .fillMaxWidth()
-                        .height(36.dp),
+                        .height(32.dp),
                     colors = ButtonDefaults.buttonColors(
                         containerColor = MaterialTheme.colorScheme.primary,
                         contentColor = MaterialTheme.colorScheme.onPrimary
@@ -268,7 +282,7 @@ fun ServiceCard(
                     Icon(
                         imageVector = Icons.AutoMirrored.Filled.Message,
                         contentDescription = "Message Icon",
-                        modifier = Modifier.size(16.dp)
+                        modifier = Modifier.size(14.dp)
                     )
                     Spacer(modifier = Modifier.width(4.dp))
                     Text(
