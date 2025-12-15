@@ -22,6 +22,7 @@ import androidx.compose.material.icons.automirrored.filled.Message
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.ui.tooling.preview.Preview
@@ -75,7 +76,12 @@ fun ServiceCard(
                 shape = RoundedCornerShape(12.dp),
                 spotColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.08f)
             )
-            .clickable(enabled = onClick != null) { onClick?.invoke(service.eventId) },
+            .clickable(enabled = onClick != null) { onClick?.invoke(service.eventId) }
+            .border(
+                width = 1.dp,
+                color = Color.Gray,
+                shape = RoundedCornerShape(12.dp)
+            ),
         colors = CardDefaults.cardColors(
             containerColor = MaterialTheme.colorScheme.surface,
         ),
