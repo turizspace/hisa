@@ -15,6 +15,10 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.material3.Tab
 import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
+import androidx.compose.material3.BottomAppBar
+import androidx.compose.material.icons.filled.Feed
+import androidx.compose.material.icons.filled.Mail
+import androidx.compose.material.icons.filled.Groups
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -41,7 +45,11 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -105,7 +113,13 @@ fun MainScreen(
     }
     var searchQuery by remember { mutableStateOf("") }
     var showDialog by remember { mutableStateOf(showWelcomeDialog) }
-    val tabs = listOf("Feed", "Messages", "Channels")
+    val tabs = listOf("Feed", "Messages", "Channels", "Create")
+    val tabIcons = listOf(
+        Icons.Filled.Feed,
+        Icons.Filled.Mail,
+        Icons.Filled.Groups,
+        Icons.Filled.Add
+    )
     val drawerState = rememberDrawerState(DrawerValue.Closed)
     val scope = rememberCoroutineScope()
     val feedViewModel: FeedViewModel = hiltViewModel()
@@ -313,18 +327,78 @@ fun MainScreen(
                 )
             },
             floatingActionButton = {
-                // Show FAB only in Feed tab and when the feed list is scrolled to top
-                if (selectedTab == 0 && feedAtTop) {
-                    FloatingActionButton(
-                        onClick = { navController.navigate(Routes.CREATE_SERVICE) }
+                // FAB removed - Create is now a bottom tab
+            },
+            bottomBar = {
+                // Bottom navigation with stacked icon + label
+                BottomAppBar(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(72.dp),
+                    containerColor = MaterialTheme.colorScheme.surface,
+                    contentColor = MaterialTheme.colorScheme.onSurface,
+                    tonalElevation = 8.dp
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(72.dp),
+                        horizontalArrangement = Arrangement.SpaceEvenly,
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Icon(
-                            imageVector = Icons.Filled.Add,
-                            contentDescription = "Create New Service"
-                        )
+                        tabs.forEachIndexed { index, title ->
+                            val isSelected = selectedTab == index
+
+                            Column(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .fillMaxHeight()
+                                    .padding(vertical = 8.dp)
+                                    .clickable {
+                                        selectedTab = index
+                                        when (index) {
+                                            0 -> feedViewModel.subscribeToFeed()
+                                            1 -> messagesViewModel.getConversations()
+                                            2 -> {
+                                                // Channels tab handled in init
+                                            }
+                                            3 -> {
+                                                navController.navigate(Routes.CREATE_SERVICE)
+                                            }
+                                        }
+                                    },
+                                horizontalAlignment = Alignment.CenterHorizontally,
+                                verticalArrangement = Arrangement.Center
+                            ) {
+                                Icon(
+                                    imageVector = tabIcons[index],
+                                    contentDescription = title,
+                                    tint = if (isSelected)
+                                        MaterialTheme.colorScheme.primary
+                                    else
+                                        MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.size(24.dp)
+                                )
+
+                                Spacer(modifier = Modifier.height(2.dp))
+
+                                Text(
+                                    text = title,
+                                    style = MaterialTheme.typography.labelSmall.copy(
+                                        fontSize = MaterialTheme.typography.labelSmall.fontSize * 0.8f
+                                    ),
+                                    color = if (isSelected)
+                                        MaterialTheme.colorScheme.primary
+                                    else
+                                        MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 1
+                                )
+                            }
+                        }
+
                     }
                 }
-            },
+            }
         ) { innerPadding ->
             val focusManager = LocalFocusManager.current
             Column(modifier = Modifier
@@ -333,30 +407,8 @@ fun MainScreen(
                     detectTapGestures(onTap = { focusManager.clearFocus() })
                 }
             ) {
-
-                AnimatedVisibility(visible = feedAtTop, enter = fadeIn(), exit = fadeOut()) {
-                    TabRow(selectedTabIndex = selectedTab) {
-                    tabs.forEachIndexed { index, title ->
-                        Tab(
-                            selected = selectedTab == index,
-                            onClick = {
-                                selectedTab = index
-                                when (index) {
-                                    0 -> feedViewModel.subscribeToFeed()
-                                    1 -> messagesViewModel.getConversations()
-                                    2 -> {
-                                        // ChannelsViewModel subscribes once in its init; nothing required here
-                                    }
-                                }
-                            },
-                            text = { Text(title) }
-                        )
-                    }
-                    }
-                }
+                // TabRow moved to bottom as BottomAppBar with icons
                 
-                // SearchBar is now embedded in the TopAppBar title area
-
                 // Also handle programmatic tab changes
                 LaunchedEffect(selectedTab) {
                     when (selectedTab) {
@@ -368,6 +420,9 @@ fun MainScreen(
                             if (!restoredChannelsSearch.isNullOrEmpty()) {
                                 searchQuery = restoredChannelsSearch
                             }
+                        }
+                        3 -> {
+                            // Create tab handled via navigation
                         }
                     }
                 }
@@ -395,6 +450,10 @@ fun MainScreen(
                         // Pass the live searchQuery from the top bar so ChannelsTab updates immediately
                         searchQuery = searchQuery
                     )
+                    3 -> {
+                        // Create Service is handled via navigation in CREATE_SERVICE route
+                        // For now, show a placeholder or leave empty - navigation will handle it
+                    }
                 }
             }
         }
