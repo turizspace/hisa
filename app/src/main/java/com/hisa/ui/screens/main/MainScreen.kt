@@ -210,23 +210,7 @@ fun MainScreen(
                             contentDescription = "Profile Icon"
                         )
                     }
-                )
-                NavigationDrawerItem(
-                    label = { M3Text("My Shop") },
-                    selected = false,
-                    onClick = {
-                        scope.launch { drawerState.close() }
-                        navController.navigate(com.hisa.ui.navigation.Routes.SHOP)
-                    },
-                    modifier = Modifier,
-                    colors = NavigationDrawerItemDefaults.colors(),
-                    icon = {
-                        Icon(
-                            imageVector = Icons.Filled.ShoppingCart,
-                            contentDescription = "Shop Icon"
-                        )
-                    }
-                )
+                )                
                 NavigationDrawerItem(
                     label = { M3Text("Settings") },
                     selected = false,
