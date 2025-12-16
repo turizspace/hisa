@@ -37,6 +37,7 @@ import com.hisa.viewmodel.MessagesViewModel
 import com.hisa.data.nostr.NostrClient
 import com.hisa.data.nostr.SubscriptionManager
 import com.hisa.ui.screens.channels.ChannelChatScreen
+import com.hisa.ui.screens.shop.ShopScreen
 import com.hisa.ui.screens.donate.DonateScreen
 import com.hisa.ui.screens.lists.ChannelDetailScreen
 import com.hisa.ui.screens.faq.FAQScreen
@@ -54,6 +55,7 @@ object Routes {
     const val SERVICE_DETAIL = "serviceDetail/{eventId}/{pubkey}"
     const val CREATE_SERVICE = "createService"
     const val CREATE_CHANNEL = "createChannel"
+    const val SHOP = "shop"
     const val FAQ = "faq"
     const val DONATE = "donate"
     const val UPLOAD = "upload"
@@ -268,6 +270,10 @@ fun AppNavGraph(
             } else {
                 Text("Profile not found")
             }
+        }
+        // Shop route for user's shop
+        composable(Routes.SHOP) {
+            ShopScreen(navController = navController, userPubkey = pubKey)
         }
         // ...existing code...
         composable(Routes.SETTINGS) {

@@ -19,6 +19,7 @@ import androidx.compose.material3.BottomAppBar
 import androidx.compose.material.icons.filled.Feed
 import androidx.compose.material.icons.filled.Mail
 import androidx.compose.material.icons.filled.Groups
+import androidx.compose.material.icons.filled.ShoppingCart
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -67,6 +68,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.foundation.background
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.unit.dp
@@ -113,12 +115,14 @@ fun MainScreen(
     }
     var searchQuery by remember { mutableStateOf("") }
     var showDialog by remember { mutableStateOf(showWelcomeDialog) }
-    val tabs = listOf("Feed", "Messages", "Channels", "Create")
+    // Order changed so Create is in the middle and MyShop is at the end: Feed | Messages | Create | Channels | MyShop
+    val tabs = listOf("Feed", "Messages", "Create", "Channels", "My Shop")
     val tabIcons = listOf(
         Icons.Filled.Feed,
         Icons.Filled.Mail,
+        Icons.Filled.Add,
         Icons.Filled.Groups,
-        Icons.Filled.Add
+        Icons.Filled.ShoppingCart
     )
     val drawerState = rememberDrawerState(DrawerValue.Closed)
     val scope = rememberCoroutineScope()
@@ -204,6 +208,22 @@ fun MainScreen(
                         Icon(
                             imageVector = Icons.Default.PersonOutline,
                             contentDescription = "Profile Icon"
+                        )
+                    }
+                )
+                NavigationDrawerItem(
+                    label = { M3Text("My Shop") },
+                    selected = false,
+                    onClick = {
+                        scope.launch { drawerState.close() }
+                        navController.navigate(com.hisa.ui.navigation.Routes.SHOP)
+                    },
+                    modifier = Modifier,
+                    colors = NavigationDrawerItemDefaults.colors(),
+                    icon = {
+                        Icon(
+                            imageVector = Icons.Filled.ShoppingCart,
+                            contentDescription = "Shop Icon"
                         )
                     }
                 )
@@ -299,7 +319,7 @@ fun MainScreen(
                             onValueChange = { new ->
                                 searchQuery = new
                                 // Keep channels saved state in sync when user types while on Channels tab
-                                if (selectedTab == 2) {
+                                if (selectedTab == 3) {
                                     navController.currentBackStackEntry?.savedStateHandle?.set("channels_searchQuery", searchQuery)
                                 }
                             },
@@ -355,29 +375,51 @@ fun MainScreen(
                                     .fillMaxHeight()
                                     .padding(vertical = 8.dp)
                                     .clickable {
-                                        selectedTab = index
-                                        when (index) {
-                                            0 -> feedViewModel.subscribeToFeed()
-                                            1 -> messagesViewModel.getConversations()
-                                            2 -> {
-                                                // Channels tab handled in init
+                                            when (index) {
+                                                0 -> {
+                                                    selectedTab = 0
+                                                    feedViewModel.subscribeToFeed()
+                                                }
+                                                1 -> {
+                                                    selectedTab = 1
+                                                    messagesViewModel.getConversations()
+                                                }
+                                                2 -> {
+                                                    // Create - switch to Feed so returning lands on Feed, then navigate
+                                                    selectedTab = 0
+                                                    navController.navigate(Routes.CREATE_SERVICE)
+                                                }
+                                                3 -> {
+                                                    selectedTab = 3
+                                                    // Channels tab handled when selected (subscribe/restore)
+                                                }
+                                                4 -> {
+                                                    selectedTab = 4
+                                                    // MyShop tab - will show Shop inline
+                                                }
                                             }
-                                            3 -> {
-                                                navController.navigate(Routes.CREATE_SERVICE)
-                                            }
-                                        }
                                     },
                                 horizontalAlignment = Alignment.CenterHorizontally,
                                 verticalArrangement = Arrangement.Center
                             ) {
+                                val iconModifier = if (index == 2) {
+                                    Modifier
+                                        .size(48.dp)
+                                        .clip(CircleShape)
+                                        .background(if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant)
+                                        .padding(8.dp)
+                                } else {
+                                    Modifier.size(24.dp)
+                                }
+
                                 Icon(
                                     imageVector = tabIcons[index],
                                     contentDescription = title,
                                     tint = if (isSelected)
-                                        MaterialTheme.colorScheme.primary
+                                        MaterialTheme.colorScheme.onPrimary
                                     else
                                         MaterialTheme.colorScheme.onSurfaceVariant,
-                                    modifier = Modifier.size(24.dp)
+                                    modifier = iconModifier
                                 )
 
                                 Spacer(modifier = Modifier.height(2.dp))
@@ -415,14 +457,19 @@ fun MainScreen(
                         0 -> feedViewModel.subscribeToFeed()
                         1 -> messagesViewModel.getConversations()
                         2 -> {
+                            // Create tab handled via navigation
+                        }
+                        3 -> {
                             // When switching to Channels tab, restore any saved channel-specific search
                             val restoredChannelsSearch = navController.currentBackStackEntry?.savedStateHandle?.get<String>("channels_searchQuery")
                             if (!restoredChannelsSearch.isNullOrEmpty()) {
                                 searchQuery = restoredChannelsSearch
                             }
+                            // Ensure subscriptions for channels are active
+                            channelsViewModel.ensureSubscribed()
                         }
-                        3 -> {
-                            // Create tab handled via navigation
+                        4 -> {
+                            // MyShop tab selected (no-op)
                         }
                     }
                 }
@@ -441,7 +488,10 @@ fun MainScreen(
                         privateKey = privateKey,
                         messagesViewModel = messagesViewModel
                     )
-                    2 -> ChannelsTab(
+                    2 -> {
+                        // Create tab: navigation already performed on click; keep placeholder
+                    }
+                    3 -> ChannelsTab(
                         navController = navController,
                         userPubkey = userPubkey,
                         nostrClient = nostrClient,
@@ -450,9 +500,9 @@ fun MainScreen(
                         // Pass the live searchQuery from the top bar so ChannelsTab updates immediately
                         searchQuery = searchQuery
                     )
-                    3 -> {
-                        // Create Service is handled via navigation in CREATE_SERVICE route
-                        // For now, show a placeholder or leave empty - navigation will handle it
+                    4 -> {
+                        // MyShop tab: show inline ShopScreen (quick access)
+                        com.hisa.ui.screens.shop.ShopScreen(navController = navController, userPubkey = userPubkey)
                     }
                 }
             }
