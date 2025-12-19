@@ -92,4 +92,32 @@ object KeyGenerator {
     require(decoded.size == 32) { "Decoded nsec must be 32 bytes, got ${decoded.size}" }
     return decoded
     }
+
+    /**
+     * Convert a bech32 `npub` to a lowercase hex public key (32 bytes, 64 hex chars).
+     * Returns null if input is not a valid npub.
+     */
+    fun npubToPublicKey(npub: String): String? {
+        return try {
+            val bech = Bech32.decode(npub)
+            if (bech.hrp != "npub") return null
+            val data = bech.data
+            var acc = 0
+            var bits = 0
+            val out = mutableListOf<Byte>()
+            for (v in data) {
+                val value = v.toInt() and 0xff
+                acc = (acc shl 5) or value
+                bits += 5
+                while (bits >= 8) {
+                    bits -= 8
+                    out.add(((acc shr bits) and 0xff).toByte())
+                }
+            }
+            if (bits >= 5 || ((acc shl (8 - bits)) and 0xff) != 0) return null
+            out.joinToString("") { "%02x".format(it) }
+        } catch (e: Exception) {
+            null
+        }
+    }
 }
