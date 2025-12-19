@@ -376,8 +376,79 @@ class AuthViewModel @Inject constructor(
         // Subscribe via SubscriptionManager; the handler runs on SubscriptionManager's scope
         subscriptionManager.subscribeToPreferredRelays(pubkeyHex, onEvent = { event ->
             try {
-                // NIP-65: event content is newline-separated relays
-                val relays = event.content.split('\n').map { it.trim() }.filter { it.isNotBlank() }
+                // NIP-65: event content is typically a newline-separated list of relays
+                val raw = event.content
+                android.util.Log.i("AuthViewModel", "Received preferred-relays event for $pubkeyHex: $raw")
+
+                // Parse newline-separated relays; tolerate JSON array or space/comma separated lists as fallback
+                val relays = raw.split('\n')
+                    .flatMap { part ->
+                        val trimmed = part.trim()
+                        when {
+                            trimmed.startsWith("[") -> {
+                                // Try to parse JSON array (some relays may be encoded as JSON)
+                                try {
+                                    val arr = kotlinx.serialization.json.Json.parseToJsonElement(trimmed)
+                                    if (arr is kotlinx.serialization.json.JsonArray) {
+                                        arr.mapNotNull { el -> el.toString().removeSurrounding("\"").trim().takeIf { it.isNotBlank() } }
+                                    } else listOf(trimmed)
+                                } catch (_: Exception) { listOf(trimmed) }
+                            }
+                            trimmed.contains(',') -> trimmed.split(',').map { it.trim() }
+                            trimmed.contains(' ') -> trimmed.split(' ').map { it.trim() }
+                            else -> listOf(trimmed)
+                        }
+                    }
+                    .map { it.trim() }
+                    .filter { it.isNotBlank() }
+
+                android.util.Log.i("AuthViewModel", "Parsed preferred relays for $pubkeyHex: $relays")
+
+                // If no relays found in content, try to extract relay URLs from tags
+                if (relays.isEmpty()) {
+                    try {
+                        val tagRelays = event.tags.flatMap { tag ->
+                            // tag is a List<String>, look for any element that looks like a URL
+                            tag.filter { it.startsWith("ws://") || it.startsWith("wss://") || it.startsWith("http://") || it.startsWith("https://") }
+                        }.map { it.trim() }.filter { it.isNotBlank() }.distinct()
+
+                        if (tagRelays.isNotEmpty()) {
+                            android.util.Log.i("AuthViewModel", "Parsed preferred relays for $pubkeyHex from tags: $tagRelays")
+                        }
+
+                        // Merge tag-based relays into parsed relays list
+                        val merged = (relays + tagRelays).distinct()
+                        if (merged.isNotEmpty()) {
+                            // assign merged relays to relays variable
+                            // Note: we shadow the earlier val `relays` by creating a new list to use below
+                            val finalRelays = merged
+                            android.util.Log.i("AuthViewModel", "Final preferred relays for $pubkeyHex: $finalRelays")
+                            // Persist and apply below using finalRelays
+                            // Persist to secure prefs and fallback
+                            try {
+                                sharedPrefs?.edit()?.putString(RELAYS_KEY, finalRelays.joinToString("\n"))?.apply()
+                            } catch (e: Exception) {
+                                android.util.Log.w("AuthViewModel", "Failed to persist relays from NIP-65 (tags): ${e.localizedMessage}")
+                            }
+                            try {
+                                val fallback = getApplication<Application>().applicationContext.getSharedPreferences("secure_prefs_fallback", android.content.Context.MODE_PRIVATE)
+                                fallback.edit().putString(RELAYS_KEY, finalRelays.joinToString("\n"))?.apply()
+                            } catch (e: Exception) {
+                                android.util.Log.w("AuthViewModel", "Failed to persist relays to fallback prefs (tags): ${e.localizedMessage}")
+                            }
+                            _relays.value = finalRelays
+                            try {
+                                nostrClient.updateRelays(finalRelays)
+                            } catch (e: Exception) {
+                                android.util.Log.w("AuthViewModel", "Failed to update NostrClient relays from NIP-65 tags: ${e.localizedMessage}")
+                            }
+                            // Skip the original content-based persistence below since we've handled it here
+                            return@subscribeToPreferredRelays
+                        }
+                    } catch (e: Exception) {
+                        android.util.Log.w("AuthViewModel", "Error parsing relays from tags: ${e.localizedMessage}")
+                    }
+                }
                 if (relays.isNotEmpty()) {
                     // Persist to secure prefs and fallback
                     try {
@@ -529,11 +600,17 @@ class AuthViewModel @Inject constructor(
      */
     fun updateKeyFromExternal(pubkeyHex: String) {
         try {
-            _pubKey.value = pubkeyHex
+            // Normalize incoming pubkey: accept bech32 `npub` or raw hex. Persist hex form.
+            val normalized = if (pubkeyHex.startsWith("npub", true)) {
+                com.hisa.util.KeyGenerator.npubToPublicKey(pubkeyHex) ?: pubkeyHex
+            } else pubkeyHex
+
+            _pubKey.value = normalized
             // No private key is available when using external signer
             _privateKey.value = null
             try {
-                sharedPrefs?.edit()?.putString("external_signer_pubkey", pubkeyHex)?.apply()
+                // Persist the normalized (hex) pubkey for downstream consumers
+                sharedPrefs?.edit()?.putString("external_signer_pubkey", normalized)?.apply()
             } catch (e: Exception) {
                 android.util.Log.w("AuthViewModel", "Failed to persist external signer pubkey: ${e.localizedMessage}")
             }
@@ -588,6 +665,15 @@ class AuthViewModel @Inject constructor(
                     }
                 } catch (e: Exception) {
                     android.util.Log.w("AuthViewModel", "Failed to configure ExternalSignerManager: ${e.localizedMessage}")
+                }
+                // Attempt to fetch preferred relays for external-signer logins as well.
+                try {
+                    val pubForRelays = (sharedPrefs?.getString("external_signer_pubkey", null) ?: _pubKey.value)
+                    if (!pubForRelays.isNullOrBlank()) {
+                        subscribeToPreferredRelays(pubForRelays)
+                    }
+                } catch (e: Exception) {
+                    android.util.Log.w("AuthViewModel", "Failed to subscribe to preferred relays after external signer login: ${e.localizedMessage}")
                 }
             } catch (e: Exception) {
                 android.util.Log.e("AuthViewModel", "Error logging in with external signer", e)
