@@ -26,6 +26,9 @@ import com.hisa.data.model.ServiceListing
 import androidx.navigation.NavController
 
 import androidx.compose.ui.tooling.preview.Preview
+import com.hisa.ui.components.CategoryChipRow
+import com.hisa.ui.components.SectionedFeed
+import com.hisa.ui.components.FeedSkeleton
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Text
 import androidx.compose.runtime.LaunchedEffect
@@ -73,109 +76,125 @@ fun FeedTab(
     }
 
     Column(modifier = Modifier.fillMaxSize()) {
-    // Categories horizontal scroll (topic tags) - hide when a search is active
-    if (categories.isNotEmpty() && searchText.isEmpty()) {
-            Row(
-                modifier = Modifier
-                    .horizontalScroll(rememberScrollState())
-                    .padding(horizontal = 8.dp, vertical = 4.dp)
-            ) {
-                FilterChip(
-                    selected = selectedCategory == null,
-                    onClick = {
-                        selectedCategory = null
-                        feedViewModel.setSelectedCategory(null)
-                    },
-                    label = { Text("All") }
-                )
-
-                categories.forEach { category ->
-                    FilterChip(
-                        selected = selectedCategory == category,
-                        onClick = {
-                            selectedCategory = category
-                            feedViewModel.setSelectedCategory(category)
-                        },
-                        label = { Text(category) },
-                        modifier = Modifier.padding(start = 4.dp)
-                    )
+        // Categories horizontal scroll (topic tags) - hide when a search is active
+        if (categories.isNotEmpty() && searchText.isEmpty()) {
+            CategoryChipRow(
+                categories = categories,
+                selectedCategory = selectedCategory,
+                onSelect = { cat ->
+                    selectedCategory = cat
+                    feedViewModel.setSelectedCategory(cat)
                 }
+            )
+        }
+
+        // When loading, show skeletons
+        if (isLoading) {
+            FeedSkeleton(modifier = Modifier.fillMaxWidth())
+            return@Column
+        }
+
+        // Build sorted and filtered services
+        val sortedServices = services.sortedByDescending { it.createdAt }
+        val filteredBySearch = if (searchText.isEmpty()) {
+            sortedServices
+        } else {
+            sortedServices.filter { service ->
+                service.title.contains(searchText, ignoreCase = true) ||
+                        (service.summary ?: "").contains(searchText, ignoreCase = true) ||
+                        service.tags.any { it.contains(searchText, ignoreCase = true) }
             }
         }
-    // No shimmer animation; use static placeholders when loading
 
-    LazyVerticalGrid(
-            columns = GridCells.Fixed(2),
-            state = gridState,
-            contentPadding = androidx.compose.foundation.layout.PaddingValues(
-                horizontal = 8.dp,
-                vertical = 8.dp
-            ),
-            horizontalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(8.dp),
-            verticalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(8.dp),
-            modifier = Modifier.fillMaxSize()
-        ) {
-            // Always render whatever services are available; no shimmer or brush.
-            // Show newest services first by sorting descending on createdAt,
-            // then apply the search filter and category filter on the sorted list.
-            val sortedServices = services.sortedByDescending { it.createdAt }
-            val filteredBySearch = if (searchText.isEmpty()) {
-                sortedServices
-            } else {
-                sortedServices.filter { service ->
-                    service.title.contains(searchText, ignoreCase = true) ||
-                    service.summary.contains(searchText, ignoreCase = true) ||
-                    service.tags.any { it.contains(searchText, ignoreCase = true) }
-                }
-            }
-
-            val filteredServices = if (selectedCategory.isNullOrBlank()) {
-                filteredBySearch
-            } else {
-                filteredBySearch.filter { service ->
-                    // match topic tags (rawTags with "t") to selectedCategory
-                    val topicTags = service.rawTags.filter { it.isNotEmpty() && it[0] == "t" }
-                        .mapNotNull { it.getOrNull(1) as? String }
-                    topicTags.contains(selectedCategory)
-                }
-            }
-            items(
-                items = filteredServices,
-                key = { "${it.eventId}.${it.pubkey}" } // Making key unique by combining eventId and pubkey (dot-separated to match ServiceCard)
-            ) { service ->
-                // Determine whether to show topic tags for this service while searching.
-                val topicTagsForService = service.rawTags.filter { it.isNotEmpty() && it[0] == "t" }
+        val filteredServices = if (selectedCategory.isNullOrBlank()) {
+            filteredBySearch
+        } else {
+            filteredBySearch.filter { service ->
+                val topicTags = service.rawTags.filter { it.isNotEmpty() && it[0] == "t" }
                     .mapNotNull { it.getOrNull(1) as? String }
-                val showTags = if (searchText.isEmpty()) {
-                    true
-                } else {
-                    // Only show tags if any topic tag contains the search query
-                    topicTagsForService.any { it.contains(searchText, ignoreCase = true) }
-                }
+                topicTags.contains(selectedCategory)
+            }
+        }
 
-                ServiceCard(
-                    service = service,
-                    showTags = showTags,
-                    onClick = {
-                        ServiceRepository.cacheService(service)
-                        navController.navigate(
-                            Routes.SERVICE_DETAIL
-                                .replace("{eventId}", service.eventId)
-                                .replace("{pubkey}", service.pubkey)
-                        )
-                        // Persist UI search/category so when user navigates back we can restore
-                        navController.currentBackStackEntry?.savedStateHandle?.apply {
-                            set("feed_searchQuery", searchText)
-                            set("feed_selectedCategory", selectedCategory)
-                        }
-                    },
-                    onMessageClick = { pubkey, profilePicture ->
-                        navController.navigate(
-                            Routes.DM
-                                .replace("{pubkey}", pubkey)
-                        )
+        // If not searching and there are categories, show sectioned horizontal feed
+        if (searchText.isEmpty() && filteredServices.isNotEmpty()) {
+            val grouped = filteredServices.groupBy { service ->
+                val topicTags = service.rawTags.filter { it.isNotEmpty() && it[0] == "t" }
+                    .mapNotNull { it.getOrNull(1) as? String }
+                topicTags.firstOrNull() ?: "Uncategorized"
+            }
+
+            SectionedFeed(
+                grouped = grouped,
+                onItemClick = { service ->
+                    ServiceRepository.cacheService(service)
+                    navController.navigate(
+                        Routes.SERVICE_DETAIL
+                            .replace("{eventId}", service.eventId)
+                            .replace("{pubkey}", service.pubkey)
+                    )
+                    navController.currentBackStackEntry?.savedStateHandle?.apply {
+                        set("feed_searchQuery", searchText)
+                        set("feed_selectedCategory", selectedCategory)
                     }
-                )
+                },
+                onSeeAll = { category ->
+                    selectedCategory = category
+                    feedViewModel.setSelectedCategory(category)
+                },
+                onMessageClick = { pubkey ->
+                    navController.navigate(Routes.DM.replace("{pubkey}", pubkey))
+                },
+                modifier = Modifier.fillMaxWidth()
+            )
+        } else {
+            // Fall back to a two-column grid for search results or empty-category views
+            LazyVerticalGrid(
+                columns = GridCells.Fixed(2),
+                state = gridState,
+                contentPadding = androidx.compose.foundation.layout.PaddingValues(
+                    horizontal = 8.dp,
+                    vertical = 8.dp
+                ),
+                horizontalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(8.dp),
+                verticalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(8.dp),
+                modifier = Modifier.fillMaxSize()
+            ) {
+                items(
+                    items = filteredServices,
+                    key = { "${it.eventId}.${it.pubkey}" }
+                ) { service ->
+                    val topicTagsForService = service.rawTags.filter { it.isNotEmpty() && it[0] == "t" }
+                        .mapNotNull { it.getOrNull(1) as? String }
+                    val showTags = if (searchText.isEmpty()) {
+                        true
+                    } else {
+                        topicTagsForService.any { it.contains(searchText, ignoreCase = true) }
+                    }
+
+                    ServiceCard(
+                        service = service,
+                        showTags = showTags,
+                        onClick = {
+                            ServiceRepository.cacheService(service)
+                            navController.navigate(
+                                Routes.SERVICE_DETAIL
+                                    .replace("{eventId}", service.eventId)
+                                    .replace("{pubkey}", service.pubkey)
+                            )
+                            navController.currentBackStackEntry?.savedStateHandle?.apply {
+                                set("feed_searchQuery", searchText)
+                                set("feed_selectedCategory", selectedCategory)
+                            }
+                        },
+                        onMessageClick = { pubkey, profilePicture ->
+                            navController.navigate(
+                                Routes.DM
+                                    .replace("{pubkey}", pubkey)
+                            )
+                        }
+                    )
+                }
             }
         }
     }
