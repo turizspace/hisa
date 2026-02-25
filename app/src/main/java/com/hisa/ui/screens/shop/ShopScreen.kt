@@ -20,7 +20,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.navigation.NavController
 import com.hisa.data.repository.ServiceRepository
-import com.hisa.ui.components.ServiceCard
+import com.hisa.ui.components.CompactServiceCard
 import com.hisa.util.cleanPubkeyFormat
 import org.bitcoinj.core.Bech32
 
@@ -83,17 +83,21 @@ fun ShopScreen(
             } else {
                 LazyColumn(modifier = Modifier.padding(horizontal = 4.dp)) {
                     items(myListings.sortedByDescending { it.createdAt }, key = { it.eventId }) { service ->
-                        ServiceCard(service = service, showTags = true, onClick = { eventId ->
-                            // navigate to service detail
-                            val route = com.hisa.ui.navigation.Routes.SERVICE_DETAIL
-                                .replace("{eventId}", eventId)
-                                .replace("{pubkey}", service.pubkey)
-                            navController.navigate(route)
-                        }, onMessageClick = { pubkey, _ ->
-                            // open DM with the service author
-                            val target = cleanPubkeyFormat(pubkey ?: service.pubkey)
-                            navController.navigate("dm/$target")
-                        })
+                        CompactServiceCard(
+                            service = service,
+                            onClick = {
+                                // navigate to service detail
+                                val route = com.hisa.ui.navigation.Routes.SERVICE_DETAIL
+                                    .replace("{eventId}", service.eventId)
+                                    .replace("{pubkey}", service.pubkey)
+                                navController.navigate(route)
+                            },
+                            onMessageClick = { pubkey ->
+                                // open DM with the service author
+                                val target = cleanPubkeyFormat(pubkey ?: service.pubkey)
+                                navController.navigate("dm/$target")
+                            }
+                        )
                     }
                 }
             }
