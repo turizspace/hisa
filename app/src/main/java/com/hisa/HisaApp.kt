@@ -1,7 +1,7 @@
 package com.hisa
 
 import android.app.Application
-import com.google.android.datatransport.BuildConfig
+// import com.hisa.BuildConfig
 import dagger.hilt.android.HiltAndroidApp
 import javax.inject.Inject
 import com.hisa.data.nostr.NostrClient
@@ -24,20 +24,10 @@ class HisaApp : Application() {
     override fun onCreate() {
         super.onCreate()
         // Hilt will automatically inject the dependencies
-        // Initialize Timber. Debug builds get a DebugTree, release builds get a no-op tree.
-        if (BuildConfig.DEBUG) {
-            Timber.plant(Timber.DebugTree())
-        } else {
-            // No-op: prevents logging sensitive data in production
-            Timber.plant(object : Timber.Tree() {
-                override fun isLoggable(tag: String?, priority: Int): Boolean {
-                    return false
-                }
-                override fun log(priority: Int, tag: String?, message: String, t: Throwable?) {
-                    // Intentionally no-op in release
-                }
-            })
-        }
+        // Use unconditional Timber debug planting during development to ensure logs are visible
+        // Initialize Timber with DebugTree for local debugging.
+        // NOTE: In production builds you may want to restore a release/no-op tree.
+        Timber.plant(Timber.DebugTree())
         
         // Debug: Monitor connection state
         // Route all incoming WS messages through the SubscriptionManager so
