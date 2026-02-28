@@ -4,6 +4,7 @@ import android.os.Build
 import androidx.annotation.RequiresApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -23,6 +24,7 @@ import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import coil.compose.AsyncImage
 import java.time.Instant
+import java.util.UUID
 
 val predefinedTags = listOf(
     "cleaning",
@@ -53,15 +55,15 @@ fun CreateServiceScreen(
     var price by rememberSaveable { mutableStateOf("") }
     var currency by rememberSaveable { mutableStateOf("USD") }
     var frequency by rememberSaveable { mutableStateOf<String?>(null) }
-    // Keep selected tags as a saveable List<String> and derive a Set when needed
     var selectedTagsList by rememberSaveable { mutableStateOf(listOf<String>()) }
-    var selectedImageUrl by rememberSaveable { mutableStateOf<String?>(null) }
+    var selectedImageUrls by rememberSaveable { mutableStateOf(listOf<String>()) }
+    var dTag by rememberSaveable { mutableStateOf<String?>(null) }
     val ctx = LocalContext.current
 
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("Create New Listing") },
+                title = { Text(if (dTag != null) "Edit Listing" else "Create New Listing") },
                 navigationIcon = {
                     IconButton(onClick = onNavigateBack) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back")
@@ -78,7 +80,9 @@ fun CreateServiceScreen(
                 Button(
                     onClick = {
                         // Create NIP-99 compliant event
+                        val dValue = dTag?.takeIf { it.isNotBlank() } ?: UUID.randomUUID().toString()
                         val tags = mutableListOf<List<String>>().apply {
+                            add(listOf("d", dValue))
                             add(listOf("title", title))
                             add(listOf("summary", summary))
                             add(listOf("published_at", Instant.now().epochSecond.toString()))
@@ -93,9 +97,11 @@ fun CreateServiceScreen(
                             selectedTagsList.forEach { tag ->
                                 add(listOf("t", tag))
                             }
-                            selectedImageUrl?.let { url ->
-                                // Use uploaded image URL and add image tag
-                                add(listOf("image", url))
+                            // Add all uploaded image URLs as individual image tags (no dimensions)
+                            if (selectedImageUrls.isNotEmpty()) {
+                                selectedImageUrls.forEach { url ->
+                                    add(listOf("image", url))
+                                }
                             }
                         }
 
@@ -105,6 +111,16 @@ fun CreateServiceScreen(
                             description,
                             tags
                         ) {
+                            // Persist the dValue so future edits reuse the same replaceable key
+                            try {
+                                val current = navController?.currentBackStackEntry
+                                val previous = navController?.previousBackStackEntry
+                                listOf(current, previous).forEach { entry ->
+                                    try {
+                                        entry?.savedStateHandle?.set("edit_service_d", dValue)
+                                    } catch (_: Exception) {}
+                                }
+                            } catch (_: Exception) {}
                             onNavigateBack()
                         }
                     },
@@ -118,10 +134,10 @@ fun CreateServiceScreen(
                     ),
                     shape = MaterialTheme.shapes.medium
                 ) {
-                    Icon(Icons.Default.Send, contentDescription = "Post")
+                    Icon(Icons.Default.Send, contentDescription = if (dTag != null) "Update" else "Post")
                     Spacer(modifier = Modifier.width(8.dp))
                     Text(
-                        "Post Service",
+                        if (dTag != null) "Update Service" else "Post Service",
                         style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold)
                     )
                 }
@@ -343,6 +359,29 @@ fun CreateServiceScreen(
                         }
                     }
 
+                    Spacer(modifier = Modifier.height(12.dp))
+
+                    // Free-form tag input so users can add their own categories/hashtags
+                    var newTag by rememberSaveable { mutableStateOf("") }
+                    Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                        OutlinedTextField(
+                            value = newTag,
+                            onValueChange = { newTag = it },
+                            label = { Text("Add category / tag") },
+                            modifier = Modifier.weight(1f)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Button(onClick = {
+                            val trimmed = newTag.trim().lowercase()
+                            if (trimmed.isNotBlank() && trimmed !in selectedTagsList) {
+                                selectedTagsList = selectedTagsList + trimmed
+                                newTag = ""
+                            }
+                        }) {
+                            Text("Add")
+                        }
+                    }
+
                     Spacer(modifier = Modifier.height(16.dp))
 
                     // Centralized media flow: navigate to Upload screen (consistent with other create flows)
@@ -380,23 +419,95 @@ fun CreateServiceScreen(
                         }
                     }
 
-                    if (!selectedImageUrl.isNullOrBlank()) {
+                    if (selectedImageUrls.isNotEmpty()) {
                         Spacer(modifier = Modifier.height(8.dp))
-                        AsyncImage(
-                            model = selectedImageUrl,
-                            contentDescription = "Selected Image",
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .height(200.dp)
-                        )
+                        Box(modifier = Modifier.fillMaxWidth().height(200.dp)) {
+                            AsyncImage(
+                                model = selectedImageUrls.first(),
+                                contentDescription = "Selected Image",
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(200.dp)
+                            )
+                            // Close X to allow user to replace the image(s)
+                            IconButton(
+                                onClick = { selectedImageUrls = emptyList() },
+                                modifier = Modifier.align(Alignment.TopEnd)
+                            ) {
+                                Icon(imageVector = Icons.Default.Close, contentDescription = "Remove image")
+                            }
+                        }
                     }
                 }
             }
         }
     }
 
-    // Listen for uploaded_media_url result and apply to selectedImageUrl when appropriate
+    // Listen for uploaded_media_url result and apply to selectedImageUrls when appropriate
     LaunchedEffect(navController) {
+            // Check for edit payload in savedStateHandle (current or previous entry) and prefill form
+        try {
+            val currentHandle = navController?.currentBackStackEntry?.savedStateHandle
+            val prevHandle = navController?.previousBackStackEntry?.savedStateHandle
+            val editD = currentHandle?.get<String>("edit_service_d") ?: prevHandle?.get<String>("edit_service_d")
+            val etitle = currentHandle?.get<String>("edit_service_title") ?: prevHandle?.get<String>("edit_service_title")
+            val esummary = currentHandle?.get<String>("edit_service_summary") ?: prevHandle?.get<String>("edit_service_summary")
+            val edesc = currentHandle?.get<String>("edit_service_description") ?: prevHandle?.get<String>("edit_service_description")
+            val etags = currentHandle?.get<String>("edit_service_tags") ?: prevHandle?.get<String>("edit_service_tags")
+            val eimages = currentHandle?.get<String>("edit_service_image_urls") ?: prevHandle?.get<String>("edit_service_image_urls")
+            val eprice = currentHandle?.get<String>("edit_service_price") ?: prevHandle?.get<String>("edit_service_price")
+            val ecurrency = currentHandle?.get<String>("edit_service_currency") ?: prevHandle?.get<String>("edit_service_currency")
+            val efrequency = currentHandle?.get<String>("edit_service_frequency") ?: prevHandle?.get<String>("edit_service_frequency")
+            val elocation = currentHandle?.get<String>("edit_service_location") ?: prevHandle?.get<String>("edit_service_location")
+            if (!editD.isNullOrBlank()) {
+                dTag = editD
+                title = etitle ?: title
+                summary = esummary ?: summary
+                description = edesc ?: description
+                // parse tags JSON if present
+                if (!etags.isNullOrBlank()) {
+                    try {
+                        val arr = org.json.JSONArray(etags)
+                        val tlist = mutableListOf<String>()
+                        for (i in 0 until arr.length()) {
+                            val inner = arr.getJSONArray(i)
+                            if (inner.length() > 0) {
+                                val key = inner.optString(0, "")
+                                if (key == "t") {
+                                    val v = inner.optString(1, "")
+                                    if (v.isNotBlank()) tlist.add(v)
+                                }
+                            }
+                        }
+                        if (tlist.isNotEmpty()) selectedTagsList = tlist
+                    } catch (_: Exception) {}
+                }
+                if (!eimages.isNullOrBlank()) {
+                    selectedImageUrls = eimages.split('\n').map { it.trim() }.filter { it.isNotBlank() }
+                }
+                // Prefill price/currency/frequency/location if present
+                try { if (!eprice.isNullOrBlank()) price = eprice } catch (_: Exception) {}
+                try { if (!ecurrency.isNullOrBlank()) currency = ecurrency } catch (_: Exception) {}
+                try { if (!efrequency.isNullOrBlank()) frequency = efrequency } catch (_: Exception) {}
+                try { if (!elocation.isNullOrBlank()) location = elocation } catch (_: Exception) {}
+                // Clean saved payload so subsequent opens are fresh
+                try {
+                    currentHandle?.remove<String>("edit_service_d")
+                    currentHandle?.remove<String>("edit_service_title")
+                    currentHandle?.remove<String>("edit_service_summary")
+                    currentHandle?.remove<String>("edit_service_description")
+                    currentHandle?.remove<String>("edit_service_tags")
+                    currentHandle?.remove<String>("edit_service_image_urls")
+                    prevHandle?.remove<String>("edit_service_d")
+                    prevHandle?.remove<String>("edit_service_title")
+                    prevHandle?.remove<String>("edit_service_summary")
+                    prevHandle?.remove<String>("edit_service_description")
+                    prevHandle?.remove<String>("edit_service_tags")
+                    prevHandle?.remove<String>("edit_service_image_urls")
+                } catch (_: Exception) {}
+            }
+        } catch (_: Exception) {}
+
         val saved = navController?.currentBackStackEntry?.savedStateHandle?.getLiveData<String>("uploaded_media_url")
         saved?.observeForever { url ->
             if (!url.isNullOrBlank()) {
@@ -404,14 +515,14 @@ fun CreateServiceScreen(
                 if (parts.isNotEmpty()) {
                     val target = navController.currentBackStackEntry?.savedStateHandle?.get<String>("upload_target") ?: ""
                     if (target == "service_image") {
-                        // If no image yet, set first returned URL as the image; otherwise append new URLs to description
-                        if (selectedImageUrl.isNullOrBlank()) {
-                            selectedImageUrl = parts[0]
+                        // Merge new uploaded URLs into the selected list and append extras to description
+                        if (selectedImageUrls.isEmpty()) {
+                            selectedImageUrls = parts
                             if (parts.size > 1) {
                                 description = description + "\n" + parts.drop(1).joinToString("\n")
                             }
                         } else {
-                            // already have an image; append all returned URLs to description
+                            // Already have images: append all returned URLs to description
                             description = description + "\n" + parts.joinToString("\n")
                         }
                     }

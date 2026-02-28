@@ -68,7 +68,7 @@ fun MessagesTab(
 
     val conversations = remember(allMessages) { messagesViewModel.getConversations() }
 
-    if (showLoading) {
+    if (isLoading) {
         TabLoadingPlaceholder(
             title = "Loading Messages",
             subtitle = "Decrypting and syncing your conversations"
@@ -82,31 +82,24 @@ fun MessagesTab(
             val messages = entry.value
             
             var metadata by remember(otherPubkey) { mutableStateOf<com.hisa.data.model.Metadata?>(null) }
-            var loading by remember(otherPubkey) { mutableStateOf(true) }
             val profileMetaUtil = LocalProfileMetaUtil.current
             
             LaunchedEffect(otherPubkey) {
-                loading = true
                 profileMetaUtil.fetchProfileMetadata(otherPubkey) { result ->
                     metadata = result
-                    loading = false
                 }
             }
             
             ListItem(
                 headlineContent = {
-                    if (loading) {
-                        CircularProgressIndicator(modifier = Modifier)
+                    val fallback = if (otherPubkey == "unknown") {
+                        "Unknown sender"
+                    } else if (otherPubkey.length > 12) {
+                        "${otherPubkey.take(12)}..."
                     } else {
-                        val fallback = if (otherPubkey == "unknown") {
-                            "Unknown sender"
-                        } else if (otherPubkey.length > 12) {
-                            "${otherPubkey.take(12)}..."
-                        } else {
-                            otherPubkey
-                        }
-                        Text(metadata?.name ?: fallback)
+                        otherPubkey
                     }
+                    Text(metadata?.name ?: fallback)
                 },
                 supportingContent = { 
                     Text(when (val lastMessage = messages.firstOrNull()) {

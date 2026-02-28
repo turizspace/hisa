@@ -12,6 +12,8 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Message
+import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
@@ -60,6 +62,8 @@ fun SectionedFeed(
     onItemClick: (ServiceListing) -> Unit,
     onSeeAll: (String) -> Unit,
     onMessageClick: (String) -> Unit = {},
+    onEdit: (ServiceListing) -> Unit = {},
+    onDelete: (ServiceListing) -> Unit = {},
     modifier: Modifier = Modifier,
     userPubkey: String? = null // Current user's pubkey to check if service is user's own
 ) {
@@ -90,7 +94,9 @@ fun SectionedFeed(
                             CompactServiceCard(
                                 service = service,
                                 onClick = { onItemClick(service) },
-                                onMessageClick = { pubkey -> onMessageClick(pubkey) },
+                                        onMessageClick = { pubkey -> onMessageClick(pubkey) },
+                                        onEdit = { svc -> onEdit(svc) },
+                                        onDelete = { svc -> onDelete(svc) },
                                 userPubkey = userPubkey
                             )
                         }
@@ -122,6 +128,8 @@ fun CompactServiceCard(
     service: ServiceListing,
     onClick: () -> Unit = {},
     onMessageClick: (String) -> Unit = {},
+    onEdit: (ServiceListing) -> Unit = {},
+    onDelete: (ServiceListing) -> Unit = {},
     userPubkey: String? = null // Current user's pubkey to check if service is user's own
 ) {
     Card(
@@ -227,7 +235,7 @@ fun CompactServiceCard(
 
                     Spacer(modifier = Modifier.weight(1f))
 
-                    // Message button - hidden if this is the user's own listing
+                    // Message and Edit buttons - show Edit when this is the user's own listing
                     val isOwnListing = userPubkey?.let { it == service.pubkey } ?: false
                     if (!isOwnListing) {
                         IconButton(
@@ -240,6 +248,32 @@ fun CompactServiceCard(
                                 contentDescription = "Message",
                                 modifier = Modifier.size(16.dp)
                             )
+                        }
+                    } else {
+                        // Edit button for owner's own listing
+                        Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                            IconButton(
+                                onClick = { onEdit(service) },
+                                modifier = Modifier.size(28.dp),
+                                colors = IconButtonDefaults.iconButtonColors(contentColor = MaterialTheme.colorScheme.primary)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Filled.Edit,
+                                    contentDescription = "Edit",
+                                    modifier = Modifier.size(16.dp)
+                                )
+                            }
+                            IconButton(
+                                onClick = { onDelete(service) },
+                                modifier = Modifier.size(28.dp),
+                                colors = IconButtonDefaults.iconButtonColors(contentColor = MaterialTheme.colorScheme.error)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Filled.Delete,
+                                    contentDescription = "Delete",
+                                    modifier = Modifier.size(16.dp)
+                                )
+                            }
                         }
                     }
                 }
