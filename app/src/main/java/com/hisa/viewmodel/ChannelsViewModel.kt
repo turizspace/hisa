@@ -57,6 +57,11 @@ class ChannelsViewModel(
     val participantCounts: StateFlow<Map<String, Int>> = _participantCounts.asStateFlow()
     // track per-channel subscription ids so we can unsubscribe when needed
     private val channelMessageSubs = ConcurrentHashMap<String, String>()
+    // Track which channels have completed their per-channel message loading
+    private val channelLoadingStates = ConcurrentHashMap<String, Boolean>()
+    private val channelEoseLock = Any()
+    @Volatile
+    private var mainChannelsEoseReceived = false
     private val loadStateLock = Any()
     @Volatile
     private var awaitingInitialEose: Boolean = false
@@ -93,7 +98,12 @@ class ChannelsViewModel(
                         }
                     },
                     onEndOfStoredEvents = {
-                        finalizeInitialLoadBatch("eose")
+                        // Main channels subscription (kinds 40, 41) has completed
+                        synchronized(channelEoseLock) {
+                            mainChannelsEoseReceived = true
+                        }
+                        // Check if all per-channel subscriptions are also done
+                        checkIfAllChannelsLoaded()
                     }
                 )
             } catch (e: Exception) {
@@ -140,13 +150,14 @@ class ChannelsViewModel(
                 createdAt = event.createdAt
             )
             channelsMap[event.id] = channel
-            if (!isInitialLoadBatchActive()) {
-                updateChannelsList()
-                updateCategories()
-            }
-            // Start a messages subscription for this channel to track participants
+            
+            // During initial load, DON'T create per-channel subscriptions yet
+            // We'll create them all at once after main EOSE in createAllPerChannelSubscriptions()
+            // This ensures we discover all channels first, then load their participant data
             if (!isInitialLoadBatchActive()) {
                 ensureChannelMessageSubscription(channel.id)
+                updateChannelsList()
+                updateCategories()
             }
         } catch (e: Exception) {
             android.util.Log.e("ChannelsViewModel", "Error in handleChannelCreateEvent", e)
@@ -238,6 +249,11 @@ class ChannelsViewModel(
     }
 
     private fun updateChannelsList() {
+        // Don't update UI if still in initial load batch - keep loading spinner visible
+        if (isInitialLoadBatchActive()) {
+            return
+        }
+        
         // Ensure participant counts contains entries for all channels (default 0)
         val counts = participantsMap.mapValues { it.value.size }.toMutableMap()
         channelsMap.keys.forEach { id -> if (!counts.containsKey(id)) counts[id] = 0 }
@@ -248,7 +264,10 @@ class ChannelsViewModel(
             compareByDescending<Channel> { counts[it.id] ?: 0 }
                 .thenBy { it.name }
         )
-        // Ensure we have per-channel subscriptions for all known channels
+    }
+    
+    private fun createAllPerChannelSubscriptions() {
+        // Called after main EOSE - ensure we have per-channel subscriptions for all channels
         channelsMap.keys.forEach { id ->
             if (!channelMessageSubs.containsKey(id)) {
                 ensureChannelMessageSubscription(id)
@@ -258,24 +277,38 @@ class ChannelsViewModel(
 
     private fun ensureChannelMessageSubscription(channelId: String) {
         try {
-            val subId = subscriptionManager.subscribeToChannelMessages(channelId) { msgEvent ->
-                try {
-                    val rootChannelId = msgEvent.tags.find {
-                        it.size >= 4 && it[0] == "e" && it[3] == "root"
-                    }?.get(1) ?: msgEvent.tags.find {
-                        it.size >= 2 && it[0] == "e"
-                    }?.get(1)
-                    if (rootChannelId == channelId) {
-                        val set = participantsMap.getOrPut(channelId) { java.util.concurrent.ConcurrentHashMap.newKeySet<String>() }
-                        if (msgEvent.pubkey.isNotBlank()) {
-                            set.add(msgEvent.pubkey)
-                            _participantCounts.value = participantsMap.mapValues { it.value.size }
+            // Mark this channel as loading
+            channelLoadingStates[channelId] = false
+            
+            val subId = subscriptionManager.subscribeToChannelMessages(
+                channelId = channelId,
+                onEvent = { msgEvent ->
+                    try {
+                        val rootChannelId = msgEvent.tags.find {
+                            it.size >= 4 && it[0] == "e" && it[3] == "root"
+                        }?.get(1) ?: msgEvent.tags.find {
+                            it.size >= 2 && it[0] == "e"
+                        }?.get(1)
+                        if (rootChannelId == channelId) {
+                            val set = participantsMap.getOrPut(channelId) { java.util.concurrent.ConcurrentHashMap.newKeySet<String>() }
+                            if (msgEvent.pubkey.isNotBlank()) {
+                                set.add(msgEvent.pubkey)
+                                _participantCounts.value = participantsMap.mapValues { it.value.size }
+                            }
                         }
+                    } catch (e: Exception) {
+                        android.util.Log.e("ChannelsViewModel", "Error in per-channel subscription handler: ${e.localizedMessage}")
                     }
-                } catch (e: Exception) {
-                    android.util.Log.e("ChannelsViewModel", "Error in per-channel subscription handler: ${e.localizedMessage}")
+                },
+                onEndOfStoredEvents = {
+                    // This channel's stored events have been delivered (participant data loaded)
+                    synchronized(channelEoseLock) {
+                        channelLoadingStates[channelId] = true
+                    }
+                    // Check if all channels are now loaded
+                    checkIfAllChannelsLoaded()
                 }
-            }
+            )
             channelMessageSubs[channelId] = subId
         } catch (e: Exception) {
             android.util.Log.e("ChannelsViewModel", "Failed to create per-channel subscription for $channelId: ${e.localizedMessage}")
@@ -311,6 +344,42 @@ class ChannelsViewModel(
         updateCategories()
         _isLoading.value = false
         android.util.Log.d("ChannelsViewModel", "Initial channels batch finalized via $reason with ${channelsMap.size} channels")
+    }
+
+    private fun checkIfAllChannelsLoaded() {
+        synchronized(channelEoseLock) {
+            // Can only finalize if:
+            // 1. Main channels subscription has completed (mainChannelsEoseReceived = true)
+            // 2. All discovered channels have their per-channel data loaded
+            if (!mainChannelsEoseReceived) {
+                return  // Still waiting for main subscription EOSE
+            }
+            
+            if (channelsMap.isEmpty()) {
+                // No channels discovered - we're done
+                if (isInitialLoadBatchActive()) {
+                    finalizeInitialLoadBatch("no_channels_discovered")
+                }
+                return
+            }
+            
+            // If we haven't created per-channel subscriptions yet, do it now
+            if (channelMessageSubs.isEmpty() && channelsMap.isNotEmpty()) {
+                android.util.Log.d("ChannelsViewModel", "Main EOSE received. Creating per-channel subscriptions for ${channelsMap.size} channels")
+                createAllPerChannelSubscriptions()
+                return  // Wait for per-channel EOSE callbacks
+            }
+            
+            // Check if all known channels have completed their loading
+            val allChannelsLoaded = channelsMap.keys.all { channelId ->
+                channelLoadingStates[channelId] == true
+            }
+            
+            if (allChannelsLoaded && isInitialLoadBatchActive()) {
+                android.util.Log.d("ChannelsViewModel", "All ${channelsMap.size} channels fully loaded with participant data")
+                finalizeInitialLoadBatch("all_channels_and_participants_loaded")
+            }
+        }
     }
 
     private fun isInitialLoadBatchActive(): Boolean {

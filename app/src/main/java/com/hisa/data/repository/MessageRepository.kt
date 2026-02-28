@@ -90,9 +90,27 @@ object MessageRepository {
         recipientPrivateKey: ByteArray,
         senderPubkey: String
     ): String {
-        val pubBytes = hexToBytes(senderPubkey)
-        return nip44.decrypt(encryptedContent, recipientPrivateKey, pubBytes)
-            ?: throw IllegalArgumentException("NIP-44 decrypt failed")
+        val normalized = normalizeToXOnlyHex(senderPubkey)
+            ?: throw IllegalArgumentException("Invalid sender pubkey format: $senderPubkey")
+        val pubBytes = hexToBytes(normalized)
+        return try {
+            nip44.decrypt(encryptedContent, recipientPrivateKey, pubBytes)
+                ?: throw IllegalArgumentException("NIP-44 decrypt failed")
+        } catch (e: Exception) {
+            // If the payload is JSON, try to extract ciphertext field as fallback
+            try {
+                val trimmed = encryptedContent.trim()
+                if (trimmed.startsWith("{")) {
+                    val obj = JSONObject(trimmed)
+                    val ct = obj.optString("ciphertext")
+                    if (!ct.isNullOrBlank()) {
+                        return nip44.decrypt(ct, recipientPrivateKey, pubBytes)
+                            ?: throw IllegalArgumentException("NIP-44 decrypt failed (fallback)")
+                    }
+                }
+            } catch (_: Exception) {}
+            throw e
+        }
     }
 
     private fun padNip44Plaintext(plaintext: ByteArray): ByteArray {
@@ -143,6 +161,33 @@ object MessageRepository {
         }
     }
 
+    /**
+     * Normalize a variety of pubkey formats to x-only 64-hex string.
+     * Accepts:
+     * - npub (bech32) -> hex (via KeyGenerator.npubToPublicKey)
+     * - compressed (02/03 + 64 hex) -> drop prefix -> 64 hex
+     * - uncompressed (04 + 128 hex) -> take x-coordinate (bytes 1..32) -> 64 hex
+     * - already x-only (64 hex) -> return lowercase
+     */
+    private fun normalizeToXOnlyHex(raw: String?): String? {
+        if (raw.isNullOrBlank()) return null
+        var s = raw.trim()
+        try {
+            if (s.startsWith("npub", true)) {
+                val conv = com.hisa.util.KeyGenerator.npubToPublicKey(s)
+                if (conv == null) return null
+                s = conv
+            }
+        } catch (_: Exception) {}
+        s = s.removePrefix("0x").lowercase()
+        return when (s.length) {
+            66 -> if (s.startsWith("02") || s.startsWith("03")) s.substring(2) else null
+            130 -> if (s.startsWith("04")) s.substring(2, 66) else null
+            64 -> s
+            else -> null
+        }
+    }
+
     // Helper function to convert byte array to hex string
     private fun bytesToHex(bytes: ByteArray): String {
         return bytes.joinToString("") { "%02x".format(it) }
@@ -153,8 +198,8 @@ object MessageRepository {
         require(privateKey.size == 32) { "Private key must be 32 bytes" }
         val privScalar = BigInteger(1, privateKey)
         require(privScalar >= BigInteger.ONE && privScalar < SECP256K1_N) { "Invalid secp256k1 private key scalar" }
-        val cleanPub = otherPubkeyHex.trim().lowercase()
-        require(cleanPub.matches(Regex("[0-9a-f]{64}"))) { "Invalid x-only pubkey" }
+        val cleanPub = normalizeToXOnlyHex(otherPubkeyHex)
+            ?: throw IllegalArgumentException("Invalid or unsupported pubkey format: $otherPubkeyHex")
         val compressed = hexToBytes("02$cleanPub")
         val otherPoint: ECPoint = ECKey.CURVE.curve.decodePoint(compressed)
         require(!otherPoint.isInfinity) { "Invalid secp256k1 public key point" }
@@ -232,6 +277,7 @@ object MessageRepository {
                 .forEach { senderCandidates.add(it) }
             val outerPubkey = event.optString("pubkey", "").trim().lowercase()
             val xTagCandidates = mutableListOf<String>()
+            val pTagCandidates = mutableListOf<String>()
             val tags = event.optJSONArray("tags") ?: JSONArray()
             for (i in 0 until tags.length()) {
                 val tag = tags.optJSONArray(i) ?: continue
@@ -241,6 +287,16 @@ object MessageRepository {
                         xTagCandidates.add(candidate)
                     }
                 }
+                if (tag.optString(0) == "p") {
+                    val candidate = tag.optString(1, "").trim().lowercase()
+                    if (candidate.matches(Regex("[0-9a-f]{64}"))) {
+                        pTagCandidates.add(candidate)
+                    }
+                }
+            }
+            // Include p-tag candidates (some implementations put pubkey hints in p-tags)
+            if (pTagCandidates.isNotEmpty()) {
+                senderCandidates.addAll(pTagCandidates)
             }
             if (!outerVerified) {
                 senderCandidates.addAll(xTagCandidates)
@@ -252,16 +308,19 @@ object MessageRepository {
                 senderCandidates.addAll(xTagCandidates)
             }
             val dedupedCandidates = senderCandidates.distinct()
+            // Normalize candidates to x-only 64-hex and dedupe again
+            val normalizedCandidatesAll = dedupedCandidates.mapNotNull { normalizeToXOnlyHex(it) }.distinct()
             val candidates = if (maxSenderCandidates != null) {
-                dedupedCandidates.take(maxSenderCandidates)
+                normalizedCandidatesAll.take(maxSenderCandidates)
             } else {
-                dedupedCandidates
+                normalizedCandidatesAll
             }
+            val candidateLog = if (normalizedCandidatesAll.size <= 10) normalizedCandidatesAll.joinToString(",") else normalizedCandidatesAll.joinToString(",") { it.take(12) }
             timber.log.Timber.d(
                 "Gift-wrap decrypt candidates: eventId=%s outerVerified=%s candidates=%s",
                 event.optString("id", ""),
                 outerVerified,
-                candidates.joinToString(",") { it.take(12) }
+                candidateLog
             )
 
             // Try candidates until one decrypts.
@@ -323,22 +382,23 @@ object MessageRepository {
                                 sealContent.length
                             )
                             val innerSenderCandidates = buildList {
-                                val cleanSealSender = sealSenderPubkey.trim().lowercase()
-                                if (cleanSealSender.matches(Regex("[0-9a-f]{64}"))) add(cleanSealSender)
-                                add(senderPubkey)
+                                val cleanSealSender = normalizeToXOnlyHex(sealSenderPubkey)
+                                if (!cleanSealSender.isNullOrBlank()) add(cleanSealSender)
+                                val outerCandidateNorm = normalizeToXOnlyHex(senderPubkey)
+                                if (!outerCandidateNorm.isNullOrBlank()) add(outerCandidateNorm)
+                                // include p-tag candidates as a fallback for inner attempts
+                                pTagCandidates.forEach { normalizeToXOnlyHex(it)?.let { add(it) } }
                                 senderPubkeyHints
-                                    .map { it.trim().lowercase() }
-                                    .filter { it.matches(Regex("[0-9a-f]{64}")) }
+                                    .mapNotNull { normalizeToXOnlyHex(it) }
                                     .forEach { add(it) }
                             }.distinct()
 
                             var innerLastError: Exception? = null
+                            val innerLog = if (innerSenderCandidates.size <= 10) innerSenderCandidates.joinToString(",") else innerSenderCandidates.joinToString(",") { it.take(12) }
                             timber.log.Timber.d(
-                                "Inner seal decrypt candidates (%d total): sealSender=%s outerEphemeral=%s others=%s",
+                                "Inner seal decrypt candidates (%d total): %s",
                                 innerSenderCandidates.size,
-                                innerSenderCandidates.getOrNull(0)?.take(12) ?: "none",
-                                innerSenderCandidates.getOrNull(1)?.take(12) ?: "none",
-                                innerSenderCandidates.drop(2).joinToString(",") { it.take(12) }
+                                innerLog
                             )
                             for (innerSender in innerSenderCandidates) {
                                 try {

@@ -11,6 +11,7 @@ import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.withTimeoutOrNull
 import timber.log.Timber
@@ -133,6 +134,62 @@ class ShopViewModel @Inject constructor(
                 } catch (_: Exception) {
                 }
             })
+        }
+    }
+
+    /**
+     * Publish a NIP-09 deletion request (kind 5) referencing the provided service.
+     * If `privateKeyHex` is null, the call will attempt external signing.
+     */
+    fun requestDeleteService(service: ServiceListing, privateKeyHex: String?, onResult: (Boolean, String?) -> Unit = { _, _ -> }) {
+        viewModelScope.launch {
+            try {
+                val dTag = service.rawTags.firstOrNull { it.isNotEmpty() && it[0] == "d" }?.getOrNull(1) as? String
+                val targetEventId = service.eventId
+
+                val tags = mutableListOf<List<String>>()
+                // Include e tag(s) referencing the specific event id
+                if (!targetEventId.isNullOrBlank()) tags.add(listOf("e", targetEventId))
+                // If we have a replaceable identifier, include an 'a' tag per NIP-09 to reference the replaceable namespace
+                if (!dTag.isNullOrBlank()) {
+                    tags.add(listOf("a", "30402:${service.pubkey}:$dTag"))
+                }
+                // Include k tag indicating kinds referenced
+                tags.add(listOf("k", "30402"))
+
+                val content = "" // optional reason; UI can be extended to collect a reason
+
+                val privBytes: ByteArray? = try {
+                    if (!privateKeyHex.isNullOrBlank()) privateKeyHex.chunked(2).map { it.toInt(16).toByte() }.toByteArray() else null
+                } catch (e: Exception) { null }
+
+                val signed = com.hisa.data.nostr.NostrEventSigner.signEvent(
+                    kind = 5,
+                    content = content,
+                    tags = tags,
+                    pubkey = service.pubkey,
+                    privKey = privBytes
+                )
+
+                val nostrEvent = com.hisa.data.nostr.NostrEvent(
+                    id = signed.getString("id"),
+                    pubkey = signed.getString("pubkey"),
+                    createdAt = signed.getLong("created_at"),
+                    kind = signed.getInt("kind"),
+                    tags = (0 until signed.getJSONArray("tags").length()).map { i ->
+                        val tagArr = signed.getJSONArray("tags").getJSONArray(i)
+                        (0 until tagArr.length()).map { tagArr.getString(it) }
+                    },
+                    content = signed.getString("content"),
+                    sig = signed.getString("sig")
+                )
+
+                nostrClient.publishEvent(nostrEvent)
+                onResult(true, null)
+            } catch (e: Exception) {
+                Timber.e(e, "Failed to publish deletion request")
+                onResult(false, e.message)
+            }
         }
     }
 

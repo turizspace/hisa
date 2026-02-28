@@ -28,10 +28,12 @@ import org.json.JSONArray
 import org.json.JSONObject
 import javax.inject.Inject
 import timber.log.Timber
+import java.util.concurrent.atomic.AtomicLong
 import java.security.SecureRandom
 import org.bouncycastle.crypto.params.X25519PrivateKeyParameters
 import com.hisa.util.Constants
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.atomic.AtomicBoolean
 
 @HiltViewModel
@@ -59,6 +61,9 @@ class MessagesViewModel @Inject constructor(
         seenGiftWrapEventIds.clear()
         inboxExternalDecryptRequested.set(false)
         directSubscriptionStarted = false
+        directEoseReceived = false
+        giftWrapProcessingCount.set(0)
+        giftWrapProcessingInProgress = false
         directLoadTimeoutJob?.cancel()
         directLoadTimeoutJob = null
         _isLoading.value = false
@@ -89,10 +94,22 @@ class MessagesViewModel @Inject constructor(
     private val conversationSubscriptionIds: MutableList<String> = mutableListOf()
     private var activeConversationPartner: String? = null
     private val seenGiftWrapEventIds = ConcurrentHashMap.newKeySet<String>()
+    // Track EOSE and message processing for coordinated loading
+    @Volatile
+    private var directEoseReceived = false
+    private val giftWrapProcessingCount = java.util.concurrent.atomic.AtomicInteger(0)
+    @Volatile
+    private var giftWrapProcessingInProgress = false
     private val giftWrapProcessingMutex = Mutex()
     private val inboxExternalDecryptRequested = AtomicBoolean(false)
     private val _messages = MutableStateFlow<List<Message>>(emptyList())
     val messages: StateFlow<List<Message>> = _messages
+    // Buffer plain (kind 14) messages that arrive while initial loading is active
+    private val pendingPlainMessages = ConcurrentLinkedQueue<org.json.JSONObject>()
+    // Sampling counters to throttle high-frequency logs
+    private val dmEventCounter = AtomicLong(0)
+    private val subscriptionEventCounter = AtomicLong(0)
+    private val bufferLogCounter = AtomicLong(0)
     private val _isLoading = MutableStateFlow(false)
     val isLoading: StateFlow<Boolean> = _isLoading
     // Errors from send operations (observable by UI)
@@ -116,17 +133,29 @@ class MessagesViewModel @Inject constructor(
                     // Only process DM-related kinds
                     if (kind == 12 || kind == 14 || kind == 1059) {
                         val eventJson = eventObj.toString()
-                        Timber.d("Received DM event: %s", eventJson)
+                        if (dmEventCounter.incrementAndGet() % 500L == 0L) {
+                            Timber.d("Received DM event (sample): %s", eventJson)
+                        }
                         when (kind) {
                             12 -> handleGiftWrap(eventObj) // NIP-59 Gift Wrap
                             14 -> { // NIP-17 Direct Message (legacy, if any)
-                                val msg = MessageRepository.parseMessage(eventJson)
-                                Timber.d("Parsed direct message: %s", msg)
-                                if (msg != null && msg.recipientPubkeys.contains(userPubkey)) {
-                                    _messages.value = _messages.value + msg
-                                    Timber.d("Added direct message to state: %s", msg)
+                                // Plain NIP-17 (kind 14) messages: buffer during initial load to avoid incremental UI
+                                if (_isLoading.value) {
+                                    pendingPlainMessages.add(eventObj)
+                                    if (bufferLogCounter.incrementAndGet() % 200L == 0L) {
+                                        Timber.d("Buffered plain DM during loading (sample): %s", eventObj.optString("id"))
+                                    }
                                 } else {
-                                    Timber.d("Message not for this user or failed to parse: %s", msg)
+                                    val msg = MessageRepository.parseMessage(eventJson)
+                                    if (dmEventCounter.get() % 200L == 0L) {
+                                        Timber.d("Parsed direct message (sample): %s", msg)
+                                    }
+                                    if (msg != null && msg.recipientPubkeys.contains(userPubkey)) {
+                                        _messages.value = _messages.value + msg
+                                        if (dmEventCounter.get() % 200L == 0L) {
+                                            Timber.d("Added direct message to state (sample): %s", msg.id)
+                                        }
+                                    }
                                 }
                             }
                             1059 -> handleGiftWrap(eventObj) // NIP-17 Encrypted DM (NIP-59 Gift Wrap)
@@ -243,11 +272,14 @@ class MessagesViewModel @Inject constructor(
                 return@launch
             }
             directSubscriptionStarted = true
+            directEoseReceived = false
+            giftWrapProcessingCount.set(0)
+            giftWrapProcessingInProgress = false
             _isLoading.value = true
             directLoadTimeoutJob?.cancel()
             directLoadTimeoutJob = viewModelScope.launch(Dispatchers.IO) {
                 delay(4000)
-                _isLoading.value = false
+                finalizeDirectMessageLoading("timeout")
             }
 
             try {
@@ -258,6 +290,10 @@ class MessagesViewModel @Inject constructor(
                     limitPerDirection = DIRECT_DM_LIMIT_PER_FILTER,
                     onEvent = { nostrEvent ->
                         try {
+                            // Increment counter: a new message is incoming
+                            giftWrapProcessingCount.incrementAndGet()
+                            giftWrapProcessingInProgress = true
+                            
                             val obj = JSONObject().apply {
                                 put("id", nostrEvent.id)
                                 put("pubkey", nostrEvent.pubkey)
@@ -267,16 +303,20 @@ class MessagesViewModel @Inject constructor(
                                 put("content", nostrEvent.content)
                                 put("sig", nostrEvent.sig)
                             }
-                            Timber.d("Direct DM subscription callback for subId=%s eventId=%s", assignedSubId, nostrEvent.id)
+                            Timber.d("Direct DM subscription callback for subId=%s eventId=%s (totalIncoming=%d)", assignedSubId, nostrEvent.id, giftWrapProcessingCount.get())
                             handleGiftWrap(obj, null)
                         } catch (e: Exception) {
                             Timber.e(e, "Error handling subscribed direct message event")
+                            giftWrapProcessingCount.decrementAndGet()
+                            checkIfAllMessagesProcessed()
                         }
                     },
                     onEndOfStoredEvents = {
-                        directLoadTimeoutJob?.cancel()
-                        directLoadTimeoutJob = null
-                        _isLoading.value = false
+                        // Main subscription completed - record that EOSE was received
+                        directEoseReceived = true
+                        Timber.d("Direct messages EOSE received. Messages arriving: %d", giftWrapProcessingCount.get())
+                        // Check if all processing is done
+                        checkIfAllMessagesProcessed()
                     }
                 )
                 directSubscriptionId = subId
@@ -296,11 +336,71 @@ class MessagesViewModel @Inject constructor(
         }
     }
 
+    private fun checkIfAllMessagesProcessed() {
+        // Simple pattern: just like FeedViewModel
+        // Can only finalize if:
+        // 1. EOSE has been received (all messages from relay arrived)
+        // 2. All message processing is complete (giftWrapProcessingCount == 0)
+        // Metadata loading is NOT blocking - it happens in background in the UI layer
+        if (!directEoseReceived) {
+            Timber.d("checkIfAllMessagesProcessed: Still waiting for EOSE")
+            return
+        }
+        
+        val pendingCount = giftWrapProcessingCount.get()
+        if (pendingCount > 0) {
+            Timber.d("checkIfAllMessagesProcessed: %d messages still processing", pendingCount)
+            return
+        }
+        
+        if (giftWrapProcessingInProgress) {
+            Timber.d("checkIfAllMessagesProcessed: Processing still in progress")
+            return
+        }
+        
+        // All conditions met: finalize loading - just like FeedViewModel
+        if (_isLoading.value) {
+            finalizeDirectMessageLoading("eose_and_all_messages_processed")
+        }
+    }
+
+    private fun finalizeDirectMessageLoading(reason: String) {
+        if (!_isLoading.value) return
+        
+        directLoadTimeoutJob?.cancel()
+        directLoadTimeoutJob = null
+        _isLoading.value = false
+        Timber.d("Direct messages loading finalized via: %s (totalMessages=%d conversations=%d)", reason, _messages.value.size, getConversations().size)
+        // Drain any plain NIP-17 messages that arrived while we were loading
+        try {
+            while (true) {
+                val ev = pendingPlainMessages.poll() ?: break
+                try {
+                    val evJson = ev.toString()
+                    val msg = MessageRepository.parseMessage(evJson)
+                    if (msg != null && msg.recipientPubkeys.contains(userPubkey)) {
+                        _messages.update { current ->
+                            if (current.any { it.id == msg.id }) current else (current + msg).sortedBy { it.createdAt }
+                        }
+                        Timber.d("Drained buffered plain DM: %s", msg.id)
+                    }
+                } catch (e: Exception) {
+                    Timber.w(e, "Failed to process buffered plain DM")
+                }
+            }
+        } catch (e: Exception) {
+            Timber.w(e, "Error draining pending plain messages")
+        }
+    }
+
     fun stopDirectMessagesSubscription() {
         directLoadTimeoutJob?.cancel()
         directLoadTimeoutJob = null
         _isLoading.value = false
         directSubscriptionStarted = false
+        directEoseReceived = false
+        giftWrapProcessingCount.set(0)
+        giftWrapProcessingInProgress = false
         directSubscriptionId?.let { id ->
             try {
                 subscriptionManager.unsubscribe(id)
@@ -370,15 +470,23 @@ class MessagesViewModel @Inject constructor(
                     )
                 }
                 timber.log.Timber.d("Using external signer for NIP-44 decrypt")
-                messageRepository.decryptGiftWrappedMessage(
-                    event = wrapEvent,
-                    recipientPrivateKey = null,
-                    externalDecryptor = { ciphertext, senderPubkey ->
-                        com.hisa.data.nostr.ExternalSignerManager.nip44Decrypt(ciphertext, senderPubkey)
-                    },
-                    maxSenderCandidates = 2,
-                    senderPubkeyHints = senderHints
-                )
+                // When using an external signer we should avoid prompting it repeatedly for
+                // many candidate public keys. Prefer hinted candidates and limit attempts
+                // so the launcher isn't spammed with multiple decrypt prompts.
+                try {
+                    messageRepository.decryptGiftWrappedMessage(
+                        event = wrapEvent,
+                        recipientPrivateKey = null,
+                        externalDecryptor = { ciphertext, senderPubkey ->
+                            com.hisa.data.nostr.ExternalSignerManager.nip44Decrypt(ciphertext, senderPubkey)
+                        },
+                        maxSenderCandidates = 1,
+                        senderPubkeyHints = senderHints
+                    )
+                } catch (e: Exception) {
+                    Timber.w(e, "External signer decrypt threw; treating as undecryptable for now")
+                    null
+                }
             } ?: return null
 
             val innerPTags = mutableListOf<String>()
@@ -451,14 +559,23 @@ class MessagesViewModel @Inject constructor(
                 cleanedPub.isBlank() ||
                 cleanedPub.equals(cleanedUserPubkey, true) ||
                 cleanedPub.equals(cleanedOuter, true)
-            val shouldReplaceIncomingSender = incomingForMe && senderLooksWrapperLike
+
+            val candidateExpected = if (cleanedExpected.matches(Regex("[0-9a-f]{64}", RegexOption.IGNORE_CASE))) cleanedExpected else ""
+            val candidateResolved = if (cleanedResolved.matches(Regex("[0-9a-f]{64}", RegexOption.IGNORE_CASE))) cleanedResolved else ""
+
+            // Replace the wrapper-like sender when we have a better candidate that is not ourselves.
+            val shouldReplace = senderLooksWrapperLike && (
+                (candidateExpected.isNotBlank() && !candidateExpected.equals(cleanedUserPubkey, true)) ||
+                (candidateResolved.isNotBlank() && !candidateResolved.equals(cleanedUserPubkey, true)) ||
+                incomingForMe
+            )
+
             val finalPub = when {
-                shouldReplaceIncomingSender &&
-                    cleanedExpected.matches(Regex("[0-9a-f]{64}", RegexOption.IGNORE_CASE)) -> cleanedExpected
-                shouldReplaceIncomingSender &&
-                    cleanedResolved.matches(Regex("[0-9a-f]{64}", RegexOption.IGNORE_CASE)) -> cleanedResolved
+                shouldReplace && candidateExpected.isNotBlank() && !candidateExpected.equals(cleanedUserPubkey, true) -> candidateExpected
+                shouldReplace && candidateResolved.isNotBlank() && !candidateResolved.equals(cleanedUserPubkey, true) -> candidateResolved
                 else -> cleanedPub
             }
+
             return Pair(finalPub, cleanedRecipients)
         }
 
@@ -692,74 +809,83 @@ class MessagesViewModel @Inject constructor(
     @RequiresApi(Build.VERSION_CODES.O)
     private fun handleGiftWrap(giftWrap: JSONObject, expectedOtherPubkey: String? = null) {
         viewModelScope.launch(Dispatchers.IO) {
-            giftWrapProcessingMutex.withLock {
-                try {
-                    val eventId = giftWrap.optString("id", "unknown")
-                    if (eventId.isNotBlank() && eventId != "unknown") {
-                        val firstSeen = seenGiftWrapEventIds.add(eventId)
-                        if (!firstSeen) {
-                            Timber.d("Skipping duplicate gift wrap event: %s", eventId)
+            try {
+                giftWrapProcessingMutex.withLock {
+                    try {
+                        val eventId = giftWrap.optString("id", "unknown")
+                        if (eventId.isNotBlank() && eventId != "unknown") {
+                            val firstSeen = seenGiftWrapEventIds.add(eventId)
+                            if (!firstSeen) {
+                                Timber.d("Skipping duplicate gift wrap event: %s", eventId)
+                                return@withLock
+                            }
+                        }
+                        Timber.i("Processing gift wrap event: $eventId")
+
+                        // 1. Verify message is for current user
+                        if (!isMessageForCurrentUser(giftWrap)) {
+                            Timber.d("Message not for current user, skipping")
                             return@withLock
                         }
-                    }
-                    Timber.i("Processing gift wrap event: $eventId")
 
-                    // 1. Verify message is for current user
-                    if (!isMessageForCurrentUser(giftWrap)) {
-                        Timber.d("Message not for current user, skipping")
-                        return@withLock
-                    }
+                        val authContext = resolveAuthContext(refreshOnce = false)
+                        val usingExternalSignerOnly = authContext.localPrivateKeyBytes == null && authContext.hasExternalSigner
+                        val hasNoDecryptCapability = authContext.localPrivateKeyBytes == null && !authContext.hasExternalSigner
 
-                    val authContext = resolveAuthContext(refreshOnce = false)
-                    val usingExternalSignerOnly = authContext.localPrivateKeyBytes == null && authContext.hasExternalSigner
-                    val hasNoDecryptCapability = authContext.localPrivateKeyBytes == null && !authContext.hasExternalSigner
+                        if (hasNoDecryptCapability) {
+                            addUndecryptablePlaceholder(giftWrap, expectedOtherPubkey)
+                            return@withLock
+                        }
 
-                    if (hasNoDecryptCapability) {
+                        if (usingExternalSignerOnly && expectedOtherPubkey.isNullOrBlank()) {
+                            if (!com.hisa.data.nostr.ExternalSignerManager.isLauncherRegistered()) {
+                                Timber.d("Skipping single inbox external decrypt: launcher not registered")
+                                addUndecryptablePlaceholder(giftWrap, expectedOtherPubkey)
+                                return@withLock
+                            }
+                            // Messages tab (inbox) path: trigger signer request at most once.
+                            // This allows one-time approval prompt while avoiding a request storm.
+                            val shouldRequestOnce = inboxExternalDecryptRequested.compareAndSet(false, true)
+                            if (!shouldRequestOnce) {
+                                addUndecryptablePlaceholder(giftWrap, expectedOtherPubkey)
+                                return@withLock
+                            }
+                            val decryptedMessage = decryptNip17Message(giftWrap, expectedOtherPubkey)
+                            if (decryptedMessage != null) {
+                                updateMessageState(decryptedMessage, expectedOtherPubkey)
+                            } else {
+                                addUndecryptablePlaceholder(giftWrap, expectedOtherPubkey)
+                            }
+                            return@withLock
+                        }
+
+                        // When activity/launcher is not attached, skip decrypt requests entirely.
+                        if (usingExternalSignerOnly && !com.hisa.data.nostr.ExternalSignerManager.isLauncherRegistered()) {
+                            Timber.d("Skipping external signer decrypt: launcher not registered")
+                            return@withLock
+                        }
+
+                        // 2. Decrypt the message
+                        val decryptedMessage = decryptNip17Message(giftWrap, expectedOtherPubkey) ?: run {
+                            Timber.e("Failed to decrypt or parse message %s", eventId)
+                            addUndecryptablePlaceholder(giftWrap, expectedOtherPubkey)
+                            return@withLock
+                        }
+
+                        // 3. Update state if message is valid
+                        updateMessageState(decryptedMessage, expectedOtherPubkey)
+                    } catch (e: Exception) {
+                        Timber.e(e, "Error in handleGiftWrap")
                         addUndecryptablePlaceholder(giftWrap, expectedOtherPubkey)
-                        return@withLock
                     }
-
-                    if (usingExternalSignerOnly && expectedOtherPubkey.isNullOrBlank()) {
-                        if (!com.hisa.data.nostr.ExternalSignerManager.isLauncherRegistered()) {
-                            Timber.d("Skipping single inbox external decrypt: launcher not registered")
-                            addUndecryptablePlaceholder(giftWrap, expectedOtherPubkey)
-                            return@withLock
-                        }
-                        // Messages tab (inbox) path: trigger signer request at most once.
-                        // This allows one-time approval prompt while avoiding a request storm.
-                        val shouldRequestOnce = inboxExternalDecryptRequested.compareAndSet(false, true)
-                        if (!shouldRequestOnce) {
-                            addUndecryptablePlaceholder(giftWrap, expectedOtherPubkey)
-                            return@withLock
-                        }
-                        val decryptedMessage = decryptNip17Message(giftWrap, expectedOtherPubkey)
-                        if (decryptedMessage != null) {
-                            updateMessageState(decryptedMessage, expectedOtherPubkey)
-                        } else {
-                            addUndecryptablePlaceholder(giftWrap, expectedOtherPubkey)
-                        }
-                        return@withLock
-                    }
-
-                    // When activity/launcher is not attached, skip decrypt requests entirely.
-                    if (usingExternalSignerOnly && !com.hisa.data.nostr.ExternalSignerManager.isLauncherRegistered()) {
-                        Timber.d("Skipping external signer decrypt: launcher not registered")
-                        return@withLock
-                    }
-
-                    // 2. Decrypt the message
-                    val decryptedMessage = decryptNip17Message(giftWrap, expectedOtherPubkey) ?: run {
-                        Timber.e("Failed to decrypt or parse message %s", eventId)
-                        addUndecryptablePlaceholder(giftWrap, expectedOtherPubkey)
-                        return@withLock
-                    }
-
-                    // 3. Update state if message is valid
-                    updateMessageState(decryptedMessage, expectedOtherPubkey)
-                } catch (e: Exception) {
-                    Timber.e(e, "Error in handleGiftWrap")
-                    addUndecryptablePlaceholder(giftWrap, expectedOtherPubkey)
                 }
+            } finally {
+                // Decrement counter: this message has finished processing
+                val count = giftWrapProcessingCount.decrementAndGet()
+                Timber.d("Gift wrap processing complete. Remaining: %d", count)
+                giftWrapProcessingInProgress = false
+                // Check if all messages are now complete
+                checkIfAllMessagesProcessed()
             }
         }
     }
@@ -786,14 +912,20 @@ class MessagesViewModel @Inject constructor(
     fun getConversations(): Map<String, List<Message>> {
         val messages = _messages.value
         Timber.d("Total messages in state: %d", messages.size)
-        messages.forEach { msg ->
-            Timber.d(
-                "Conversation source trace: msgId=%s sender=%s recipients=%s placeholder=%s",
-                msg.id,
-                cleanPubkeyFormat(msg.pubkey),
-                msg.recipientPubkeys.map { cleanPubkeyFormat(it) },
-                (msg is Message.TextMessage && msg.content == "Unable to decrypt message")
-            )
+        // Sample up to 5 messages for tracing to avoid noisy logs
+        if (messages.isNotEmpty()) {
+            messages.take(5).forEach { msg ->
+                Timber.d(
+                    "Conversation source sample: msgId=%s sender=%s recipients=%s placeholder=%s",
+                    msg.id,
+                    cleanPubkeyFormat(msg.pubkey),
+                    msg.recipientPubkeys.map { cleanPubkeyFormat(it) },
+                    (msg is Message.TextMessage && msg.content == "Unable to decrypt message")
+                )
+            }
+            if (messages.size > 5) {
+                Timber.d("...and %d more messages not logged for brevity", messages.size - 5)
+            }
         }
 
         fun buildChatroomKey(message: Message): ChatroomKey {
@@ -1105,11 +1237,15 @@ class MessagesViewModel @Inject constructor(
                         put("content", event.content)
                         put("sig", event.sig)
                     }
-                    Timber.d("Conversation subscription received event id=%s pubkey=%s tags=%s", event.id, event.pubkey, obj.optJSONArray("tags")?.toString())
-                    // Pass the other party's pubkey so we can show a conversation placeholder even if decryption fails
-                    Timber.d("Invoking handleGiftWrap for conversation event id=%s", event.id)
+                    // Sample conversation subscription logs to avoid spamming
+                    if (subscriptionEventCounter.incrementAndGet() % 200L == 0L) {
+                        Timber.d("Conversation subscription received event (sample) id=%s pubkey=%s tags=%s", event.id, event.pubkey, obj.optJSONArray("tags")?.toString())
+                        Timber.d("Invoking handleGiftWrap for conversation event id=%s", event.id)
+                    }
                     handleGiftWrap(obj, other)
-                    Timber.d("handleGiftWrap completed for event id=%s", event.id)
+                    if (subscriptionEventCounter.get() % 200L == 0L) {
+                        Timber.d("handleGiftWrap completed for event id=%s", event.id)
+                    }
                 } catch (e: Exception) {
                     Timber.e(e, "Error handling conversation event (multi-filter)")
                 }
