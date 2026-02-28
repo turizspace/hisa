@@ -20,6 +20,14 @@ class SubscriptionManager @Inject constructor(
     private val activeSubscriptions = ConcurrentHashMap<String, SubscriptionInfo>()
     // Persist subscription definitions to re-apply on reconnects or relay changes
     private val persistedSubscriptions = ConcurrentHashMap<String, String>()
+    // De-duplicate repeated EVENT deliveries for the same subscription id.
+    // Key format: "<subId>:<eventId>".
+    private val deliveredEventKeys = object : LinkedHashMap<String, Unit>(4096, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Unit>?): Boolean {
+            return size > 8000
+        }
+    }
+    private val deliveredEventLock = Any()
 
     init {
         // Start collecting centralized incoming messages and handle them on the injected scope
@@ -39,12 +47,16 @@ class SubscriptionManager @Inject constructor(
     }
 
     // NIP-28 Channel Subscriptions
-    fun subscribeToChannels(onEvent: (NostrEvent) -> Unit): String {
+    fun subscribeToChannels(
+        onEvent: (NostrEvent) -> Unit,
+        onEndOfStoredEvents: () -> Unit = {}
+    ): String {
         return subscribe(
             filter = createFilter {
                 putKinds(listOf(40, 41)) // Channel creation and metadata
             },
-            onEvent = onEvent
+            onEvent = onEvent,
+            onEndOfStoredEvents = onEndOfStoredEvents
         )
     }
 
@@ -81,17 +93,29 @@ class SubscriptionManager @Inject constructor(
     fun subscribeToDirectMessages(
         userPubkey: String, 
         sinceTime: Long? = null,
-        onEvent: (NostrEvent) -> Unit
+        limitPerDirection: Int? = null,
+        onEvent: (NostrEvent) -> Unit,
+        onEndOfStoredEvents: () -> Unit = {}
     ): String {
-        // Create both filters in a single subscription
-        val filter = createFilter {
-            put("kinds", JSONArray().put(1059))
-            put("#p", JSONArray().put(userPubkey))  // Messages sent to us
-            put("authors", JSONArray().put(userPubkey))  // Messages sent by us
-            sinceTime?.let { put("since", it) }
+        val safeLimit = limitPerDirection?.coerceIn(1, 5000)
+        // Use two filters under one REQ (logical OR):
+        // 1) inbox (messages addressed to us), 2) outbox (messages authored by us).
+        val filters = JSONArray().apply {
+            put(createFilter {
+                put("kinds", JSONArray().put(1059))
+                put("#p", JSONArray().put(userPubkey))
+                sinceTime?.let { put("since", it) }
+                safeLimit?.let { put("limit", it) }
+            })
+            put(createFilter {
+                put("kinds", JSONArray().put(1059))
+                put("authors", JSONArray().put(userPubkey))
+                sinceTime?.let { put("since", it) }
+                safeLimit?.let { put("limit", it) }
+            })
         }
 
-        return subscribe(filter, onEvent)
+        return subscribe(filters, onEvent, onEndOfStoredEvents)
     }
 
     /**
@@ -260,6 +284,9 @@ class SubscriptionManager @Inject constructor(
 
                     try {
                         if (subId != null) {
+                            if (!shouldDispatchEvent(subId, event.id)) {
+                                return
+                            }
                             val callback = activeSubscriptions[subId]?.onEvent
                             if (callback == null) {
                                 android.util.Log.w("SubscriptionManager", "No callback registered for subId=$subId")
@@ -293,6 +320,23 @@ class SubscriptionManager @Inject constructor(
                     val notice = jsonArray.getString(1)
                     android.util.Log.w("SubscriptionManager", "[WS NOTICE] $notice")
                 }
+                "CLOSED" -> {
+                    // ["CLOSED", <subid>, <message>]
+                    val subId = jsonArray.optString(1, "")
+                    val reason = jsonArray.optString(2, "")
+                    android.util.Log.w("SubscriptionManager", "[WS CLOSED] subId=$subId reason=$reason")
+                }
+                "OK" -> {
+                    // ["OK", <event-id>, <accepted>, <message>]
+                    val eventId = jsonArray.optString(1, "")
+                    val accepted = jsonArray.optBoolean(2, false)
+                    val reason = jsonArray.optString(3, "")
+                    if (!accepted) {
+                        android.util.Log.w("SubscriptionManager", "[WS OK] Event rejected id=$eventId reason=$reason")
+                    } else {
+                        android.util.Log.d("SubscriptionManager", "[WS OK] Event accepted id=$eventId")
+                    }
+                }
                 else -> {
                     android.util.Log.w("SubscriptionManager", "[WS INCOMING] Unknown message type: $msgType")
                 }
@@ -300,6 +344,16 @@ class SubscriptionManager @Inject constructor(
         } catch (e: Exception) {
             android.util.Log.e("SubscriptionManager", "[WS ERROR] Failed to parse incoming message: $message", e)
         }
+    }
+
+    private fun shouldDispatchEvent(subId: String, eventId: String): Boolean {
+        if (subId.isBlank() || eventId.isBlank()) return true
+        val key = "$subId:$eventId"
+        synchronized(deliveredEventLock) {
+            if (deliveredEventKeys.containsKey(key)) return false
+            deliveredEventKeys[key] = Unit
+        }
+        return true
     }
 
     private fun generateSubscriptionId(): String {
