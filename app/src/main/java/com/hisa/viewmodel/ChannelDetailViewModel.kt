@@ -68,7 +68,7 @@ class ChannelDetailViewModel(
         viewModelScope.launch {
             try {
                 // Subscribe to channel creation/metadata events and update channel state when matching channelId
-                channelSubscriptionId = subscriptionManager.subscribeToChannels { event ->
+                channelSubscriptionId = subscriptionManager.subscribeToChannels(onEvent = { event ->
                     try {
                         when (event.kind) {
                             40 -> {
@@ -122,7 +122,7 @@ class ChannelDetailViewModel(
                     } catch (e: Exception) {
                         Log.e("ChannelDetailViewModel", "Error handling channel event", e)
                     }
-                }
+                })
             } catch (e: Exception) {
                 Log.e("ChannelDetailViewModel", "Failed to subscribe to channel metadata: ${e.localizedMessage}")
             }

@@ -9,13 +9,18 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.hisa.data.model.Message
+import com.hisa.data.model.ChatroomKey
 import com.hisa.data.nostr.NostrClient
 import com.hisa.data.repository.ConversationRepository
 import com.hisa.data.repository.MetadataRepository
 import com.hisa.data.repository.MessageRepository
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.update
@@ -26,6 +31,8 @@ import timber.log.Timber
 import java.security.SecureRandom
 import org.bouncycastle.crypto.params.X25519PrivateKeyParameters
 import com.hisa.util.Constants
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicBoolean
 
 @HiltViewModel
 @RequiresApi(Build.VERSION_CODES.O)
@@ -36,11 +43,25 @@ class MessagesViewModel @Inject constructor(
     private val secureStorage: com.hisa.data.storage.SecureStorage,
     private val subscriptionManager: com.hisa.data.nostr.SubscriptionManager
 ) : ViewModel() {
+    private data class AuthContext(
+        val localPrivateKeyBytes: ByteArray?,
+        val localPrivateKeyHex: String?,
+        val signerPubkey: String?,
+        val signerPackage: String?,
+        val hasExternalSigner: Boolean
+    )
+
     /**
      * Clears all messages from memory. Call this on logout or when switching accounts.
      */
     fun clearMessages() {
         _messages.value = emptyList()
+        seenGiftWrapEventIds.clear()
+        inboxExternalDecryptRequested.set(false)
+        directSubscriptionStarted = false
+        directLoadTimeoutJob?.cancel()
+        directLoadTimeoutJob = null
+        _isLoading.value = false
         // Clear direct DM subscription when clearing messages to avoid stale handlers
         directSubscriptionId?.let {
             try {
@@ -62,13 +83,24 @@ class MessagesViewModel @Inject constructor(
         get() = cleanPubkeyFormat(userPubkey)
     // Subscription id for direct messages (kind 1059) so we can unsubscribe later
     private var directSubscriptionId: String? = null
-    // Per-conversation subscription ids (two subscriptions per conversation to cover both directions)
+    private var directSubscriptionStarted: Boolean = false
+    private var directLoadTimeoutJob: Job? = null
+    // Active conversation subscription ids (single REQ with two filters for both directions).
     private val conversationSubscriptionIds: MutableList<String> = mutableListOf()
+    private var activeConversationPartner: String? = null
+    private val seenGiftWrapEventIds = ConcurrentHashMap.newKeySet<String>()
+    private val giftWrapProcessingMutex = Mutex()
+    private val inboxExternalDecryptRequested = AtomicBoolean(false)
     private val _messages = MutableStateFlow<List<Message>>(emptyList())
     val messages: StateFlow<List<Message>> = _messages
+    private val _isLoading = MutableStateFlow(false)
+    val isLoading: StateFlow<Boolean> = _isLoading
     // Errors from send operations (observable by UI)
     private val _sendError = MutableStateFlow<String?>(null)
     val sendError: StateFlow<String?> = _sendError
+    fun clearSendError() {
+        _sendError.value = null
+    }
     
 
     /**
@@ -109,51 +141,173 @@ class MessagesViewModel @Inject constructor(
         }
     }
 
+    fun bindSessionAuthState(sessionPubkey: String?, sessionPrivateKeyHex: String?) {
+        val normalizedSessionPub = normalizeSigningPubkey(sessionPubkey)
+        if (normalizedSessionPub.matches(Regex("[0-9a-f]{64}"))) {
+            userPubkey = normalizedSessionPub
+        }
+        val normalizedPriv = sessionPrivateKeyHex?.trim()?.lowercase()
+        if (!normalizedPriv.isNullOrBlank() && normalizedPriv.matches(Regex("[0-9a-f]{64}"))) {
+            privateKey = normalizedPriv
+        }
+        viewModelScope.launch(Dispatchers.IO) {
+            tryRestoreExternalSignerFromStorage()
+        }
+    }
+
+    private suspend fun tryRestoreExternalSignerFromStorage(): Boolean {
+        val configuredPkg = com.hisa.data.nostr.ExternalSignerManager.getConfiguredPackage()
+        val configuredPub = com.hisa.data.nostr.ExternalSignerManager.getConfiguredPubkey()
+        if (!configuredPkg.isNullOrBlank() && !configuredPub.isNullOrBlank()) return true
+
+        val storedPkg = secureStorage.getExternalSignerPackage()
+        val storedPub = normalizeSigningPubkey(secureStorage.getExternalSignerPubkey())
+        if (storedPkg.isNullOrBlank() || !storedPub.matches(Regex("[0-9a-f]{64}"))) return false
+
+        return try {
+            com.hisa.data.nostr.ExternalSignerManager.ensureConfigured(storedPub, storedPkg, null)
+            true
+        } catch (e: Exception) {
+            Timber.w(e, "Failed to restore external signer from storage")
+            false
+        }
+    }
+
+    private fun resolveLocalPrivateKeyFromStorageOrSession(): Pair<ByteArray?, String?> {
+        val fromNsec = secureStorage.getNsec()?.let { nsec ->
+            kotlin.runCatching { com.hisa.util.KeyGenerator.nsecToPrivateKey(nsec) }.getOrNull()
+        }?.takeIf { it.size == 32 }
+        if (fromNsec != null) {
+            val hex = fromNsec.joinToString("") { "%02x".format(it) }
+            return Pair(fromNsec, hex)
+        }
+
+        val fromHex = if (privateKey.matches(Regex("[0-9a-fA-F]{64}"))) {
+            kotlin.runCatching { hexStringToBytes(privateKey) }.getOrNull()
+        } else null
+        return Pair(fromHex, privateKey.takeIf { it.matches(Regex("[0-9a-fA-F]{64}")) })
+    }
+
+    private suspend fun resolveAuthContext(refreshOnce: Boolean = true): AuthContext {
+        var (localBytes, localHex) = resolveLocalPrivateKeyFromStorageOrSession()
+        if (localBytes == null && refreshOnce) {
+            kotlin.runCatching { initialize() }
+            val refreshed = resolveLocalPrivateKeyFromStorageOrSession()
+            localBytes = refreshed.first
+            localHex = refreshed.second
+        }
+
+        var signerPackage = com.hisa.data.nostr.ExternalSignerManager.getConfiguredPackage()
+        var signerPubkey = normalizeSigningPubkey(com.hisa.data.nostr.ExternalSignerManager.getConfiguredPubkey())
+        if (signerPackage.isNullOrBlank() || !signerPubkey.matches(Regex("[0-9a-f]{64}"))) {
+            if (tryRestoreExternalSignerFromStorage()) {
+                signerPackage = com.hisa.data.nostr.ExternalSignerManager.getConfiguredPackage()
+                signerPubkey = normalizeSigningPubkey(com.hisa.data.nostr.ExternalSignerManager.getConfiguredPubkey())
+            } else {
+                signerPackage = secureStorage.getExternalSignerPackage()
+                signerPubkey = normalizeSigningPubkey(secureStorage.getExternalSignerPubkey())
+            }
+        }
+
+        val hasExternalSigner = !signerPackage.isNullOrBlank() && signerPubkey.matches(Regex("[0-9a-f]{64}"))
+        return AuthContext(
+            localPrivateKeyBytes = localBytes,
+            localPrivateKeyHex = localHex,
+            signerPubkey = signerPubkey.takeIf { it.matches(Regex("[0-9a-f]{64}")) },
+            signerPackage = signerPackage,
+            hasExternalSigner = hasExternalSigner
+        )
+    }
+
     init {
         // Kick off initialization: derive user pubkey from stored nsec and ensure
         // an X25519 private key exists for NIP-44 encryption.
         viewModelScope.launch(Dispatchers.IO) {
             try {
                 initialize()
-                // Incoming messages are handled centrally by SubscriptionManager via NostrClient.incomingMessages
-                // Subscribe to direct messages (kind 1059) addressed to this user
-                if (userPubkey.isNotBlank()) {
-                    try {
-                        var assignedSubId = ""
-                        // Subscribe with a larger time window to fetch historical messages
-                        val thirtyDaysAgo = System.currentTimeMillis() / 1000 - (30 * 24 * 60 * 60)
-                        
-                        // Create filter for messages sent to us or by us
-                        val subId = subscriptionManager.subscribeToDirectMessages(
-                            userPubkey = userPubkey,
-                            sinceTime = thirtyDaysAgo
-                        ) { nostrEvent ->
-                            try {
-                                // Convert NostrEvent back to JSONObject and hand to handler
-                                val obj = JSONObject().apply {
-                                    put("id", nostrEvent.id)
-                                    put("pubkey", nostrEvent.pubkey)
-                                    put("created_at", nostrEvent.createdAt)
-                                    put("kind", nostrEvent.kind)
-                                    put("tags", JSONArray(nostrEvent.tags.map { tagParts -> JSONArray(tagParts) }))
-                                    put("content", nostrEvent.content)
-                                    put("sig", nostrEvent.sig)
-                                }
-                                Timber.d("Direct DM subscription callback for subId=%s eventId=%s", assignedSubId, nostrEvent.id)
-                                handleGiftWrap(obj, null)
-                            } catch (e: Exception) {
-                                Timber.e(e, "Error handling subscribed direct message event")
-                            }
-                        }
-                        directSubscriptionId = subId
-                        assignedSubId = subId
-                        Timber.i("Subscribed to direct messages for userPubkey=%s subId=%s", userPubkey, subId)
-                    } catch (e: Exception) {
-                        Timber.e(e, "Failed to subscribe to direct messages for userPubkey=%s", userPubkey)
-                    }
-                }
             } catch (e: Exception) {
                 Timber.e(e, "Error during MessagesViewModel initialization")
+            }
+        }
+    }
+
+    fun ensureSubscribed() {
+        viewModelScope.launch(Dispatchers.IO) {
+            if (directSubscriptionStarted) return@launch
+            if (userPubkey.isBlank()) {
+                initialize()
+            }
+            if (userPubkey.isBlank()) {
+                Timber.w("Cannot subscribe to direct messages: user pubkey unavailable")
+                _isLoading.value = false
+                return@launch
+            }
+            directSubscriptionStarted = true
+            _isLoading.value = true
+            directLoadTimeoutJob?.cancel()
+            directLoadTimeoutJob = viewModelScope.launch(Dispatchers.IO) {
+                delay(4000)
+                _isLoading.value = false
+            }
+
+            try {
+                var assignedSubId = ""
+                val subId = subscriptionManager.subscribeToDirectMessages(
+                    userPubkey = userPubkey,
+                    sinceTime = DIRECT_DM_SINCE,
+                    limitPerDirection = DIRECT_DM_LIMIT_PER_FILTER,
+                    onEvent = { nostrEvent ->
+                        try {
+                            val obj = JSONObject().apply {
+                                put("id", nostrEvent.id)
+                                put("pubkey", nostrEvent.pubkey)
+                                put("created_at", nostrEvent.createdAt)
+                                put("kind", nostrEvent.kind)
+                                put("tags", JSONArray(nostrEvent.tags.map { tagParts -> JSONArray(tagParts) }))
+                                put("content", nostrEvent.content)
+                                put("sig", nostrEvent.sig)
+                            }
+                            Timber.d("Direct DM subscription callback for subId=%s eventId=%s", assignedSubId, nostrEvent.id)
+                            handleGiftWrap(obj, null)
+                        } catch (e: Exception) {
+                            Timber.e(e, "Error handling subscribed direct message event")
+                        }
+                    },
+                    onEndOfStoredEvents = {
+                        directLoadTimeoutJob?.cancel()
+                        directLoadTimeoutJob = null
+                        _isLoading.value = false
+                    }
+                )
+                directSubscriptionId = subId
+                assignedSubId = subId
+                Timber.i(
+                    "Subscribed to direct messages for userPubkey=%s subId=%s since=%d limitPerFilter=%d",
+                    userPubkey,
+                    subId,
+                    DIRECT_DM_SINCE,
+                    DIRECT_DM_LIMIT_PER_FILTER
+                )
+            } catch (e: Exception) {
+                directSubscriptionStarted = false
+                _isLoading.value = false
+                Timber.e(e, "Failed to subscribe to direct messages for userPubkey=%s", userPubkey)
+            }
+        }
+    }
+
+    fun stopDirectMessagesSubscription() {
+        directLoadTimeoutJob?.cancel()
+        directLoadTimeoutJob = null
+        _isLoading.value = false
+        directSubscriptionStarted = false
+        directSubscriptionId?.let { id ->
+            try {
+                subscriptionManager.unsubscribe(id)
+            } catch (e: Exception) {
+                Timber.w(e, "Failed to unsubscribe direct subscription %s", id)
+            } finally {
+                directSubscriptionId = null
             }
         }
     }
@@ -164,109 +318,180 @@ class MessagesViewModel @Inject constructor(
         const val KIND_GIFT_WRAP = 1059
         const val KIND_SEAL = 13
         const val KIND_DM = 14
+        private const val DIRECT_DM_HISTORY_DAYS = 180L
+        private const val DIRECT_DM_LIMIT_PER_FILTER = 1000
+        private const val CONVERSATION_DM_HISTORY_DAYS = 180L
+        private const val CONVERSATION_DM_LIMIT_PER_FILTER = 1000
+        // Stable timestamp across VM instances in one process, helps filter dedupe in SubscriptionManager.
+        val DIRECT_DM_SINCE: Long =
+            (System.currentTimeMillis() / 1000) - (DIRECT_DM_HISTORY_DAYS * 24L * 60L * 60L)
     // Use centralized onboarding relays as a safe default; runtime val (not const)
     val relayUrl: String = Constants.ONBOARDING_RELAYS.firstOrNull() ?: ""
     }
 
     @RequiresApi(Build.VERSION_CODES.O)
-    private suspend fun decryptNip17Message(wrapEvent: JSONObject): Message? {
+    private suspend fun decryptNip17Message(wrapEvent: JSONObject, expectedOtherPubkey: String? = null): Message? {
         return try {
-            val x25519KeyRaw = x25519PrivateKey ?: secureStorage.getX25519PrivateKey()
-                ?: throw IllegalStateException("No X25519 key available")
-
-            // Quick heuristic: if someone accidentally stored a bech32 nsec or other non-hex
-            // value under the X25519 key slot, detect and emit a clear log.
-            if (x25519KeyRaw.startsWith("nsec", true) || x25519KeyRaw.startsWith("npub", true)) {
-                timber.log.Timber.e("Stored X25519 key looks like a bech32 nsec/npub value. Ensure X25519 is stored separately and is 64 hex chars.")
-                throw IllegalStateException("Stored X25519 key appears to be bech32 (nsec). Use a proper X25519 64-hex private key")
-            }
-
-            if (!x25519KeyRaw.matches(Regex("[0-9a-fA-F]{64}"))) {
-                timber.log.Timber.e("Stored X25519 key invalid format (expected 64 hex chars): %s", x25519KeyRaw.take(16))
-                throw IllegalStateException("Invalid X25519 private key format")
-            }
-
-            timber.log.Timber.d("Using X25519 key to decrypt (hexSnippet)=%s", x25519KeyRaw.take(8))
-
-            // Convert hex -> bytes and perform a small sanity check by deriving its public key
-            val recipientPrivateKeyBytes = try {
-                hexStringToBytes(x25519KeyRaw)
-            } catch (e: Exception) {
-                timber.log.Timber.e(e, "Failed to parse stored X25519 key hex")
-                throw IllegalStateException("Invalid X25519 private key format")
-            }
-
-            // Derive our X25519 public key to compare against incoming tags when available
-            try {
-                val xPrivParam = org.bouncycastle.crypto.params.X25519PrivateKeyParameters(recipientPrivateKeyBytes, 0)
-                val xPub = ByteArray(32)
-                xPrivParam.generatePublicKey().encode(xPub, 0)
-                val derivedPubHex = xPub.joinToString("") { "%02x".format(it) }
-
-                // Inspect event tags for diagnostics: collect p-tags (recipients) and the x-tag (ephemeral sender pub)
-                val incomingPub = wrapEvent.optString("pubkey", "")
-                var tagX: String? = null
-                val pTags = mutableListOf<String>()
-                val tags = wrapEvent.optJSONArray("tags") ?: org.json.JSONArray()
-                for (i in 0 until tags.length()) {
-                    val tag = tags.optJSONArray(i) ?: continue
-                    when (tag.optString(0)) {
-                        "x" -> tagX = tag.optString(1)
-                        "p" -> pTags.add(tag.optString(1))
+            val authContext = resolveAuthContext(refreshOnce = true)
+            val senderHints = buildList {
+                val expected = cleanPubkeyFormat(expectedOtherPubkey ?: "")
+                if (expected.matches(Regex("[0-9a-f]{64}", RegexOption.IGNORE_CASE))) add(expected.lowercase())
+                _messages.value.forEach { msg ->
+                    val sender = cleanPubkeyFormat(msg.pubkey).lowercase()
+                    if (sender.matches(Regex("[0-9a-f]{64}")) && !sender.equals(cleanedUserPubkey, true)) {
+                        add(sender)
                     }
+                    msg.recipientPubkeys
+                        .map { cleanPubkeyFormat(it).lowercase() }
+                        .filter { it.matches(Regex("[0-9a-f]{64}")) && !it.equals(cleanedUserPubkey, true) }
+                        .forEach { add(it) }
                 }
-
-                // Check whether our derived X25519 public key appears in the p-tags (recipient list)
-                val matchesPTag = pTags.any { it.equals(derivedPubHex, true) }
-                val matchesSigningPub = pTags.any { it.equals(cleanedUserPubkey, true) }
-
-                timber.log.Timber.d(
-                    "X25519 derivedPub=%s pTags=%s xTag=%s outerPub=%s matchesPTag=%s matchesSigningPub=%s",
-                    derivedPubHex.take(12), pTags.joinToString(","), tagX?.take(12), incomingPub.take(12), matchesPTag, matchesSigningPub
+            }
+            val innerEvent = authContext.localPrivateKeyBytes?.let { recipientPrivateKeyBytes ->
+                timber.log.Timber.d("Using local nsec key for NIP-44 decrypt")
+                messageRepository.decryptGiftWrappedMessage(
+                    event = wrapEvent,
+                    recipientPrivateKey = recipientPrivateKeyBytes,
+                    senderPubkeyHints = senderHints
                 )
-
-                if (!matchesPTag && !matchesSigningPub) {
-                    timber.log.Timber.w(
-                        "Derived X25519 public key not present in event p-tags. This may mean the sender used a different recipient pubkey format or the stored X25519 key is incorrect. derived=%s",
-                        derivedPubHex.take(12)
+            } ?: run {
+                if (!com.hisa.data.nostr.ExternalSignerManager.isLauncherRegistered()) {
+                    Timber.d("Skipping external decrypt: launcher not registered")
+                    return null
+                }
+                val signerPkg = authContext.signerPackage ?: return null
+                val signerPub = authContext.signerPubkey
+                    ?: return null
+                kotlin.runCatching {
+                    com.hisa.data.nostr.ExternalSignerManager.ensureConfigured(
+                        signerPub,
+                        signerPkg,
+                        null
                     )
                 }
-            } catch (e: Exception) {
-                timber.log.Timber.w(e, "Failed to derive X25519 public key for sanity check")
-            }
+                timber.log.Timber.d("Using external signer for NIP-44 decrypt")
+                messageRepository.decryptGiftWrappedMessage(
+                    event = wrapEvent,
+                    recipientPrivateKey = null,
+                    externalDecryptor = { ciphertext, senderPubkey ->
+                        com.hisa.data.nostr.ExternalSignerManager.nip44Decrypt(ciphertext, senderPubkey)
+                    },
+                    maxSenderCandidates = 2,
+                    senderPubkeyHints = senderHints
+                )
+            } ?: return null
 
-            // 1. Decrypt the outer layer
-            val innerJson = messageRepository.decryptGiftWrappedMessage(
-                event = wrapEvent,
-                recipientPrivateKey = recipientPrivateKeyBytes
-            )?.toString() ?: return null
+            val innerPTags = mutableListOf<String>()
+            val innerTags = innerEvent.optJSONArray("tags") ?: JSONArray()
+            for (i in 0 until innerTags.length()) {
+                val t = innerTags.optJSONArray(i) ?: continue
+                if (t.optString(0) == "p") innerPTags.add(cleanPubkeyFormat(t.optString(1)))
+            }
+            Timber.d(
+                "DM decrypt trace: outerId=%s outerPub=%s expectedOther=%s innerId=%s innerKind=%d innerPub=%s innerPTags=%s resolvedSender=%s",
+                wrapEvent.optString("id", ""),
+                cleanPubkeyFormat(wrapEvent.optString("pubkey", "")),
+                cleanPubkeyFormat(expectedOtherPubkey ?: ""),
+                innerEvent.optString("id", ""),
+                innerEvent.optInt("kind", -1),
+                cleanPubkeyFormat(innerEvent.optString("pubkey", "")),
+                innerPTags.joinToString(","),
+                cleanPubkeyFormat(innerEvent.optString("__resolved_sender_pubkey", ""))
+            )
 
             // 2. Parse the decrypted message
-            val parsed = messageRepository.parseMessage(innerJson) ?: return null
+            val parsed = messageRepository.parseMessage(innerEvent.toString()) ?: run {
+                Timber.w(
+                    "Decrypted inner event parse failed: outerId=%s innerId=%s innerKind=%d innerPub=%s",
+                    wrapEvent.optString("id", ""),
+                    innerEvent.optString("id", ""),
+                    innerEvent.optInt("kind", -1),
+                    cleanPubkeyFormat(innerEvent.optString("pubkey", ""))
+                )
+                return null
+            }
 
             // 3. Normalize the message
-            normalizeMessage(parsed, wrapEvent.optString("pubkey"))
+            normalizeMessage(
+                message = parsed,
+                outerPubkey = wrapEvent.optString("pubkey"),
+                resolvedSenderPubkey = innerEvent.optString("__resolved_sender_pubkey"),
+                expectedOtherPubkey = expectedOtherPubkey
+            ).also {
+                Timber.d(
+                    "DM normalize trace: msgId=%s finalSender=%s recipients=%s expectedOther=%s me=%s",
+                    it.id,
+                    cleanPubkeyFormat(it.pubkey),
+                    it.recipientPubkeys.map { pk -> cleanPubkeyFormat(pk) },
+                    cleanPubkeyFormat(expectedOtherPubkey ?: ""),
+                    cleanedUserPubkey
+                )
+            }
         } catch (e: Exception) {
             Timber.e(e, "Failed to decrypt NIP-17 message")
             null
         }
     }
 
-    private fun normalizeMessage(message: Message, outerPubkey: String): Message {
+    private fun normalizeMessage(
+        message: Message,
+        outerPubkey: String,
+        resolvedSenderPubkey: String?,
+        expectedOtherPubkey: String?
+    ): Message {
+        val cleanedResolved = cleanPubkeyFormat(resolvedSenderPubkey ?: "")
+        val cleanedExpected = cleanPubkeyFormat(expectedOtherPubkey ?: "")
+        val cleanedOuter = cleanPubkeyFormat(outerPubkey)
+
+        fun normalizeSenderAndRecipients(pubkey: String, recipients: List<String>): Pair<String, List<String>> {
+            val cleanedPub = cleanPubkeyFormat(pubkey)
+            val cleanedRecipients = recipients.map { cleanPubkeyFormat(it) }.filter { it.isNotBlank() }
+            val incomingForMe = cleanedRecipients.any { it.equals(cleanedUserPubkey, true) }
+            val senderLooksWrapperLike =
+                cleanedPub.isBlank() ||
+                cleanedPub.equals(cleanedUserPubkey, true) ||
+                cleanedPub.equals(cleanedOuter, true)
+            val shouldReplaceIncomingSender = incomingForMe && senderLooksWrapperLike
+            val finalPub = when {
+                shouldReplaceIncomingSender &&
+                    cleanedExpected.matches(Regex("[0-9a-f]{64}", RegexOption.IGNORE_CASE)) -> cleanedExpected
+                shouldReplaceIncomingSender &&
+                    cleanedResolved.matches(Regex("[0-9a-f]{64}", RegexOption.IGNORE_CASE)) -> cleanedResolved
+                else -> cleanedPub
+            }
+            return Pair(finalPub, cleanedRecipients)
+        }
+
         return when (message) {
-            is Message.TextMessage -> message.copy(
-                pubkey = cleanPubkeyFormat(message.pubkey),
-                recipientPubkeys = message.recipientPubkeys.map { cleanPubkeyFormat(it) }
-            )
-            is Message.FileMessage -> message.copy(
-                pubkey = cleanPubkeyFormat(message.pubkey),
-                recipientPubkeys = message.recipientPubkeys.map { cleanPubkeyFormat(it) }
-            )
+            is Message.TextMessage -> {
+                val (pub, recips) = normalizeSenderAndRecipients(message.pubkey, message.recipientPubkeys)
+                message.copy(pubkey = pub, recipientPubkeys = recips)
+            }
+            is Message.FileMessage -> {
+                val (pub, recips) = normalizeSenderAndRecipients(message.pubkey, message.recipientPubkeys)
+                message.copy(pubkey = pub, recipientPubkeys = recips)
+            }
             else -> message
         }
     }
 
     private suspend fun updateMessageState(message: Message, expectedOtherPubkey: String?) {
+        val sender = cleanPubkeyFormat(message.pubkey)
+        val recipients = message.recipientPubkeys.map { cleanPubkeyFormat(it) }
+        val relatesToCurrentUser =
+            sender.equals(cleanedUserPubkey, true) ||
+                recipients.any { it.equals(cleanedUserPubkey, true) }
+        if (!relatesToCurrentUser) {
+            Timber.d(
+                "Skipping message not addressed to current user: id=%s sender=%s recipients=%s me=%s",
+                message.id,
+                sender,
+                recipients,
+                cleanedUserPubkey
+            )
+            return
+        }
+
         val isInConversation = expectedOtherPubkey?.let { other ->
             message.pubkey == cleanPubkeyFormat(other) || 
             message.recipientPubkeys.contains(cleanPubkeyFormat(other))
@@ -319,6 +544,14 @@ class MessagesViewModel @Inject constructor(
                 replyTo = null,
                 relayUrls = null
             )
+            Timber.w(
+                "Placeholder trace: eventId=%s outerPub=%s expectedOther=%s displayPub=%s recipients=%s",
+                giftWrap.optString("id", ""),
+                cleanPubkeyFormat(outerPubkey),
+                cleanPubkeyFormat(expectedOtherPubkey ?: ""),
+                cleanPubkeyFormat(displayPubkey),
+                placeholder.recipientPubkeys.map { cleanPubkeyFormat(it) }
+            )
             
             _messages.update { current ->
                 if (current.any { it.id == placeholder.id }) current 
@@ -353,13 +586,7 @@ class MessagesViewModel @Inject constructor(
     override fun onCleared() {
         super.onCleared()
         // Subscriptions created via SubscriptionManager should be unsubscribed explicitly
-        directSubscriptionId?.let {
-            try {
-                subscriptionManager.unsubscribe(it)
-            } catch (e: Exception) {
-                Timber.w(e, "Failed to unsubscribe direct subscription %s", it)
-            }
-        }
+        stopDirectMessagesSubscription()
     }
 
     /**
@@ -388,6 +615,29 @@ class MessagesViewModel @Inject constructor(
                 } catch (e: Exception) {
                     Timber.w(e, "Failed to derive signing pubkey from stored nsec")
                 }
+            }
+
+            // External signer fallback: recover signing pubkey/package from persisted auth prefs.
+            if (userPubkey.isBlank()) {
+                val extPub = normalizeSigningPubkey(secureStorage.getExternalSignerPubkey())
+                if (extPub.matches(Regex("[0-9a-fA-F]{64}"))) {
+                    userPubkey = extPub.lowercase()
+                }
+            }
+            try {
+                val extPub = secureStorage.getExternalSignerPubkey()
+                val extPkg = secureStorage.getExternalSignerPackage()
+                if (!extPub.isNullOrBlank() && !extPkg.isNullOrBlank()) {
+                    kotlinx.coroutines.runBlocking {
+                        com.hisa.data.nostr.ExternalSignerManager.ensureConfigured(
+                            normalizeSigningPubkey(extPub),
+                            extPkg,
+                            null
+                        )
+                    }
+                }
+            } catch (e: Exception) {
+                Timber.w(e, "Failed to restore external signer configuration")
             }
 
             // Ensure an X25519 private key exists in secure storage
@@ -442,39 +692,90 @@ class MessagesViewModel @Inject constructor(
     @RequiresApi(Build.VERSION_CODES.O)
     private fun handleGiftWrap(giftWrap: JSONObject, expectedOtherPubkey: String? = null) {
         viewModelScope.launch(Dispatchers.IO) {
-            try {
-                val eventId = giftWrap.optString("id", "unknown")
-                Timber.i("Processing gift wrap event: $eventId")
+            giftWrapProcessingMutex.withLock {
+                try {
+                    val eventId = giftWrap.optString("id", "unknown")
+                    if (eventId.isNotBlank() && eventId != "unknown") {
+                        val firstSeen = seenGiftWrapEventIds.add(eventId)
+                        if (!firstSeen) {
+                            Timber.d("Skipping duplicate gift wrap event: %s", eventId)
+                            return@withLock
+                        }
+                    }
+                    Timber.i("Processing gift wrap event: $eventId")
 
-                // 1. Verify message is for current user
-                if (!isMessageForCurrentUser(giftWrap)) {
-                    Timber.d("Message not for current user, skipping")
-                    return@launch
-                }
+                    // 1. Verify message is for current user
+                    if (!isMessageForCurrentUser(giftWrap)) {
+                        Timber.d("Message not for current user, skipping")
+                        return@withLock
+                    }
 
-                // 2. Decrypt the message
-                val decryptedMessage = decryptNip17Message(giftWrap) ?: run {
-                    Timber.e("Failed to decrypt message $eventId")
+                    val authContext = resolveAuthContext(refreshOnce = false)
+                    val usingExternalSignerOnly = authContext.localPrivateKeyBytes == null && authContext.hasExternalSigner
+                    val hasNoDecryptCapability = authContext.localPrivateKeyBytes == null && !authContext.hasExternalSigner
+
+                    if (hasNoDecryptCapability) {
+                        addUndecryptablePlaceholder(giftWrap, expectedOtherPubkey)
+                        return@withLock
+                    }
+
+                    if (usingExternalSignerOnly && expectedOtherPubkey.isNullOrBlank()) {
+                        if (!com.hisa.data.nostr.ExternalSignerManager.isLauncherRegistered()) {
+                            Timber.d("Skipping single inbox external decrypt: launcher not registered")
+                            addUndecryptablePlaceholder(giftWrap, expectedOtherPubkey)
+                            return@withLock
+                        }
+                        // Messages tab (inbox) path: trigger signer request at most once.
+                        // This allows one-time approval prompt while avoiding a request storm.
+                        val shouldRequestOnce = inboxExternalDecryptRequested.compareAndSet(false, true)
+                        if (!shouldRequestOnce) {
+                            addUndecryptablePlaceholder(giftWrap, expectedOtherPubkey)
+                            return@withLock
+                        }
+                        val decryptedMessage = decryptNip17Message(giftWrap, expectedOtherPubkey)
+                        if (decryptedMessage != null) {
+                            updateMessageState(decryptedMessage, expectedOtherPubkey)
+                        } else {
+                            addUndecryptablePlaceholder(giftWrap, expectedOtherPubkey)
+                        }
+                        return@withLock
+                    }
+
+                    // When activity/launcher is not attached, skip decrypt requests entirely.
+                    if (usingExternalSignerOnly && !com.hisa.data.nostr.ExternalSignerManager.isLauncherRegistered()) {
+                        Timber.d("Skipping external signer decrypt: launcher not registered")
+                        return@withLock
+                    }
+
+                    // 2. Decrypt the message
+                    val decryptedMessage = decryptNip17Message(giftWrap, expectedOtherPubkey) ?: run {
+                        Timber.e("Failed to decrypt or parse message %s", eventId)
+                        addUndecryptablePlaceholder(giftWrap, expectedOtherPubkey)
+                        return@withLock
+                    }
+
+                    // 3. Update state if message is valid
+                    updateMessageState(decryptedMessage, expectedOtherPubkey)
+                } catch (e: Exception) {
+                    Timber.e(e, "Error in handleGiftWrap")
                     addUndecryptablePlaceholder(giftWrap, expectedOtherPubkey)
-                    return@launch
                 }
-
-                // 3. Update state if message is valid
-                updateMessageState(decryptedMessage, expectedOtherPubkey)
-            } catch (e: Exception) {
-                Timber.e(e, "Error in handleGiftWrap")
-                addUndecryptablePlaceholder(giftWrap, expectedOtherPubkey)
             }
         }
     }
 
     private fun isMessageForCurrentUser(event: JSONObject): Boolean {
+        // Keep events authored by us so outbox/history appears in conversation lists.
+        if (cleanPubkeyFormat(event.optString("pubkey")) == cleanedUserPubkey) {
+            return true
+        }
+
         val tags = event.optJSONArray("tags") ?: return false
         for (i in 0 until tags.length()) {
             val tag = tags.optJSONArray(i) ?: continue
             if (tag.optString(0) == "p") {
                 val recipientPubkey = cleanPubkeyFormat(tag.optString(1))
-                if (recipientPubkey == cleanedUserPubkey || recipientPubkey == x25519PublicKey) {
+                if (recipientPubkey == cleanedUserPubkey) {
                     return true
                 }
             }
@@ -485,40 +786,57 @@ class MessagesViewModel @Inject constructor(
     fun getConversations(): Map<String, List<Message>> {
         val messages = _messages.value
         Timber.d("Total messages in state: %d", messages.size)
-        
-        // Group messages by conversation partner (the other person in the conversation)
-        val grouped = messages.groupBy { msg ->
-            // Normalize sender and recipients to canonical trimmed hex values
-            val sender = cleanPubkeyFormat(msg.pubkey)
-            val recipients = msg.recipientPubkeys.map { cleanPubkeyFormat(it) }
+        messages.forEach { msg ->
+            Timber.d(
+                "Conversation source trace: msgId=%s sender=%s recipients=%s placeholder=%s",
+                msg.id,
+                cleanPubkeyFormat(msg.pubkey),
+                msg.recipientPubkeys.map { cleanPubkeyFormat(it) },
+                (msg is Message.TextMessage && msg.content == "Unable to decrypt message")
+            )
+        }
 
-            when {
-                // If we sent it (we're the pubkey), use the first recipient as conversation partner
-                sender.equals(cleanedUserPubkey, true) -> {
-                    val partner = recipients.firstOrNull()
-                    Timber.d("Sent message id=%s grouped by recipient=%s", msg.id, partner)
-                    partner ?: "NO_RECIPIENT"
-                }
-                // If we received it (we're in recipientPubkeys), use sender's pubkey as conversation partner
-                recipients.any { it.equals(cleanedUserPubkey, true) } -> {
-                    Timber.d("Received message id=%s grouped by sender=%s", msg.id, sender)
-                    sender
-                }
-                // Fallback: choose sender (normalized)
-                else -> {
-                    Timber.d("Fallback grouping for message id=%s pubkey=%s recipients=%s", 
-                        msg.id, sender, recipients)
-                    sender
-                }
+        fun buildChatroomKey(message: Message): ChatroomKey {
+            val participants = buildSet {
+                val sender = cleanPubkeyFormat(message.pubkey)
+                if (sender.isNotBlank()) add(sender)
+                message.recipientPubkeys
+                    .map { cleanPubkeyFormat(it) }
+                    .filter { it.isNotBlank() }
+                    .forEach { add(it) }
+            }
+            val others = participants.filter { !it.equals(cleanedUserPubkey, true) }.toSet()
+            return if (others.isNotEmpty()) {
+                ChatroomKey(others)
+            } else {
+                // Self-only fallback should be rare; keep sender to avoid dropping message.
+                ChatroomKey(setOf(cleanPubkeyFormat(message.pubkey)))
             }
         }
+
+        val groupedByRoom = messages.groupBy(::buildChatroomKey)
+
+        // Keep existing UI contract: Map<otherPubkey, messages> for 1:1 chats.
+        // For group keys, we still expose a deterministic synthetic key.
+        // Sort messages within each conversation chronologically (newest first) for better UX
+        val grouped = groupedByRoom.mapKeys { (room, _) ->
+            if (room.isOneToOne) room.users.first() else room.users.sorted().joinToString(",")
+        }.filterKeys { it.isNotBlank() }
+            .mapValues { (_, msgs) ->
+                msgs.sortedByDescending { it.createdAt }
+            }
         
-        Timber.i("Grouped %d messages into %d conversations: %s", 
+        // Sort conversations by most recent message timestamp (newest first)
+        val sortedGrouped = grouped.toList()
+            .sortedByDescending { (_, msgs) -> msgs.maxOfOrNull { it.createdAt } ?: 0L }
+            .toMap()
+        
+        Timber.i("Grouped %d messages into %d conversations (sorted by recency): %s", 
             messages.size,
-            grouped.size,
-            grouped.map { (key, msgs) -> "$key: ${msgs.size} msgs" })
+            sortedGrouped.size,
+            sortedGrouped.map { (key, msgs) -> "$key: ${msgs.size} msgs, latest=${msgs.firstOrNull()?.createdAt}" })
             
-        return grouped
+        return sortedGrouped
     }
 
 
@@ -546,61 +864,49 @@ class MessagesViewModel @Inject constructor(
     private suspend fun sendGiftWrappedMessage(
         innerMessage: JSONObject,
         recipientPubkey: String,
-        signingPrivateKeyBytes: ByteArray?,
-        encryptionPrivateKeyBytes: ByteArray
+        encryptionPrivateKeyBytes: ByteArray?,
+        senderSigningPubkey: String
     ) {
+        val innerKind = innerMessage.optInt("kind", 14)
+        val innerContent = innerMessage.optString("content", "")
+        val innerTags = innerMessage.optJSONArray("tags")?.let { arr ->
+            buildList {
+                for (i in 0 until arr.length()) {
+                    val t = arr.optJSONArray(i) ?: continue
+                    add(buildList {
+                        for (j in 0 until t.length()) add(t.optString(j))
+                    })
+                }
+            }
+        } ?: listOf(listOf("p", recipientPubkey))
+
         // Use the MessageRepository to prepare the encrypted message
-        val wrappedEvent = messageRepository.prepareGiftWrappedMessage(
-            senderPrivateKey = encryptionPrivateKeyBytes,
-            recipientPubkey = recipientPubkey,
-            content = innerMessage.toString(),
-            kind = 14,  // inner message kind should be 14 (NIP-17 Direct Message)
-            tags = listOf(listOf("p", recipientPubkey))
-        )
-        // If the repository returned a fully-formed, signed gift-wrap (ephemeral signing key),
-        // publish it as-is to avoid overwriting the outer pubkey/sig (which would break relay verification).
-        val existingId = wrappedEvent.optString("id", "")
-        val existingPub = wrappedEvent.optString("pubkey", "")
-        val existingSig = wrappedEvent.optString("sig", "")
-        if (existingId.isNotBlank() && existingPub.isNotBlank() && existingSig.isNotBlank()) {
-            try {
-                val nostrEvent = com.hisa.data.nostr.NostrEvent(
-                    id = wrappedEvent.getString("id"),
-                    pubkey = wrappedEvent.getString("pubkey"),
-                    createdAt = wrappedEvent.getLong("created_at"),
-                    kind = wrappedEvent.getInt("kind"),
-                    tags = (0 until wrappedEvent.getJSONArray("tags").length()).map { i ->
-                        val tagArr = wrappedEvent.getJSONArray("tags").getJSONArray(i)
-                        (0 until tagArr.length()).map { tagArr.getString(it) }
-                    },
-                    content = wrappedEvent.getString("content"),
-                    sig = wrappedEvent.getString("sig")
-                )
-                nostrClient.publishEvent(nostrEvent)
-                return
-            } catch (e: Exception) {
-                Timber.w(e, "Failed to publish pre-signed gift-wrap; falling back to signing path")
-                // Continue to signing path below if something unexpected occurred
+        val wrappedEvent = if (encryptionPrivateKeyBytes != null) {
+            messageRepository.prepareGiftWrappedMessage(
+                senderPrivateKey = encryptionPrivateKeyBytes,
+                recipientPubkey = recipientPubkey,
+                content = innerContent,
+                kind = innerKind,
+                tags = innerTags
+            )
+        } else {
+            if (!com.hisa.data.nostr.ExternalSignerManager.isLauncherRegistered()) {
+                throw IllegalStateException("External signer launcher not registered")
             }
+            messageRepository.prepareGiftWrappedMessageExternal(
+                senderSigningPubkey = senderSigningPubkey,
+                recipientPubkey = recipientPubkey,
+                content = innerContent,
+                kind = innerKind,
+                tags = innerTags,
+                externalEncryptor = { plaintext, peerPubkey ->
+                    com.hisa.data.nostr.ExternalSignerManager.nip44Encrypt(plaintext, peerPubkey)
+                }
+            )
         }
-
-        // Build tags for NostrEventSigner (wrappedEvent didn't contain a complete sig/pubkey)
-        val tags = wrappedEvent.getJSONArray("tags").let { array ->
-            List(array.length()) { idx ->
-                val tagArray = array.getJSONArray(idx)
-                List(tagArray.length()) { tagArray.getString(it) }
-            }
-        }
-
-        // Use canonical NostrEventSigner for event creation/signing
-        val eventJson = com.hisa.data.nostr.NostrEventSigner.signEvent(
-            kind = 1059,
-            content = wrappedEvent.getString("content"),
-            tags = tags,
-            pubkey = cleanPubkeyFormat(userPubkey),
-            privKey = signingPrivateKeyBytes,
-            createdAt = wrappedEvent.optLong("created_at", System.currentTimeMillis() / 1000)
-        )
+        // NIP-59: outer gift-wrap (kind 1059) must be signed by the random one-time key.
+        // MessageRepository already returns a fully signed wrapper event; publish it as-is.
+        val eventJson = wrappedEvent
         val nostrEvent = com.hisa.data.nostr.NostrEvent(
             id = eventJson.getString("id"),
             pubkey = eventJson.getString("pubkey"),
@@ -614,6 +920,28 @@ class MessagesViewModel @Inject constructor(
             sig = eventJson.getString("sig")
         )
         nostrClient.publishEvent(nostrEvent)
+    }
+
+    private fun resolveSenderSigningPubkey(signingPrivateKeyBytes: ByteArray?): String {
+        if (cleanedUserPubkey.matches(Regex("[0-9a-f]{64}"))) {
+            return cleanedUserPubkey
+        }
+        val configuredExternalPubkey = com.hisa.data.nostr.ExternalSignerManager.getConfiguredPubkey()
+        if (!configuredExternalPubkey.isNullOrBlank()) {
+            val normalized = normalizeSigningPubkey(configuredExternalPubkey)
+            if (normalized.matches(Regex("[0-9a-f]{64}"))) return normalized
+        }
+        val storedExternalPub = normalizeSigningPubkey(secureStorage.getExternalSignerPubkey())
+        if (storedExternalPub.matches(Regex("[0-9a-f]{64}"))) {
+            return storedExternalPub
+        }
+        if (signingPrivateKeyBytes != null && signingPrivateKeyBytes.size == 32) {
+            val key = org.bitcoinj.core.ECKey.fromPrivate(signingPrivateKeyBytes)
+            val uncompressed = key.decompress().pubKeyPoint.getEncoded(false)
+            val xOnly = uncompressed.copyOfRange(1, 33)
+            return xOnly.joinToString("") { "%02x".format(it) }
+        }
+        return cleanedUserPubkey
     }
 
     private fun hexStringToBytes(hex: String): ByteArray {
@@ -637,113 +965,46 @@ class MessagesViewModel @Inject constructor(
         return bytes
     }
 
-    // Retrieve the current user's signing private key as a 64-char hex string.
-    // This reads the stored bech32 nsec from SecureStorage and converts it to raw bytes,
-    // then returns the hex representation. Throws if missing or invalid.
-    private fun getPrivateKey(): String {
-        // Try secure storage first
-        val nsec = secureStorage.getNsec()
-            ?: throw IllegalStateException("No nsec stored for current user")
-        try {
-            val privBytes = com.hisa.util.KeyGenerator.nsecToPrivateKey(nsec)
-            if (privBytes.size != 32) throw IllegalStateException("Invalid private key length")
-            val hex = privBytes.joinToString("") { "%02x".format(it) }
-            // Zero the sensitive byte array immediately
-            for (i in privBytes.indices) privBytes[i] = 0
-            return hex
-        } catch (e: Exception) {
-            throw IllegalStateException("Failed to decode stored nsec: ${e.message}")
+    private fun normalizeSigningPubkey(input: String?): String {
+        if (input.isNullOrBlank()) return ""
+        val trimmed = input.trim()
+        val asHex = if (trimmed.startsWith("npub", true)) {
+            com.hisa.util.KeyGenerator.npubToPublicKey(trimmed) ?: trimmed
+        } else {
+            trimmed
         }
+        return cleanPubkeyFormat(asHex).lowercase()
     }
 
     @RequiresApi(Build.VERSION_CODES.O)
     fun sendMessage(recipientPubkey: String, content: String, subject: String? = null, replyTo: String? = null) {
         viewModelScope.launch(Dispatchers.IO) {
             try {
-                // Obtain local signing private key if present. For external-signer-only users
-                // this will be null and signing will be delegated to the external signer.
-                val signingPrivateKeyBytes: ByteArray? = try {
-                    val nsec = secureStorage.getNsec()
-                    if (!nsec.isNullOrBlank()) {
-                        val priv = com.hisa.util.KeyGenerator.nsecToPrivateKey(nsec)
-                        if (priv.size == 32) priv else null
-                    } else null
-                } catch (e: Exception) {
-                    null
-                }
-                // Ensure X25519 private key is provided for encryption
-                val x25519Hex = x25519PrivateKey
-                if (x25519Hex == null) {
-                    val err = "X25519 private key not available. A key should be auto-generated on initialize; please restart the app or set it manually via setX25519PrivateKey()."
-                    Timber.e(err)
-                    _sendError.value = err
-                    return@launch
-                }
-                val encryptionPrivateKeyBytes = try {
-                    hexStringToBytes(x25519Hex)
-                } catch (hexEx: Exception) {
-                    val err = "Invalid X25519 private key format"
-                    Timber.e(hexEx, err)
-                    _sendError.value = err
-                    return@launch
-                }
+                val authContext = resolveAuthContext(refreshOnce = true)
+                val signingPrivateKeyBytes = authContext.localPrivateKeyBytes
                 
-                // The recipientPubkey parameter must be the recipient's X25519 public key (32-byte hex)
-                // Try to interpret the provided recipientPubkey. It may already be an X25519 pub (32-byte hex),
-                // or it may be a signing pubkey (secp256k1 x-only). If it's not an X25519 pub, attempt to
-                // resolve the recipient's metadata (kind=0) for a published X25519 public key field.
-                var cleanRecipientPubkey = recipientPubkey.trim().lowercase()
+                // Nostr addressing uses the recipient signing pubkey (kind:1059 p-tag).
+                val cleanRecipientPubkey = cleanPubkeyFormat(recipientPubkey)
                 if (!cleanRecipientPubkey.matches(Regex("[0-9a-f]{64}"))) {
-                    // Not an X25519 hex string; try to fetch metadata and look for an X25519 pub.
-                    try {
-                        val metaRaw = metadataRepository.getLatestMetadataRaw(cleanRecipientPubkey)
-                        var resolved: String? = null
-                        if (!metaRaw.isNullOrBlank()) {
-                            try {
-                                val json = org.json.JSONObject(metaRaw)
-                                // Common places authors put X25519 pubkey
-                                val candidates = listOf("x25519", "x25519_pub", "nip44_pub", "encryption", "encryption_pub")
-                                for (k in candidates) {
-                                    if (json.has(k)) {
-                                        val v = json.optString(k, "").trim().lowercase()
-                                        if (v.matches(Regex("[0-9a-f]{64}"))) { resolved = v; break }
-                                    }
-                                }
-                                // Also some profiles embed a nested "keys" object
-                                if (resolved == null && json.has("keys")) {
-                                    val keysObj = json.optJSONObject("keys")
-                                    if (keysObj != null) {
-                                        val keysIter = keysObj.keys()
-                                        while (keysIter.hasNext()) {
-                                            val k = keysIter.next()
-                                            val v = keysObj.optString(k, "").trim().lowercase()
-                                            if (v.matches(Regex("[0-9a-f]{64}"))) { resolved = v; break }
-                                        }
-                                    }
-                                }
-                            } catch (e: Exception) {
-                                Timber.w(e, "Failed to parse recipient metadata for X25519 pub")
-                            }
-                        }
-                        if (resolved == null) {
-                            val err = "Recipient does not appear to have an X25519 public key published in their profile. Cannot encrypt message."
-                            Timber.e(err)
-                            _sendError.value = err
-                            return@launch
-                        }
-                        cleanRecipientPubkey = resolved
-                    } catch (e: Exception) {
-                        Timber.e(e, "Failed to resolve recipient X25519 public key from metadata")
-                        _sendError.value = "Failed to resolve recipient encryption key"
-                        return@launch
-                    }
+                    _sendError.value = "Invalid recipient pubkey"
+                    return@launch
                 }
                 
                 // If we have no local signing key and no external signer configured, error out
-                if (signingPrivateKeyBytes == null && com.hisa.data.nostr.ExternalSignerManager.getConfiguredPackage().isNullOrBlank()) {
+                if (signingPrivateKeyBytes == null && !authContext.hasExternalSigner) {
                     val err = "No signing key available. Configure an external signer or import an nsec to send messages."
                     Timber.e(err)
                     _sendError.value = err
+                    return@launch
+                }
+                if (signingPrivateKeyBytes == null && !com.hisa.data.nostr.ExternalSignerManager.isLauncherRegistered()) {
+                    _sendError.value = "External signer is not attached. Re-open DM screen and approve signer requests."
+                    return@launch
+                }
+
+                val senderSigningPubkey = resolveSenderSigningPubkey(signingPrivateKeyBytes)
+                if (!senderSigningPubkey.matches(Regex("[0-9a-f]{64}"))) {
+                    _sendError.value = "Unable to resolve sender pubkey for DM event signing"
                     return@launch
                 }
 
@@ -754,7 +1015,7 @@ class MessagesViewModel @Inject constructor(
                 val tempId = "temp-${System.currentTimeMillis()}"
                 val newMessage = Message.TextMessage(
                     id = tempId,
-                    pubkey = cleanedUserPubkey, // Use cleaned pubkey for consistent matching
+                    pubkey = senderSigningPubkey,
                     recipientPubkeys = listOf(cleanRecipientPubkey),
                     content = content,
                     createdAt = System.currentTimeMillis() / 1000,
@@ -766,11 +1027,17 @@ class MessagesViewModel @Inject constructor(
                 _messages.value = _messages.value + newMessage
 
                 // Create and send a gift-wrapped version for the recipient (inner message kind should be 14)
-                sendGiftWrappedMessage(innerMessage, cleanRecipientPubkey, signingPrivateKeyBytes, encryptionPrivateKeyBytes)
+                sendGiftWrappedMessage(
+                    innerMessage = innerMessage,
+                    recipientPubkey = cleanRecipientPubkey,
+                    encryptionPrivateKeyBytes = signingPrivateKeyBytes,
+                    senderSigningPubkey = senderSigningPubkey
+                )
 
                 // Save conversation mapping
+                val myPub = senderSigningPubkey.ifBlank { userPubkey }
                 ConversationRepository.getOrCreateConversation(
-                    listOf(userPubkey, cleanRecipientPubkey)
+                    listOf(myPub, cleanRecipientPubkey)
                 )
 
             } catch (e: Exception) {
@@ -790,21 +1057,42 @@ class MessagesViewModel @Inject constructor(
             val me = cleanedUserPubkey
             val other = cleanPubkeyFormat(otherPubkey)
             if (me.isBlank() || other.isBlank()) return
+            if (activeConversationPartner == other && conversationSubscriptionIds.isNotEmpty()) {
+                Timber.d("Conversation subscription already active for %s; skipping duplicate REQ", other)
+                return
+            }
 
-            // Only use #p tags for filtering to catch all messages involving us or the other party
+            // Ensure only one conversation subscription is active to avoid relay REQ limits.
+            unsubscribeConversation()
+            activeConversationPartner = other
+
+            val since = (System.currentTimeMillis() / 1000) - (CONVERSATION_DM_HISTORY_DAYS * 24L * 60L * 60L)
+
+            // Two-way DM filters in one subscription:
+            // - incoming from other to me
+            // - outgoing from me to other
             val filtersArray = org.json.JSONArray().apply {
-                // Messages where we're mentioned in p-tag
                 put(JSONObject().apply {
                     put("kinds", org.json.JSONArray().put(1059))
+                    put("authors", org.json.JSONArray().put(other))
                     put("#p", org.json.JSONArray().put(me))
+                    put("since", since)
+                    put("limit", CONVERSATION_DM_LIMIT_PER_FILTER)
                 })
-                // Messages where other party is mentioned in p-tag
                 put(JSONObject().apply {
                     put("kinds", org.json.JSONArray().put(1059))
+                    put("authors", org.json.JSONArray().put(me))
                     put("#p", org.json.JSONArray().put(other))
+                    put("since", since)
+                    put("limit", CONVERSATION_DM_LIMIT_PER_FILTER)
                 })
             }
-            Timber.i("Creating conversation subscription filters: %s", filtersArray.toString())
+            Timber.i(
+                "Creating conversation subscription filters (since=%d limitPerFilter=%d): %s",
+                since,
+                CONVERSATION_DM_LIMIT_PER_FILTER,
+                filtersArray.toString()
+            )
 
             val subId = subscriptionManager.subscribe(filtersArray, { event ->
                 try {
@@ -842,5 +1130,6 @@ class MessagesViewModel @Inject constructor(
             }
         }
         conversationSubscriptionIds.clear()
+        activeConversationPartner = null
     }
 }

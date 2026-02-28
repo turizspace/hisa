@@ -13,6 +13,8 @@ import com.hisa.data.nostr.SubscriptionManager
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import org.json.JSONArray
 import org.json.JSONObject
@@ -25,7 +27,19 @@ class ChannelsViewModel(
     private val pubkey: String
 ) : ViewModel() {
     fun refreshChannels() {
-        subscribeToChannelEvents()
+        viewModelScope.launch {
+            channelsSubscriptionId?.let { runCatching { subscriptionManager.unsubscribe(it) } }
+            channelsSubscriptionId = null
+            channelMessageSubs.values.forEach { subId ->
+                runCatching { subscriptionManager.unsubscribe(subId) }
+            }
+            channelMessageSubs.clear()
+            participantsMap.clear()
+            _participantCounts.value = emptyMap()
+            isSubscribed = false
+            beginInitialLoadBatch()
+            subscribeToChannelEvents()
+        }
     }
     private val _channels = MutableStateFlow<List<Channel>>(emptyList())
     val channels: StateFlow<List<Channel>> = _channels.asStateFlow()
@@ -43,8 +57,13 @@ class ChannelsViewModel(
     val participantCounts: StateFlow<Map<String, Int>> = _participantCounts.asStateFlow()
     // track per-channel subscription ids so we can unsubscribe when needed
     private val channelMessageSubs = ConcurrentHashMap<String, String>()
+    private val loadStateLock = Any()
+    @Volatile
+    private var awaitingInitialEose: Boolean = false
+    private var initialLoadTimeoutJob: Job? = null
 
     init {
+        beginInitialLoadBatch()
         subscribeToChannelEvents()
     }
 
@@ -62,20 +81,24 @@ class ChannelsViewModel(
                     return@launch
                 }
                 // Use the SubscriptionManager helper which creates the proper NIP-28 filter
-                channelsSubscriptionId = subscriptionManager.subscribeToChannels { event ->
-                    try {
-
-                        when (event.kind) {
-                            40 -> handleChannelCreateEvent(event)
-                            41 -> handleChannelMetadataEvent(event)
-
+                channelsSubscriptionId = subscriptionManager.subscribeToChannels(
+                    onEvent = { event ->
+                        try {
+                            when (event.kind) {
+                                40 -> handleChannelCreateEvent(event)
+                                41 -> handleChannelMetadataEvent(event)
+                            }
+                        } catch (e: Exception) {
+                            android.util.Log.e("ChannelsViewModel", "Error handling channel event: ${e.localizedMessage}")
                         }
-                    } catch (e: Exception) {
-                        android.util.Log.e("ChannelsViewModel", "Error handling channel event: ${e.localizedMessage}")
+                    },
+                    onEndOfStoredEvents = {
+                        finalizeInitialLoadBatch("eose")
                     }
-                }
+                )
             } catch (e: Exception) {
                 android.util.Log.e("ChannelsViewModel", "Failed to subscribe to channel events: ${e.localizedMessage}")
+                finalizeInitialLoadBatch("subscribe_error")
             }
             // Per-channel message subscriptions are created when channels are discovered (see handleChannelCreateEvent)
             isSubscribed = true
@@ -92,6 +115,8 @@ class ChannelsViewModel(
 
     override fun onCleared() {
         super.onCleared()
+        initialLoadTimeoutJob?.cancel()
+        initialLoadTimeoutJob = null
         channelsSubscriptionId?.let { subscriptionManager.unsubscribe(it) }
         // Unsubscribe all per-channel message subscriptions
         channelMessageSubs.values.forEach { subId ->
@@ -115,32 +140,13 @@ class ChannelsViewModel(
                 createdAt = event.createdAt
             )
             channelsMap[event.id] = channel
-
-            updateChannelsList()
-            updateCategories()
+            if (!isInitialLoadBatchActive()) {
+                updateChannelsList()
+                updateCategories()
+            }
             // Start a messages subscription for this channel to track participants
-            try {
-                val subId = subscriptionManager.subscribeToChannelMessages(channel.id) { msgEvent ->
-                    try {
-                        val rootChannelId = msgEvent.tags.find {
-                            it.size >= 4 && it[0] == "e" && it[3] == "root"
-                        }?.get(1) ?: msgEvent.tags.find {
-                            it.size >= 2 && it[0] == "e"
-                        }?.get(1)
-                        if (rootChannelId == channel.id) {
-                            val set = participantsMap.getOrPut(channel.id) { java.util.concurrent.ConcurrentHashMap.newKeySet<String>() }
-                            if (msgEvent.pubkey.isNotBlank()) {
-                                set.add(msgEvent.pubkey)
-                                _participantCounts.value = participantsMap.mapValues { it.value.size }
-                            }
-                        }
-                    } catch (e: Exception) {
-                        android.util.Log.e("ChannelsViewModel", "Error in per-channel message handler: ${e.localizedMessage}")
-                    }
-                }
-                channelMessageSubs[channel.id] = subId
-            } catch (e: Exception) {
-                android.util.Log.e("ChannelsViewModel", "Failed to subscribe to messages for channel ${channel.id}: ${e.localizedMessage}")
+            if (!isInitialLoadBatchActive()) {
+                ensureChannelMessageSubscription(channel.id)
             }
         } catch (e: Exception) {
             android.util.Log.e("ChannelsViewModel", "Error in handleChannelCreateEvent", e)
@@ -164,8 +170,10 @@ class ChannelsViewModel(
                 categories = event.tags.filter { it.firstOrNull() == "t" }.map { it[1] }
             )
 
-            updateChannelsList()
-            updateCategories()
+            if (!isInitialLoadBatchActive()) {
+                updateChannelsList()
+                updateCategories()
+            }
         } catch (e: Exception) {
             android.util.Log.e("ChannelsViewModel", "Error in handleChannelMetadataEvent", e)
         }
@@ -243,31 +251,70 @@ class ChannelsViewModel(
         // Ensure we have per-channel subscriptions for all known channels
         channelsMap.keys.forEach { id ->
             if (!channelMessageSubs.containsKey(id)) {
-                try {
-                    val subId = subscriptionManager.subscribeToChannelMessages(id) { msgEvent ->
-                        try {
-                            val rootChannelId = msgEvent.tags.find {
-                                it.size >= 4 && it[0] == "e" && it[3] == "root"
-                            }?.get(1) ?: msgEvent.tags.find {
-                                it.size >= 2 && it[0] == "e"
-                            }?.get(1)
-                            if (rootChannelId == id) {
-                                val set = participantsMap.getOrPut(id) { java.util.concurrent.ConcurrentHashMap.newKeySet<String>() }
-                                if (msgEvent.pubkey.isNotBlank()) {
-                                    set.add(msgEvent.pubkey)
-                                    _participantCounts.value = participantsMap.mapValues { it.value.size }
-                                }
-                            }
-                        } catch (e: Exception) {
-                            android.util.Log.e("ChannelsViewModel", "Error in per-channel subscription handler: ${e.localizedMessage}")
-                        }
-                    }
-                    channelMessageSubs[id] = subId
-                } catch (e: Exception) {
-                    android.util.Log.e("ChannelsViewModel", "Failed to create per-channel subscription for $id: ${e.localizedMessage}")
-                }
+                ensureChannelMessageSubscription(id)
             }
         }
+    }
+
+    private fun ensureChannelMessageSubscription(channelId: String) {
+        try {
+            val subId = subscriptionManager.subscribeToChannelMessages(channelId) { msgEvent ->
+                try {
+                    val rootChannelId = msgEvent.tags.find {
+                        it.size >= 4 && it[0] == "e" && it[3] == "root"
+                    }?.get(1) ?: msgEvent.tags.find {
+                        it.size >= 2 && it[0] == "e"
+                    }?.get(1)
+                    if (rootChannelId == channelId) {
+                        val set = participantsMap.getOrPut(channelId) { java.util.concurrent.ConcurrentHashMap.newKeySet<String>() }
+                        if (msgEvent.pubkey.isNotBlank()) {
+                            set.add(msgEvent.pubkey)
+                            _participantCounts.value = participantsMap.mapValues { it.value.size }
+                        }
+                    }
+                } catch (e: Exception) {
+                    android.util.Log.e("ChannelsViewModel", "Error in per-channel subscription handler: ${e.localizedMessage}")
+                }
+            }
+            channelMessageSubs[channelId] = subId
+        } catch (e: Exception) {
+            android.util.Log.e("ChannelsViewModel", "Failed to create per-channel subscription for $channelId: ${e.localizedMessage}")
+        }
+    }
+
+    private fun beginInitialLoadBatch() {
+        synchronized(loadStateLock) {
+            awaitingInitialEose = true
+        }
+        _isLoading.value = true
+        initialLoadTimeoutJob?.cancel()
+        initialLoadTimeoutJob = viewModelScope.launch {
+            delay(4000)
+            finalizeInitialLoadBatch("timeout")
+        }
+    }
+
+    private fun finalizeInitialLoadBatch(reason: String) {
+        val shouldFinalize = synchronized(loadStateLock) {
+            if (!awaitingInitialEose) {
+                false
+            } else {
+                awaitingInitialEose = false
+                true
+            }
+        }
+        if (!shouldFinalize) return
+
+        initialLoadTimeoutJob?.cancel()
+        initialLoadTimeoutJob = null
+        updateChannelsList()
+        updateCategories()
+        _isLoading.value = false
+        android.util.Log.d("ChannelsViewModel", "Initial channels batch finalized via $reason with ${channelsMap.size} channels")
+    }
+
+    private fun isInitialLoadBatchActive(): Boolean {
+        return synchronized(loadStateLock) { awaitingInitialEose }
     }
 
     private fun updateCategories() {

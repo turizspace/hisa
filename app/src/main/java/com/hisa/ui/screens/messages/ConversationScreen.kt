@@ -1,6 +1,7 @@
 package com.hisa.ui.screens.conversation
 
 import com.hisa.util.cleanPubkeyFormat
+import com.hisa.data.model.ChatroomKey
 
 import android.os.Build
 import androidx.annotation.RequiresApi
@@ -52,6 +53,10 @@ fun ConversationScreen(
     // Ensure MessagesViewModel is initialized with the correct keys
     LaunchedEffect(userPubkey, privateKey) {
         try {
+            messagesViewModel.bindSessionAuthState(
+                sessionPubkey = userPubkey,
+                sessionPrivateKeyHex = privateKey
+            )
         } catch (e: Exception) {
             Timber.e(e, "Failed to initialize MessagesViewModel")
         }
@@ -65,17 +70,30 @@ fun ConversationScreen(
 
     val messages = allMessages.filter { message ->
         val msgPub = cleanPubkeyFormat(message.pubkey)
-        val recipients = message.recipientPubkeys.map { cleanPubkeyFormat(it) }
+        val recipients = message.recipientPubkeys.map { cleanPubkeyFormat(it) }.filter { it.isNotBlank() }
+        val participants = buildSet {
+            if (msgPub.isNotBlank()) add(msgPub)
+            recipients.forEach { add(it) }
+        }
+        val others = participants.filter { !it.equals(normalizedUserPubkey, true) }.toSet()
+        val roomKey = if (others.isNotEmpty()) ChatroomKey(others) else ChatroomKey(setOf(msgPub))
         // Debug: log normalized values for every message so we can trace filtering
-        Timber.d("Conversation debug: msgId=%s msgPub=%s recipients=%s normalizedConversationId=%s normalizedUser=%s",
-            message.id, msgPub, recipients, normalizedConversationId, normalizedUserPubkey)
+        Timber.d(
+            "Conversation debug: msgId=%s msgPub=%s recipients=%s roomKey=%s normalizedConversationId=%s normalizedUser=%s",
+            message.id, msgPub, recipients, roomKey.toString(), normalizedConversationId, normalizedUserPubkey
+        )
 
-        val match = (msgPub == normalizedConversationId && recipients.contains(normalizedUserPubkey)) ||
-                    (msgPub == normalizedUserPubkey && recipients.contains(normalizedConversationId))
+        val match = roomKey.users.contains(normalizedConversationId)
         if (match) {
-            Timber.d("Message matched for conversation: pubkey=%s createdAt=%d normalizedPub=%s recipients=%s", message.pubkey, message.createdAt, msgPub, recipients)
+            Timber.d(
+                "Message matched for conversation: pubkey=%s createdAt=%d normalizedPub=%s recipients=%s room=%s",
+                message.pubkey, message.createdAt, msgPub, recipients, roomKey.toString()
+            )
         } else {
-            Timber.d("Message NOT matched for conversation: pubkey=%s createdAt=%d normalizedPub=%s recipients=%s", message.pubkey, message.createdAt, msgPub, recipients)
+            Timber.d(
+                "Message NOT matched for conversation: pubkey=%s createdAt=%d normalizedPub=%s recipients=%s room=%s",
+                message.pubkey, message.createdAt, msgPub, recipients, roomKey.toString()
+            )
         }
         match
     }
@@ -121,8 +139,8 @@ fun ConversationScreen(
         sendError?.let { err ->
             isError = true
             errorMessage = err
-            // Clear after showing so it doesn't persist
-            messagesViewModel.clearMessages()
+            // Clear the one-shot error after surfacing it.
+            messagesViewModel.clearSendError()
         }
     }
     // Fetch profile metadata if needed
@@ -196,7 +214,7 @@ fun ConversationScreen(
             Spacer(modifier = Modifier.height(8.dp))
             LazyColumn(modifier = Modifier.weight(1f)) {
                 items(messages) { message ->
-                    val isOwnMessage = message.pubkey == userPubkey
+                    val isOwnMessage = cleanPubkeyFormat(message.pubkey) == normalizedUserPubkey
                     com.hisa.ui.components.MessageBubble(message, isOwnMessage)
                     Text(
                         text = java.text.SimpleDateFormat("HH:mm", java.util.Locale.getDefault()).format(java.util.Date(message.createdAt * 1000)),

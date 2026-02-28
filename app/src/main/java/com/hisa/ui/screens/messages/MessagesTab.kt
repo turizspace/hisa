@@ -23,11 +23,15 @@ import androidx.compose.ui.unit.dp
 import coil.compose.AsyncImage
 import androidx.compose.ui.graphics.vector.rememberVectorPainter
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.collectAsState
 import com.hisa.data.repository.MetadataRepository
+import com.hisa.ui.components.TabLoadingPlaceholder
+import com.hisa.ui.components.rememberTabLoadingVisibility
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import androidx.compose.runtime.Composable
@@ -49,15 +53,36 @@ fun MessagesTab(
     privateKey: String,
     messagesViewModel: MessagesViewModel
 ) {
-    val conversations = messagesViewModel.getConversations()
+    // Force recomposition when message list changes.
+    val allMessages by messagesViewModel.messages.collectAsState()
+    val isLoading by messagesViewModel.isLoading.collectAsState()
+    val showLoading = rememberTabLoadingVisibility(isLoading = isLoading)
+    LaunchedEffect(Unit) {
+        messagesViewModel.ensureSubscribed()
+    }
+    DisposableEffect(Unit) {
+        onDispose {
+            messagesViewModel.stopDirectMessagesSubscription()
+        }
+    }
+
+    val conversations = remember(allMessages) { messagesViewModel.getConversations() }
+
+    if (showLoading) {
+        TabLoadingPlaceholder(
+            title = "Loading Messages",
+            subtitle = "Decrypting and syncing your conversations"
+        )
+        return
+    }
 
     LazyColumn(modifier = Modifier.fillMaxSize()) {
         items(conversations.entries.toList(), key = { it.key }) { entry ->
             val otherPubkey = entry.key
             val messages = entry.value
             
-            var metadata by remember { mutableStateOf<com.hisa.data.model.Metadata?>(null) }
-            var loading by remember { mutableStateOf(true) }
+            var metadata by remember(otherPubkey) { mutableStateOf<com.hisa.data.model.Metadata?>(null) }
+            var loading by remember(otherPubkey) { mutableStateOf(true) }
             val profileMetaUtil = LocalProfileMetaUtil.current
             
             LaunchedEffect(otherPubkey) {
@@ -73,11 +98,18 @@ fun MessagesTab(
                     if (loading) {
                         CircularProgressIndicator(modifier = Modifier)
                     } else {
-                        Text(metadata?.name ?: otherPubkey)
+                        val fallback = if (otherPubkey == "unknown") {
+                            "Unknown sender"
+                        } else if (otherPubkey.length > 12) {
+                            "${otherPubkey.take(12)}..."
+                        } else {
+                            otherPubkey
+                        }
+                        Text(metadata?.name ?: fallback)
                     }
                 },
                 supportingContent = { 
-                    Text(when (val lastMessage = messages.lastOrNull()) {
+                    Text(when (val lastMessage = messages.firstOrNull()) {
                         is Message.TextMessage -> lastMessage.content
                         is Message.FileMessage -> "[File] ${lastMessage.fileUrl}"
                         null -> "No messages"
@@ -104,7 +136,9 @@ fun MessagesTab(
                     }
                 },
                 modifier = Modifier.clickable {
-                    navController.navigate(Routes.DM.replace("{pubkey}", otherPubkey))
+                    if (otherPubkey != "unknown") {
+                        navController.navigate(Routes.DM.replace("{pubkey}", otherPubkey))
+                    }
                 }
             )
             HorizontalDivider(Modifier, DividerDefaults.Thickness, DividerDefaults.color)
