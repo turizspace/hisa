@@ -100,14 +100,16 @@ class FeedViewModel @Inject constructor(
                                                         .filter { tag -> tag.toIntOrNull() == null }
                                                         .sorted()
                                                     _categories.value = allTags
-                                                    _isLoading.value = false
                                                 }
                                             }
                                         } catch (e: Exception) {
                                             android.util.Log.e("FeedViewModel", "Error handling event: ${e.message}", e)
                                         }
                                     },
-                                    onEndOfStoredEvents = {}
+                                    onEndOfStoredEvents = {
+                                        _isLoading.value = false
+                                        android.util.Log.d("FeedViewModel", "Feed initial load complete: received EOSE with ${_services.value.size} listings")
+                                    }
                                 )
                             }
                         }
@@ -169,7 +171,10 @@ class FeedViewModel @Inject constructor(
                         android.util.Log.e("FeedViewModel", "Error handling refreshed event: ${e.message}", e)
                     }
                 },
-                onEndOfStoredEvents = {}
+                onEndOfStoredEvents = {
+                    _isLoading.value = false
+                    android.util.Log.d("FeedViewModel", "Feed refresh complete: received EOSE with ${_services.value.size} listings")
+                }
             )
         }
     }

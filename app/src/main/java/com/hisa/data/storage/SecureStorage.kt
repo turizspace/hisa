@@ -35,6 +35,10 @@ class SecureStorage @Inject constructor(
 
     companion object {
         private const val KEY_X25519_PRIVATE = "x25519_private"
+        private const val AUTH_PREFS_NAME = "secure_prefs"
+        private const val AUTH_PREFS_FALLBACK = "secure_prefs_fallback"
+        private const val KEY_EXTERNAL_SIGNER_PUBKEY = "external_signer_pubkey"
+        private const val KEY_EXTERNAL_SIGNER_PACKAGE = "external_signer_package"
     }
 
     fun storeX25519PrivateKey(hex: String) {
@@ -55,7 +59,7 @@ class SecureStorage @Inject constructor(
                 .build()
             val authPrefs = EncryptedSharedPreferences.create(
                 context,
-                "secure_prefs",
+                AUTH_PREFS_NAME,
                 masterKey,
                 EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
                 EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
@@ -64,8 +68,39 @@ class SecureStorage @Inject constructor(
         } catch (e: Exception) {
             // Fallback to the same fallback filename used elsewhere in the app
             try {
-                val fallback = context.getSharedPreferences("secure_prefs_fallback", android.content.Context.MODE_PRIVATE)
+                val fallback = context.getSharedPreferences(AUTH_PREFS_FALLBACK, android.content.Context.MODE_PRIVATE)
                 fallback.getString("nsec", null)
+            } catch (ex: Exception) {
+                null
+            }
+        }
+    }
+
+    fun getExternalSignerPubkey(): String? {
+        return readAuthPref(KEY_EXTERNAL_SIGNER_PUBKEY)
+    }
+
+    fun getExternalSignerPackage(): String? {
+        return readAuthPref(KEY_EXTERNAL_SIGNER_PACKAGE)
+    }
+
+    private fun readAuthPref(key: String): String? {
+        return try {
+            val masterKey = MasterKey.Builder(context)
+                .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
+                .build()
+            val authPrefs = EncryptedSharedPreferences.create(
+                context,
+                AUTH_PREFS_NAME,
+                masterKey,
+                EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
+                EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
+            )
+            authPrefs.getString(key, null)
+        } catch (e: Exception) {
+            try {
+                val fallback = context.getSharedPreferences(AUTH_PREFS_FALLBACK, android.content.Context.MODE_PRIVATE)
+                fallback.getString(key, null)
             } catch (ex: Exception) {
                 null
             }

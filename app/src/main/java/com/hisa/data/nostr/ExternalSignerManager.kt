@@ -39,6 +39,8 @@ object ExternalSignerManager {
         if (launcher == l) launcher = null
     }
 
+    fun isLauncherRegistered(): Boolean = launcher != null
+
     fun newResponse(intent: Intent) {
         try {
             // Some signers return an array of results in "results"
@@ -52,11 +54,11 @@ object ExternalSignerManager {
                         val result = obj.optString("result")
                         val event = obj.optString("event")
                         val pkg = obj.optString("package")
-                        if (!id.isNullOrBlank() && !event.isNullOrBlank()) {
+                        if (!id.isNullOrBlank() && (!event.isNullOrBlank() || !result.isNullOrBlank())) {
                             val res = IntentResultLocal(id = id, result = result, event = event, packageName = pkg)
                             pending.remove(id)?.complete(res)
                         } else {
-                            android.util.Log.w("ExternalSigner", "Ignoring array entry with empty id/event: id=$id eventExists=${!event.isNullOrBlank()}")
+                            android.util.Log.w("ExternalSigner", "Ignoring array entry with empty id and no event/result payload: id=$id")
                         }
                     }
                 } catch (e: Exception) {
@@ -70,11 +72,11 @@ object ExternalSignerManager {
             val event = intent.getStringExtra("event") ?: intent.getStringExtra("event_json") ?: intent.getStringExtra(Intent.EXTRA_TEXT)
             val pkg = intent.getStringExtra("package")
 
-            if (!id.isNullOrBlank() && !event.isNullOrBlank()) {
+            if (!id.isNullOrBlank() && (!event.isNullOrBlank() || !result.isNullOrBlank())) {
                 val res = IntentResultLocal(id = id, result = result, event = event, packageName = pkg)
                 pending.remove(id)?.complete(res)
             } else {
-                android.util.Log.w("ExternalSigner", "Ignored empty response from signer: id=$id eventPresent=${!event.isNullOrBlank()}")
+                android.util.Log.w("ExternalSigner", "Ignored empty response from signer: id=$id eventPresent=${!event.isNullOrBlank()} resultPresent=${!result.isNullOrBlank()}")
             }
         } catch (e: Exception) {
             android.util.Log.e("ExternalSigner", "Failed parsing signer response", e)
@@ -233,6 +235,92 @@ object ExternalSignerManager {
             val remaining = timeoutMs - elapsed
             if (remaining <= 0) throw java.util.concurrent.TimeoutException("External signer timed out")
             withTimeout(remaining) { deferred.await() }
+        } finally {
+            pending.remove(callId)
+        }
+    }
+
+    suspend fun nip44Decrypt(
+        ciphertext: String,
+        senderPubkey: String,
+        timeoutMs: Long = 60_000
+    ): String {
+        val pkg = externalPackage ?: throw IllegalStateException("External signer package not configured")
+        val pub = externalPubKey ?: throw IllegalStateException("External signer pubkey not configured")
+        val l = launcher ?: throw IllegalStateException("No ActivityResult launcher registered")
+
+        val callId = java.util.UUID.randomUUID().toString().replace("-", "").take(32)
+        val deferred = CompletableDeferred<IntentResultLocal>()
+        pending[callId] = deferred
+
+        val baseIntent = Intent(Intent.ACTION_VIEW).apply {
+            data = Uri.parse("nostrsigner:${Uri.encode(ciphertext)}")
+            `package` = pkg
+            putExtra("type", "nip44_decrypt")
+            putExtra("id", callId)
+            putExtra("current_user", pub)
+            putExtra("pubkey", senderPubkey)
+        }
+
+        try { l(baseIntent) } catch (_: Exception) {}
+
+        return try {
+            val res = withTimeout(timeoutMs) { deferred.await() }
+            when {
+                !res.result.isNullOrBlank() -> res.result
+                !res.event.isNullOrBlank() -> {
+                    try {
+                        val parsed = JSONObject(res.event)
+                        parsed.optString("result", parsed.optString("content", res.event))
+                    } catch (_: Exception) {
+                        res.event
+                    }
+                }
+                else -> throw IllegalStateException("External signer returned no decrypt result")
+            }
+        } finally {
+            pending.remove(callId)
+        }
+    }
+
+    suspend fun nip44Encrypt(
+        plaintext: String,
+        recipientPubkey: String,
+        timeoutMs: Long = 60_000
+    ): String {
+        val pkg = externalPackage ?: throw IllegalStateException("External signer package not configured")
+        val pub = externalPubKey ?: throw IllegalStateException("External signer pubkey not configured")
+        val l = launcher ?: throw IllegalStateException("No ActivityResult launcher registered")
+
+        val callId = java.util.UUID.randomUUID().toString().replace("-", "").take(32)
+        val deferred = CompletableDeferred<IntentResultLocal>()
+        pending[callId] = deferred
+
+        val baseIntent = Intent(Intent.ACTION_VIEW).apply {
+            data = Uri.parse("nostrsigner:${Uri.encode(plaintext)}")
+            `package` = pkg
+            putExtra("type", "nip44_encrypt")
+            putExtra("id", callId)
+            putExtra("current_user", pub)
+            putExtra("pubkey", recipientPubkey)
+        }
+
+        try { l(baseIntent) } catch (_: Exception) {}
+
+        return try {
+            val res = withTimeout(timeoutMs) { deferred.await() }
+            when {
+                !res.result.isNullOrBlank() -> res.result
+                !res.event.isNullOrBlank() -> {
+                    try {
+                        val parsed = JSONObject(res.event)
+                        parsed.optString("result", parsed.optString("content", res.event))
+                    } catch (_: Exception) {
+                        res.event
+                    }
+                }
+                else -> throw IllegalStateException("External signer returned no encrypt result")
+            }
         } finally {
             pending.remove(callId)
         }
