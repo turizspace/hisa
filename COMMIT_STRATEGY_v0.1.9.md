@@ -205,7 +205,7 @@ Technical:
 - Proper type-safe key handling
 - Minimal performance impact
 
-Version bump to 0.1.9 (versionCode 3).
+Version bump to 0.1.9 (versionCode 2).
 ```
 
 ---

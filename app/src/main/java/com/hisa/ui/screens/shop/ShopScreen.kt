@@ -96,7 +96,8 @@ fun ShopScreen(
                                 // open DM with the service author
                                 val target = cleanPubkeyFormat(pubkey ?: service.pubkey)
                                 navController.navigate("dm/$target")
-                            }
+                            },
+                            userPubkey = ownerHex
                         )
                     }
                 }

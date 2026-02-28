@@ -40,7 +40,8 @@ fun ServiceCard(
     service: ServiceListing,
     showTags: Boolean = true,
     onClick: ((String) -> Unit)? = null, // Pass eventId
-    onMessageClick: ((String, String?) -> Unit)? = null // Pass pubkey and profile picture
+    onMessageClick: ((String, String?) -> Unit)? = null, // Pass pubkey and profile picture
+    userPubkey: String? = null // Current user's pubkey to check if service is user's own
 ) {
     // Keep a stable key per service event
     val cardKey = "${service.eventId}.${service.pubkey}"
@@ -272,29 +273,32 @@ fun ServiceCard(
 
                 Spacer(modifier = Modifier.height(6.dp))
 
-                // Message button - full width
-                Button(
-                    onClick = { onMessageClick?.invoke(service.pubkey, metadata?.picture) },
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(32.dp),
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = MaterialTheme.colorScheme.primary,
-                        contentColor = MaterialTheme.colorScheme.onPrimary
-                    ),
-                    shape = RoundedCornerShape(8.dp),
-                    contentPadding = androidx.compose.foundation.layout.PaddingValues(4.dp)
-                ) {
-                    Icon(
-                        imageVector = Icons.AutoMirrored.Filled.Message,
-                        contentDescription = "Message Icon",
-                        modifier = Modifier.size(14.dp)
-                    )
-                    Spacer(modifier = Modifier.width(4.dp))
-                    Text(
-                        "Message",
-                        style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Medium)
-                    )
+                // Message button - full width (hidden if this is the user's own listing)
+                val isOwnListing = userPubkey?.let { it == service.pubkey } ?: false
+                if (!isOwnListing) {
+                    Button(
+                        onClick = { onMessageClick?.invoke(service.pubkey, metadata?.picture) },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(32.dp),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = MaterialTheme.colorScheme.primary,
+                            contentColor = MaterialTheme.colorScheme.onPrimary
+                        ),
+                        shape = RoundedCornerShape(8.dp),
+                        contentPadding = androidx.compose.foundation.layout.PaddingValues(4.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.AutoMirrored.Filled.Message,
+                            contentDescription = "Message Icon",
+                            modifier = Modifier.size(14.dp)
+                        )
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text(
+                            "Message",
+                            style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Medium)
+                        )
+                    }
                 }
             }
         } // Column end

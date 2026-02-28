@@ -60,7 +60,8 @@ fun SectionedFeed(
     onItemClick: (ServiceListing) -> Unit,
     onSeeAll: (String) -> Unit,
     onMessageClick: (String) -> Unit = {},
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    userPubkey: String? = null // Current user's pubkey to check if service is user's own
 ) {
     LazyColumn(modifier = modifier) {
         grouped.forEach { (category, itemsInCategory) ->
@@ -89,7 +90,8 @@ fun SectionedFeed(
                             CompactServiceCard(
                                 service = service,
                                 onClick = { onItemClick(service) },
-                                onMessageClick = { pubkey -> onMessageClick(pubkey) }
+                                onMessageClick = { pubkey -> onMessageClick(pubkey) },
+                                userPubkey = userPubkey
                             )
                         }
                     }
@@ -119,7 +121,8 @@ fun FeedSkeleton(modifier: Modifier = Modifier) {
 fun CompactServiceCard(
     service: ServiceListing,
     onClick: () -> Unit = {},
-    onMessageClick: (String) -> Unit = {}
+    onMessageClick: (String) -> Unit = {},
+    userPubkey: String? = null // Current user's pubkey to check if service is user's own
 ) {
     Card(
         modifier = Modifier
@@ -224,17 +227,20 @@ fun CompactServiceCard(
 
                     Spacer(modifier = Modifier.weight(1f))
 
-                    // Message button - fixed, always visible
-                    IconButton(
-                        onClick = { onMessageClick(service.pubkey) },
-                        modifier = Modifier.size(28.dp),
-                        colors = IconButtonDefaults.iconButtonColors(contentColor = MaterialTheme.colorScheme.primary)
-                    ) {
-                        Icon(
-                            imageVector = Icons.Filled.Message,
-                            contentDescription = "Message",
-                            modifier = Modifier.size(16.dp)
-                        )
+                    // Message button - hidden if this is the user's own listing
+                    val isOwnListing = userPubkey?.let { it == service.pubkey } ?: false
+                    if (!isOwnListing) {
+                        IconButton(
+                            onClick = { onMessageClick(service.pubkey) },
+                            modifier = Modifier.size(28.dp),
+                            colors = IconButtonDefaults.iconButtonColors(contentColor = MaterialTheme.colorScheme.primary)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Filled.Message,
+                                contentDescription = "Message",
+                                modifier = Modifier.size(16.dp)
+                            )
+                        }
                     }
                 }
             }
