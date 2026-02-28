@@ -25,6 +25,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.SharedFlow
+import java.util.concurrent.atomic.AtomicInteger
 
 @Singleton
 class NostrClient @Inject constructor(
@@ -99,6 +100,12 @@ class NostrClient @Inject constructor(
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val webSockets = ConcurrentHashMap<String, WebSocket>()
     private val subscriptions = ConcurrentHashMap<String, String>() // id -> filterJson
+    // Assignment of subscription id to a single relay to avoid sending REQ to all relays
+    private val subscriptionAssignment = ConcurrentHashMap<String, String>() // id -> relayUrl
+    private val roundRobinIndex = AtomicInteger(0)
+    private val publishAssignment = ConcurrentHashMap<String, String>() // eventId -> relayUrl
+    private val relayPublishLastSent = ConcurrentHashMap<String, Long>()
+    private val relayRequiresAuth = ConcurrentHashMap<String, Boolean>()
     private var retryCount = 0
     private val maxRetries = 5
     private val retryDelay = 3000L // ms
@@ -197,10 +204,11 @@ class NostrClient @Inject constructor(
                             iterator.remove()
                         }
 
-                        // Resubscribe to all active subscriptions immediately so this connection
-                        // starts receiving events without waiting for all relays to connect.
+                        // Resubscribe to all active subscriptions on this relay (broadcast behavior).
+                        // Skip relays marked as requiring auth when sending.
                         subscriptions.forEach { (id, filters) ->
                             try {
+                                if (relayRequiresAuth[relayUrl] == true) return@forEach
                                 val reqArray = org.json.JSONArray().apply {
                                     put("REQ")
                                     put(id)
@@ -214,8 +222,26 @@ class NostrClient @Inject constructor(
                                     }
                                 }
                                 val reqString = reqArray.toString()
-                                webSocket.send(reqString)
-                                Timber.d("Sent resubscribe REQ to %s: %s", relayUrl, reqString)
+                                // Respect per-relay throttling
+                                val now = System.currentTimeMillis()
+                                val last = lastSubscriptionSent[relayUrl] ?: 0L
+                                if (now - last >= SUBSCRIPTION_MIN_INTERVAL_MS) {
+                                    webSocket.send(reqString)
+                                    lastSubscriptionSent[relayUrl] = System.currentTimeMillis()
+                                    Timber.d("Sent resubscribe REQ to %s: %s", relayUrl, reqString)
+                                } else {
+                                    val wait = (SUBSCRIPTION_MIN_INTERVAL_MS - (now - last)).coerceAtLeast(0L)
+                                    scope.launch {
+                                        kotlinx.coroutines.delay(wait)
+                                        try {
+                                            webSocket.send(reqString)
+                                            lastSubscriptionSent[relayUrl] = System.currentTimeMillis()
+                                            Timber.d("Delayed resubscribe REQ to %s after %dms: %s", relayUrl, wait, reqString)
+                                        } catch (ex: Exception) {
+                                            Timber.w(ex, "Delayed resubscribe failed for %s", relayUrl)
+                                        }
+                                    }
+                                }
                             } catch (e: Exception) {
                                 Timber.e(e, "Failed to resubscribe on open for %s", relayUrl)
                             }
@@ -225,6 +251,82 @@ class NostrClient @Inject constructor(
                     override fun onMessage(webSocket: WebSocket, text: String) {
                         scope.launch(Dispatchers.Default) {
                             try {
+                                // Inspect certain control messages to mark relay state (auth-required, rate limits)
+                                try {
+                                    val arr = org.json.JSONArray(text)
+                                    val t = arr.optString(0)
+                                    if (t == "NOTICE") {
+                                        val notice = arr.optString(1, "")
+                                        if (notice.contains("auth-required", true) || notice.contains("authentication required", true)) {
+                                            relayRequiresAuth[relayUrl] = true
+                                            Timber.w("Relay %s requires auth: %s", relayUrl, notice)
+                                            // Reassign any subscriptions previously assigned to this relay
+                                            scope.launch {
+                                                try {
+                                                    val reassigned = subscriptionAssignment.entries.filter { it.value == relayUrl }.map { it.key }
+                                                    reassigned.forEach { subId ->
+                                                        subscriptionAssignment.remove(subId)
+                                                        val filter = subscriptions[subId]
+                                                        if (filter != null) {
+                                                            Timber.d("Reassigning subscription %s away from auth-only relay %s", subId, relayUrl)
+                                                            sendSubscription(subId, filter)
+                                                        }
+                                                    }
+                                                } catch (e: Exception) {
+                                                    Timber.w(e, "Failed to reassign subscriptions after auth-required for %s", relayUrl)
+                                                }
+                                            }
+                                        }
+                                    } else if (t == "OK") {
+                                        val reason = arr.optString(3, "")
+                                        if (reason.contains("auth-required", true) || reason.contains("authentication required", true)) {
+                                            relayRequiresAuth[relayUrl] = true
+                                            Timber.w("Relay %s reported auth-required on OK: %s", relayUrl, reason)
+                                            scope.launch {
+                                                try {
+                                                    val reassigned = subscriptionAssignment.entries.filter { it.value == relayUrl }.map { it.key }
+                                                    reassigned.forEach { subId ->
+                                                        subscriptionAssignment.remove(subId)
+                                                        val filter = subscriptions[subId]
+                                                        if (filter != null) {
+                                                            Timber.d("Reassigning subscription %s away from auth-only relay %s (OK)", subId, relayUrl)
+                                                            sendSubscription(subId, filter)
+                                                        }
+                                                    }
+                                                } catch (e: Exception) {
+                                                    Timber.w(e, "Failed to reassign subscriptions after auth-required OK for %s", relayUrl)
+                                                }
+                                            }
+                                        } else {
+                                            // clear auth flag when relay accepts events
+                                            relayRequiresAuth.remove(relayUrl)
+                                        }
+                                    } else if (t == "CLOSED") {
+                                        val reason = arr.optString(2, "")
+                                        if (reason.contains("auth-required", true) || reason.contains("authentication required", true)) {
+                                            relayRequiresAuth[relayUrl] = true
+                                            Timber.w("Relay %s closed with auth-required: %s", relayUrl, reason)
+                                            scope.launch {
+                                                try {
+                                                    val reassigned = subscriptionAssignment.entries.filter { it.value == relayUrl }.map { it.key }
+                                                    reassigned.forEach { subId ->
+                                                        subscriptionAssignment.remove(subId)
+                                                        val filter = subscriptions[subId]
+                                                        if (filter != null) {
+                                                            Timber.d("Reassigning subscription %s away from auth-only relay %s (CLOSED)", subId, relayUrl)
+                                                            sendSubscription(subId, filter)
+                                                        }
+                                                    }
+                                                } catch (e: Exception) {
+                                                    Timber.w(e, "Failed to reassign subscriptions after auth-required CLOSE for %s", relayUrl)
+                                                }
+                                            }
+                                        }
+                                    }
+                                } catch (_: Exception) {
+                                    // not a JSON array or unparseable — ignore for relay state
+                                }
+
                                 // Emit into the centralized incoming messages flow first
                                 try {
                                     _incomingMessages.emit(text)
@@ -314,6 +416,7 @@ class NostrClient @Inject constructor(
 
             if (webSockets.isNotEmpty() && _connectionState.value == ConnectionState.CONNECTED) {
                 webSockets.forEach { (relayUrl, ws) ->
+                    if (relayRequiresAuth[relayUrl] == true) return@forEach
                     // Throttle per-relay to avoid flooding and triggering relay rate limits
                     val now = System.currentTimeMillis()
                     val last = lastSubscriptionSent[relayUrl] ?: 0L
@@ -359,6 +462,7 @@ class NostrClient @Inject constructor(
                 }
             } else {
                 Timber.w("No active WebSockets, attempting to connect...")
+                pendingMessages.add(reqString)
                 connect()
             }
         } catch (e: Exception) {
@@ -394,7 +498,62 @@ class NostrClient @Inject constructor(
                 put("EVENT")
                 put(eventJson)
             }
-            sendMessage(reqArray.toString())
+            val reqString = reqArray.toString()
+
+            // Publish to all connected relays (except those marked as requiring auth).
+            val relayList = webSockets.keys.filter { relay -> relayRequiresAuth[relay] != true }
+            if (relayList.isEmpty()) {
+                Timber.w("No writable relays available, queuing publish for event=%s", event.id)
+                pendingMessages.add(reqString)
+                connect()
+                return
+            }
+
+            // Verify event id/signature before sending — help catch id creation bugs early
+            try {
+                val verification = com.hisa.data.nostr.EventVerifier.verifyEvent(eventJson.toString())
+                if (!verification.idMatches) {
+                    Timber.w("Event id mismatch for event=%s given=%s computed=%s — aborting publish", event.id, event.id, verification.computedId)
+                    return
+                }
+                if (!verification.signatureValid) {
+                    Timber.w("Event signature invalid for event=%s — will still attempt publish (relay may reject)", event.id)
+                }
+            } catch (e: Exception) {
+                Timber.w(e, "Event verification failed for event=%s", event.id)
+            }
+
+            relayList.forEach { relayUrl ->
+                val ws = webSockets[relayUrl]
+                if (ws == null) return@forEach
+                try {
+                    val now = System.currentTimeMillis()
+                    val last = relayPublishLastSent[relayUrl] ?: 0L
+                    val elapsed = now - last
+                    val jitter = kotlin.random.Random.nextLong(0, 200)
+                    if (elapsed >= SUBSCRIPTION_MIN_INTERVAL_MS) {
+                        ws.send(reqString)
+                        relayPublishLastSent[relayUrl] = System.currentTimeMillis()
+                        publishAssignment[event.id] = relayUrl
+                        Timber.d("Published event %s to %s", event.id, relayUrl)
+                    } else {
+                        val wait = (SUBSCRIPTION_MIN_INTERVAL_MS - elapsed).coerceAtLeast(0L) + jitter
+                        scope.launch {
+                            kotlinx.coroutines.delay(wait)
+                            try {
+                                ws.send(reqString)
+                                relayPublishLastSent[relayUrl] = System.currentTimeMillis()
+                                publishAssignment[event.id] = relayUrl
+                                Timber.d("Delayed publish event %s to %s after %dms", event.id, relayUrl, wait)
+                            } catch (ex: Exception) {
+                                Timber.e(ex, "Delayed publish failed for %s", relayUrl)
+                            }
+                        }
+                    }
+                } catch (e: Exception) {
+                    Timber.w(e, "Failed to publish to %s", relayUrl)
+                }
+            }
         } catch (e: Exception) {
             Timber.e(e, "Failed to publish event")
         }
