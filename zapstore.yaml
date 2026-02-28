@@ -5,7 +5,12 @@ summary: Nostr marketplace for products and services
 description: Browse, publish, and discover products and services with peer-to-peer transactions on Nostr relays.
 icon: png_hisa.jpeg
 license: MIT
-tags: nostr android hisa nip99 nip28
+tags:
+  - nostr
+  - android
+  - hisa
+  - nip99
+  - nip28
 remote_metadata:
   - github
 assets:
