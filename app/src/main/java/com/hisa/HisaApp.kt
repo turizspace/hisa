@@ -3,6 +3,7 @@ package com.hisa
 import android.app.Application
 // import com.hisa.BuildConfig
 import dagger.hilt.android.HiltAndroidApp
+import java.util.concurrent.atomic.AtomicLong
 import javax.inject.Inject
 import com.hisa.data.nostr.NostrClient
 import com.hisa.data.nostr.SubscriptionManager
@@ -21,8 +22,12 @@ class HisaApp : Application() {
     @Inject
     lateinit var profileMetaUtil: ProfileMetaUtil
 
+    // Counter to sample WS messages and avoid spamming logs
+    private val wsMessageCounter = AtomicLong(0)
+
     override fun onCreate() {
         super.onCreate()
+        instance = this
         // Hilt will automatically inject the dependencies
         // Use unconditional Timber debug planting during development to ensure logs are visible
         // Initialize Timber with DebugTree for local debugging.
@@ -34,7 +39,11 @@ class HisaApp : Application() {
         // its active subscriptions receive events (EVENT, EOSE, NOTICE, ...)
         nostrClient.registerMessageHandler { message ->
             try {
-                Timber.d("Routing WS message to SubscriptionManager: %s", message.take(200))
+                val count = wsMessageCounter.incrementAndGet()
+                // Log a sampled message every 1000 events to avoid log spam
+                if (count % 1000L == 0L) {
+                    Timber.d("Routing WS message sample (#%d): %s", count, message.take(200))
+                }
                 subscriptionManager.handleMessage(message)
             } catch (e: Exception) {
                 Timber.e(e, "Error routing WS message to SubscriptionManager")

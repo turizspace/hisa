@@ -136,7 +136,7 @@ fun ChannelsTab(
             }
         }
 
-        if (showLoading) {
+        if (isLoading) {
             TabLoadingPlaceholder(
                 title = "Loading Channels",
                 subtitle = "Syncing rooms and participant activity"

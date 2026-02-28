@@ -63,7 +63,8 @@ class SubscriptionManager @Inject constructor(
     fun subscribeToChannelMessages(
         channelId: String? = null,
         since: Long? = null,
-        onEvent: (NostrEvent) -> Unit
+        onEvent: (NostrEvent) -> Unit,
+        onEndOfStoredEvents: () -> Unit = {}
     ): String {
         return subscribe(
             filter = createFilter {
@@ -73,7 +74,8 @@ class SubscriptionManager @Inject constructor(
                 }
                 since?.let { putSince(it) }
             },
-            onEvent = onEvent
+            onEvent = onEvent,
+            onEndOfStoredEvents = onEndOfStoredEvents
         )
     }
 
