@@ -79,13 +79,10 @@ import com.hisa.ui.screens.lists.ChannelsTab
 import com.hisa.ui.screens.messages.MessagesTab
 import com.hisa.R
 import androidx.hilt.navigation.compose.hiltViewModel
-import androidx.lifecycle.viewmodel.compose.viewModel
 import com.hisa.data.nostr.NostrClient
 import com.hisa.data.nostr.SubscriptionManager
 import com.hisa.ui.components.SearchBar
 import com.hisa.util.Constants
-import com.hisa.viewmodel.ChannelsViewModel
-import com.hisa.viewmodel.ChannelsViewModelFactory
 import com.hisa.viewmodel.FeedViewModel
 import com.hisa.viewmodel.MessagesViewModel
 
@@ -128,17 +125,6 @@ fun MainScreen(
     val scope = rememberCoroutineScope()
     val feedViewModel: FeedViewModel = hiltViewModel()
     var feedAtTop by remember { mutableStateOf(true) }
-    val pkBytesForChannels: ByteArray? = if (privateKey.isNotBlank()) {
-        try { privateKey.chunked(2).map { it.toInt(16).toByte() }.toByteArray() } catch (e: Exception) { null }
-    } else null
-    val channelsViewModel: ChannelsViewModel = viewModel(
-        factory = ChannelsViewModelFactory(
-            nostrClient = nostrClient,
-            subscriptionManager = subscriptionManager,
-            privateKey = pkBytesForChannels,
-            pubkey = userPubkey
-        )
-    )
 
     if (showDialog) {
         AlertDialog(
@@ -285,10 +271,6 @@ fun MainScreen(
                     }
                 )
             }
-            // Ensure channels subscription is active so channel chats can be fetched at any time
-            LaunchedEffect(Unit) {
-                channelsViewModel.ensureSubscribed()
-            }
         }
     ) {
         Scaffold(
@@ -366,7 +348,6 @@ fun MainScreen(
                                                 }
                                                 1 -> {
                                                     selectedTab = 1
-                                                    messagesViewModel.getConversations()
                                                 }
                                                 2 -> {
                                                     // Create - switch to Feed so returning lands on Feed, then navigate
@@ -439,7 +420,9 @@ fun MainScreen(
                 LaunchedEffect(selectedTab) {
                     when (selectedTab) {
                         0 -> feedViewModel.subscribeToFeed()
-                        1 -> messagesViewModel.getConversations()
+                        1 -> {
+                            // Messages tab lazy-load handled inside MessagesTab
+                        }
                         2 -> {
                             // Create tab handled via navigation
                         }
@@ -449,8 +432,6 @@ fun MainScreen(
                             if (!restoredChannelsSearch.isNullOrEmpty()) {
                                 searchQuery = restoredChannelsSearch
                             }
-                            // Ensure subscriptions for channels are active
-                            channelsViewModel.ensureSubscribed()
                         }
                         4 -> {
                             // MyShop tab selected (no-op)

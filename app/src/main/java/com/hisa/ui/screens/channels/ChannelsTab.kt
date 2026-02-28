@@ -34,6 +34,8 @@ import com.hisa.data.model.Group
 import com.hisa.data.nostr.NostrClient
 import com.hisa.data.nostr.SubscriptionManager
 import com.hisa.ui.components.ChannelChip
+import com.hisa.ui.components.TabLoadingPlaceholder
+import com.hisa.ui.components.rememberTabLoadingVisibility
 import com.hisa.ui.navigation.Routes
 import com.hisa.viewmodel.ChannelsViewModel
 import com.hisa.viewmodel.ChannelsViewModelFactory
@@ -57,6 +59,7 @@ fun ChannelsTab(
 ) {
     val channels by channelsViewModel.channels.collectAsState()
     val isLoading by channelsViewModel.isLoading.collectAsState()
+    val showLoading = rememberTabLoadingVisibility(isLoading = isLoading)
     val categories by channelsViewModel.categories.collectAsState()
     val participantCounts by channelsViewModel.participantCounts.collectAsState()
     // Try to restore selectedCategory and searchQuery from SavedStateHandle (if returning from channel)
@@ -133,13 +136,11 @@ fun ChannelsTab(
             }
         }
 
-        if (isLoading) {
-            Box(
-                modifier = Modifier.fillMaxSize(),
-                contentAlignment = Alignment.Center
-            ) {
-                CircularProgressIndicator()
-            }
+        if (showLoading) {
+            TabLoadingPlaceholder(
+                title = "Loading Channels",
+                subtitle = "Syncing rooms and participant activity"
+            )
         } else {
             // First filter by search query if present, then apply selectedCategory
             val afterSearch = if (searchText.isNullOrEmpty()) {

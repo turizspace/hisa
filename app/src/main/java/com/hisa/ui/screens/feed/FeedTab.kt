@@ -28,7 +28,8 @@ import androidx.navigation.NavController
 import androidx.compose.ui.tooling.preview.Preview
 import com.hisa.ui.components.CategoryChipRow
 import com.hisa.ui.components.SectionedFeed
-import com.hisa.ui.components.FeedSkeleton
+import com.hisa.ui.components.TabLoadingPlaceholder
+import com.hisa.ui.components.rememberTabLoadingVisibility
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Text
 import androidx.compose.runtime.LaunchedEffect
@@ -50,6 +51,7 @@ fun FeedTab(
 ) {
     val services by feedViewModel.services.collectAsState()
     val isLoading by feedViewModel.isLoading.collectAsState()
+    val showLoading = rememberTabLoadingVisibility(isLoading = isLoading)
     val categories by feedViewModel.categories.collectAsState()
     // Persist selected category in the ViewModel so it survives navigation
     val selectedCategoryState by feedViewModel.selectedCategory.collectAsState()
@@ -89,8 +91,12 @@ fun FeedTab(
         }
 
         // When loading, show skeletons
-        if (isLoading) {
-            FeedSkeleton(modifier = Modifier.fillMaxWidth())
+        if (showLoading) {
+            TabLoadingPlaceholder(
+                title = "Loading Feed",
+                subtitle = "Finding the latest listings for you",
+                modifier = Modifier.fillMaxWidth()
+            )
             return@Column
         }
 
@@ -145,7 +151,8 @@ fun FeedTab(
                 onMessageClick = { pubkey ->
                     navController.navigate(Routes.DM.replace("{pubkey}", pubkey))
                 },
-                modifier = Modifier.fillMaxWidth()
+                modifier = Modifier.fillMaxWidth(),
+                userPubkey = userPubkey
             )
         } else {
             // Fall back to a two-column grid for search results or empty-category views
@@ -192,7 +199,8 @@ fun FeedTab(
                                 Routes.DM
                                     .replace("{pubkey}", pubkey)
                             )
-                        }
+                        },
+                        userPubkey = userPubkey
                     )
                 }
             }
