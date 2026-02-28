@@ -11,7 +11,6 @@ import javax.crypto.Cipher
 import javax.crypto.spec.IvParameterSpec
 import javax.crypto.spec.SecretKeySpec
 import java.util.Base64
-import org.bouncycastle.crypto.agreement.X25519Agreement
 import org.bouncycastle.crypto.digests.SHA256Digest
 import org.bouncycastle.crypto.engines.ChaCha7539Engine as ChaCha20Engine
 import org.bouncycastle.crypto.generators.HKDFBytesGenerator
@@ -19,13 +18,15 @@ import org.bouncycastle.crypto.macs.HMac
 import org.bouncycastle.crypto.params.HKDFParameters
 import org.bouncycastle.crypto.params.KeyParameter
 import org.bouncycastle.crypto.params.ParametersWithIV
-import org.bouncycastle.crypto.params.X25519PrivateKeyParameters
-import org.bouncycastle.crypto.params.X25519PublicKeyParameters
 import java.security.MessageDigest
+import org.bouncycastle.math.ec.ECPoint
 
 
 import com.hisa.crypto.Schnorr
 import java.math.BigInteger
+import com.hisa.data.nostr.NostrEventSigner
+import com.hisa.data.nostr.EventVerifier
+import com.hisa.data.nostr.crypto.getNip44
 
 
 /**
@@ -37,6 +38,7 @@ import java.math.BigInteger
  */
 object MessageRepository {
     private val secureRandom = SecureRandom()
+    private val nip44 = getNip44()
     
     private fun generateRandomTimestamp(maxAgeSeconds: Int): Long {
         val now = System.currentTimeMillis() / 1000
@@ -51,10 +53,20 @@ object MessageRepository {
 
     // NIP-44 v2 Encryption Constants
     private const val VERSION_BYTE: Byte = 0x02
-    private const val NONCE_SIZE = 32  // Random nonce size for NIP-44 v2
+    private const val NONCE_SIZE = 32  // NIP-44 v2 nonce length
     private const val AUTH_SIZE = 32
+    private const val CHACHA_NONCE_SIZE = 12
     private const val MAX_PLAINTEXT_SIZE = 65535
+    private const val MIN_PLAINTEXT_SIZE = 1
     private const val MIN_PADDED_SIZE = 32
+    private const val MIN_BASE64_LEN = 132
+    private const val MAX_BASE64_LEN = 87472
+    private const val MIN_DECODED_LEN = 99
+    private const val MAX_DECODED_LEN = 65603
+    private val SECP256K1_N: BigInteger = BigInteger(
+        "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141",
+        16
+    )
 
     /**
      * Implements NIP-44 message encryption
@@ -65,40 +77,8 @@ object MessageRepository {
         senderPrivateKey: ByteArray,
         recipientPubkey: String
     ): String {
-        // 1. Convert recipient's hex pubkey to byte array and validate (strict)
-        val recipientPubkeyBytes = hexToBytes(recipientPubkey)
-
-        // 2. Calculate X25519 shared secret
-        val sharedSecret = calculateSharedSecret(senderPrivateKey, recipientPubkeyBytes)
-
-        // 3. Derive a conversation key using HKDF-SHA256 (nip44-v2)
-        val conversationKey = deriveConversationKey(sharedSecret) // 32 bytes
-
-        // 4. Generate random 12-byte IV for AES-GCM
-        val iv = generateRandomBytes(12)
-
-        // 5. Create AES-GCM cipher and initialize with derived key
-        val cipher = javax.crypto.Cipher.getInstance("AES/GCM/NoPadding")
-        val secretKey = javax.crypto.spec.SecretKeySpec(conversationKey, "AES")
-        val gcmSpec = javax.crypto.spec.GCMParameterSpec(128, iv)
-        cipher.init(javax.crypto.Cipher.ENCRYPT_MODE, secretKey, gcmSpec)
-
-    // 6. Add AAD to bind version to ciphertext (keep minimal and deterministic)
-    val aad = byteArrayOf(VERSION_BYTE)
-    cipher.updateAAD(aad)
-
-        // 7. Encrypt the plaintext
-        val plaintextBytes = plaintext.toByteArray(Charsets.UTF_8)
-        val ciphertext = cipher.doFinal(plaintextBytes)
-
-        // 8. Combine version byte, IV, and ciphertext
-        val result = ByteArray(1 + iv.size + ciphertext.size)
-        result[0] = VERSION_BYTE
-        System.arraycopy(iv, 0, result, 1, iv.size)
-        System.arraycopy(ciphertext, 0, result, 1 + iv.size, ciphertext.size)
-
-        // 9. Base64 encode
-        return java.util.Base64.getEncoder().encodeToString(result)
+        val pubBytes = hexToBytes(recipientPubkey)
+        return nip44.encrypt(plaintext, senderPrivateKey, pubBytes).encode()
     }
 
     /**
@@ -110,51 +90,49 @@ object MessageRepository {
         recipientPrivateKey: ByteArray,
         senderPubkey: String
     ): String {
-        // 1. Decode base64
-        val encryptedBytes = Base64.getDecoder().decode(encryptedContent)
+        val pubBytes = hexToBytes(senderPubkey)
+        return nip44.decrypt(encryptedContent, recipientPrivateKey, pubBytes)
+            ?: throw IllegalArgumentException("NIP-44 decrypt failed")
+    }
 
-        // 2. Verify version byte
-        if (encryptedBytes[0] != VERSION_BYTE) {
-            throw IllegalArgumentException("Unsupported NIP-44 version byte: ${encryptedBytes[0]}")
-        }
+    private fun padNip44Plaintext(plaintext: ByteArray): ByteArray {
+        require(plaintext.isNotEmpty()) { "NIP-44 plaintext must not be empty" }
+        val targetSize = calculatePaddedSize(plaintext.size)
+        val out = ByteArray(2 + targetSize)
+        val len = plaintext.size
+        out[0] = ((len ushr 8) and 0xff).toByte()
+        out[1] = (len and 0xff).toByte()
+        System.arraycopy(plaintext, 0, out, 2, len)
+        // NIP-44 v2 requires zero-byte suffix padding.
+        // ByteArray is already zero-initialized, so no extra write is needed.
+        return out
+    }
 
-        // 3. Extract 12-byte IV and ciphertext
-        val iv = encryptedBytes.copyOfRange(1, 13)
-        val ciphertext = encryptedBytes.copyOfRange(13, encryptedBytes.size)
+    private fun unpadNip44Plaintext(padded: ByteArray): ByteArray {
+        require(padded.size >= 2) { "NIP-44 padded payload too short" }
+        val length = ((padded[0].toInt() and 0xff) shl 8) or (padded[1].toInt() and 0xff)
+        require(length in 1..MAX_PLAINTEXT_SIZE) { "Invalid NIP-44 plaintext length: $length" }
+        require(2 + length <= padded.size) { "Invalid NIP-44 padded length framing" }
+        require(padded.size == 2 + calculatePaddedSize(length)) { "Invalid NIP-44 padding shape" }
+        return padded.copyOfRange(2, 2 + length)
+    }
 
-        // 4. Convert sender's hex pubkey to byte array
-    val senderPubkeyBytes = hexToBytes(senderPubkey)
-
-    // 5. Calculate shared secret using X25519
-    val sharedSecret = calculateSharedSecret(recipientPrivateKey, senderPubkeyBytes)
-
-    // 6. Derive conversation key via HKDF
-    val conversationKey = deriveConversationKey(sharedSecret)
-
-    // 7. Create AES-GCM cipher for decryption
-    val cipher = javax.crypto.Cipher.getInstance("AES/GCM/NoPadding")
-    val secretKey = javax.crypto.spec.SecretKeySpec(conversationKey, "AES")
-    val gcmSpec = javax.crypto.spec.GCMParameterSpec(128, iv)
-    cipher.init(javax.crypto.Cipher.DECRYPT_MODE, secretKey, gcmSpec)
-
-    // 8. Reconstruct AAD (must match encrypt)
-    val aad = byteArrayOf(VERSION_BYTE)
-    cipher.updateAAD(aad)
-
-    // 9. Decrypt the ciphertext
-    val plaintext = cipher.doFinal(ciphertext)
-
-    return String(plaintext)
+    private fun calculatePaddedSize(length: Int): Int {
+        if (length <= MIN_PADDED_SIZE) return MIN_PADDED_SIZE
+        if (length > MAX_PLAINTEXT_SIZE) throw IllegalArgumentException("Plaintext too large")
+        val nextPower = Integer.highestOneBit(length - 1) shl 1
+        val chunk = if (nextPower <= 256) 32 else nextPower / 8
+        return ((length + chunk - 1) / chunk) * chunk
     }
 
 
 
     // Helper function to convert hex string to byte array
     private fun hexToBytes(hex: String): ByteArray {
-        // Strict: expect exactly 64 hex chars (32 bytes) representing X25519 key material
+        // Strict: expect exactly 64 hex chars (32 bytes)
         val cleanHex = hex.replace("0x", "").trim().lowercase()
         if (!cleanHex.matches(Regex("[0-9a-f]{64}"))) {
-            throw IllegalArgumentException("Invalid hex string format for X25519 key (expected 64 hex chars)")
+            throw IllegalArgumentException("Invalid 32-byte hex string (expected 64 hex chars)")
         }
 
         return ByteArray(32).also { bytes ->
@@ -170,23 +148,41 @@ object MessageRepository {
         return bytes.joinToString("") { "%02x".format(it) }
     }
 
-    // Calculate shared secret using ECDH
-    private fun calculateSharedSecret(privateKey: ByteArray, publicKey: ByteArray): ByteArray {
-        val agreement = X25519Agreement()
-        agreement.init(X25519PrivateKeyParameters(privateKey))
-        val sharedSecret = ByteArray(agreement.agreementSize)
-        agreement.calculateAgreement(X25519PublicKeyParameters(publicKey), sharedSecret, 0)
-        return sharedSecret
+    // Calculate NIP-44 shared secret using secp256k1 ECDH: x-coordinate(priv * pub).
+    private fun calculateSharedSecret(privateKey: ByteArray, otherPubkeyHex: String): ByteArray {
+        require(privateKey.size == 32) { "Private key must be 32 bytes" }
+        val privScalar = BigInteger(1, privateKey)
+        require(privScalar >= BigInteger.ONE && privScalar < SECP256K1_N) { "Invalid secp256k1 private key scalar" }
+        val cleanPub = otherPubkeyHex.trim().lowercase()
+        require(cleanPub.matches(Regex("[0-9a-f]{64}"))) { "Invalid x-only pubkey" }
+        val compressed = hexToBytes("02$cleanPub")
+        val otherPoint: ECPoint = ECKey.CURVE.curve.decodePoint(compressed)
+        require(!otherPoint.isInfinity) { "Invalid secp256k1 public key point" }
+        val sharedPoint = otherPoint.multiply(privScalar).normalize()
+        return to32Bytes(sharedPoint.xCoord.encoded)
     }
 
-    // Derive conversation key using HKDF
+    // Derive conversation key using HKDF-extract only (NIP-44 v2).
     private fun deriveConversationKey(sharedSecret: ByteArray): ByteArray {
-        val hkdf = HKDFBytesGenerator(SHA256Digest())
         val salt = "nip44-v2".toByteArray(Charsets.UTF_8)
-        hkdf.init(HKDFParameters(sharedSecret, salt, null))
-        val conversationKey = ByteArray(32)
-        hkdf.generateBytes(conversationKey, 0, conversationKey.size)
-        return conversationKey
+        return hmacSha256(salt, sharedSecret)
+    }
+
+    private fun hmacSha256(key: ByteArray, data: ByteArray): ByteArray {
+        val hmac = HMac(SHA256Digest())
+        hmac.init(KeyParameter(key))
+        hmac.update(data, 0, data.size)
+        val out = ByteArray(32)
+        hmac.doFinal(out, 0)
+        return out
+    }
+
+    private fun to32Bytes(input: ByteArray): ByteArray {
+        if (input.size == 32) return input
+        if (input.size > 32) return input.copyOfRange(input.size - 32, input.size)
+        val out = ByteArray(32)
+        System.arraycopy(input, 0, out, 32 - input.size, input.size)
+        return out
     }
 
     // Derive message keys using HKDF-expand
@@ -198,55 +194,250 @@ object MessageRepository {
      * 3. Final message (kind:14)
      */
     @RequiresApi(Build.VERSION_CODES.O)
-    fun decryptGiftWrappedMessage(event: JSONObject, recipientPrivateKey: ByteArray): JSONObject? {
+    suspend fun decryptGiftWrappedMessage(
+        event: JSONObject,
+        recipientPrivateKey: ByteArray? = null,
+        externalDecryptor: (suspend (ciphertext: String, senderPubkey: String) -> String)? = null,
+        maxSenderCandidates: Int? = null,
+        senderPubkeyHints: List<String> = emptyList()
+    ): JSONObject? {
         try {
-            // Extract the content and sender pubkey from the outer gift wrap
+            val outerVerification = EventVerifier.verifyEvent(event.toString())
+            val outerVerified = outerVerification.idMatches && outerVerification.signatureValid
+            if (!outerVerified) {
+                timber.log.Timber.w(
+                    "Outer gift-wrap failed NIP-01 verification (compat mode): eventId=%s idMatches=%s sigValid=%s",
+                    event.optString("id", ""),
+                    outerVerification.idMatches,
+                    outerVerification.signatureValid
+                )
+            }
+
+            val decryptFn: suspend (String, String) -> String = when {
+                recipientPrivateKey != null -> { ciphertext, sender ->
+                    nip44Decrypt(ciphertext, recipientPrivateKey, sender)
+                }
+                externalDecryptor != null -> externalDecryptor
+                else -> throw IllegalStateException("No decryption method available")
+            }
+
+            // Extract encrypted payload.
             val encryptedContent = event.getString("content")
-            // Prefer an explicit X25519 sender pubkey tag ("x") if present; fall back to the event.pubkey
-            // Use the optString overload with a default to avoid nullable String?.
-            var senderPubkey: String = event.optString("pubkey", "")
+            // Prefer outer pubkey for spec-compliant wraps. If outer verification failed, include
+            // legacy x-tag candidates first to recover older malformed events produced by prior builds.
+            val senderCandidates = mutableListOf<String>()
+            senderPubkeyHints
+                .map { it.trim().lowercase() }
+                .filter { it.matches(Regex("[0-9a-f]{64}")) }
+                .forEach { senderCandidates.add(it) }
+            val outerPubkey = event.optString("pubkey", "").trim().lowercase()
+            val xTagCandidates = mutableListOf<String>()
             val tags = event.optJSONArray("tags") ?: JSONArray()
             for (i in 0 until tags.length()) {
-                try {
-                    val tag = tags.getJSONArray(i)
-                    // Use optString to avoid nullable String returns from getString
-                    if (tag.length() > 0 && tag.optString(0, "") == "x") {
-                        // Use optString with default to ensure non-null String
-                        senderPubkey = tag.optString(1, "")
-                        break
+                val tag = tags.optJSONArray(i) ?: continue
+                if (tag.optString(0) == "x") {
+                    val candidate = tag.optString(1, "").trim().lowercase()
+                    if (candidate.matches(Regex("[0-9a-f]{64}"))) {
+                        xTagCandidates.add(candidate)
                     }
-                } catch (ignore: Exception) {
                 }
             }
-            // senderPubkey is now a non-null String (may be empty, nip44Decrypt will validate)
-            
-            // First layer: decrypt the gift wrap to get either a sealed message (kind 13)
-            // or directly the inner message (kind 14/15) depending on sender implementation.
-            timber.log.Timber.d("Attempting NIP-44 decrypt: encryptedContentLen=%d senderPubkey=%s", encryptedContent.length, senderPubkey)
-            val sealedJson = nip44Decrypt(encryptedContent, recipientPrivateKey, senderPubkey)
-            val sealedMessage = JSONObject(sealedJson)
+            if (!outerVerified) {
+                senderCandidates.addAll(xTagCandidates)
+            }
+            if (outerPubkey.matches(Regex("[0-9a-f]{64}"))) {
+                senderCandidates.add(outerPubkey)
+            }
+            if (outerVerified) {
+                senderCandidates.addAll(xTagCandidates)
+            }
+            val dedupedCandidates = senderCandidates.distinct()
+            val candidates = if (maxSenderCandidates != null) {
+                dedupedCandidates.take(maxSenderCandidates)
+            } else {
+                dedupedCandidates
+            }
+            timber.log.Timber.d(
+                "Gift-wrap decrypt candidates: eventId=%s outerVerified=%s candidates=%s",
+                event.optString("id", ""),
+                outerVerified,
+                candidates.joinToString(",") { it.take(12) }
+            )
 
-            val sealedKind = sealedMessage.optInt("kind")
-            timber.log.Timber.d("Decrypted outer layer kind=%d id=%s", sealedKind, sealedMessage.optString("id", ""))
-            when (sealedKind) {
-                13 -> {
-                    // Two-layer gift-wrap: decrypt the seal to extract the inner message
-                    val sealContent = sealedMessage.getString("content")
-                    val sealSenderPubkey = sealedMessage.getString("pubkey")
-                    val innerJson = nip44Decrypt(sealContent, recipientPrivateKey, sealSenderPubkey)
-                    return JSONObject(innerJson)
+            // Try candidates until one decrypts.
+            var lastError: Exception? = null
+            val candidateErrors = mutableListOf<String>()
+            for (senderPubkey in candidates) {
+                try {
+                    timber.log.Timber.d(
+                        "Attempting NIP-44 decrypt: encryptedContentLen=%d senderPubkey=%s",
+                        encryptedContent.length,
+                        senderPubkey
+                    )
+                    val sealedJson = decryptFn(encryptedContent, senderPubkey)
+                    val sealedMessage = parseJsonObjectOrThrow(
+                        sealedJson,
+                        "Outer decrypt returned non-JSON payload"
+                    )
+
+                    val sealedKind = sealedMessage.optInt("kind")
+                    timber.log.Timber.d(
+                        "Outer layer decrypted with candidate=%s kind=%d id=%s pubkey=%s",
+                        senderPubkey.take(12),
+                        sealedKind,
+                        sealedMessage.optString("id", "").take(16),
+                        sealedMessage.optString("pubkey", "").take(12)
+                    )
+                    
+                    // Validate that kind makes sense for a gift-wrapped message
+                    // Outer layer should decrypt to kind 13 (rumor/seal), 14 (seal), or 15 (DM)
+                    if (sealedKind !in listOf(13, 14, 15)) {
+                        timber.log.Timber.w(
+                            "Rejecting candidate: kind=%d is invalid for gift-wrap. candidate=%s",
+                            sealedKind,
+                            senderPubkey.take(12)
+                        )
+                        throw IllegalArgumentException("Invalid gift-wrap inner kind: $sealedKind")
+                    }
+                    
+                    when (sealedKind) {
+                        13 -> {
+                            val sealVerification = EventVerifier.verifyEvent(sealedMessage.toString())
+                            val sealVerified = sealVerification.idMatches && sealVerification.signatureValid
+                            if (!sealVerified) {
+                                timber.log.Timber.w(
+                                    "Inner seal failed NIP-01 verification (compat mode): sealId=%s idMatches=%s sigValid=%s",
+                                    sealedMessage.optString("id", ""),
+                                    sealVerification.idMatches,
+                                    sealVerification.signatureValid
+                                )
+                            }
+                            // Two-layer gift-wrap: decrypt the seal to extract the inner message
+                            val sealContent = sealedMessage.getString("content")
+                            val sealSenderPubkey = sealedMessage.getString("pubkey")
+                            timber.log.Timber.d(
+                                "Two-layer gift-wrap trace: outerEventId=%s outerCandidate=%s sealPubkey=%s sealContentLen=%d",
+                                event.optString("id", ""),
+                                senderPubkey.take(12),
+                                sealSenderPubkey.take(12),
+                                sealContent.length
+                            )
+                            val innerSenderCandidates = buildList {
+                                val cleanSealSender = sealSenderPubkey.trim().lowercase()
+                                if (cleanSealSender.matches(Regex("[0-9a-f]{64}"))) add(cleanSealSender)
+                                add(senderPubkey)
+                                senderPubkeyHints
+                                    .map { it.trim().lowercase() }
+                                    .filter { it.matches(Regex("[0-9a-f]{64}")) }
+                                    .forEach { add(it) }
+                            }.distinct()
+
+                            var innerLastError: Exception? = null
+                            timber.log.Timber.d(
+                                "Inner seal decrypt candidates (%d total): sealSender=%s outerEphemeral=%s others=%s",
+                                innerSenderCandidates.size,
+                                innerSenderCandidates.getOrNull(0)?.take(12) ?: "none",
+                                innerSenderCandidates.getOrNull(1)?.take(12) ?: "none",
+                                innerSenderCandidates.drop(2).joinToString(",") { it.take(12) }
+                            )
+                            for (innerSender in innerSenderCandidates) {
+                                try {
+                                    timber.log.Timber.d(
+                                        "Attempting inner seal decrypt: eventId=%s sealContentLen=%d candidate=%s",
+                                        event.optString("id", ""),
+                                        sealContent.length,
+                                        innerSender.take(12)
+                                    )
+                                    val innerJson = decryptFn(sealContent, innerSender)
+                                    val innerObj = parseJsonObjectOrThrow(
+                                        innerJson,
+                                        "Inner decrypt returned non-JSON payload"
+                                    )
+                                    timber.log.Timber.d(
+                                        "Successfully decrypted inner seal with candidate=%s innerKind=%d innerPubkey=%s",
+                                        innerSender.take(12),
+                                        innerObj.optInt("kind", -1),
+                                        innerObj.optString("pubkey", "").take(12)
+                                    )
+                                    innerObj.put("__resolved_sender_pubkey", innerSender.lowercase())
+                                    return innerObj
+                                } catch (ie: Exception) {
+                                    innerLastError = ie
+                                    timber.log.Timber.d(
+                                        "Inner seal decrypt failed for candidate=%s error=%s",
+                                        innerSender.take(12),
+                                        ie.message?.take(80) ?: ie::class.java.simpleName
+                                    )
+                                }
+                            }
+                            timber.log.Timber.e(
+                                "AUDIT: All %d inner seal decrypt candidates failed. outerCandidate=%s sealSender=%s (might be true sender). Are we using wrong decryption direction?",
+                                innerSenderCandidates.size,
+                                senderPubkey.take(12),
+                                sealSenderPubkey.take(12)
+                            )
+                            throw innerLastError ?: IllegalArgumentException("All inner seal decrypt candidates failed")
+                        }
+                        14, 15 -> {
+                            // Single-layer gift wrap: the outer decrypted payload already contains the inner message
+                            sealedMessage.put("__resolved_sender_pubkey", senderPubkey.lowercase())
+                            return sealedMessage
+                        }
+                        else -> throw IllegalArgumentException("Unexpected sealed message kind: $sealedKind")
+                    }
+                } catch (e: Exception) {
+                    lastError = e
+                    candidateErrors.add("${senderPubkey.take(12)}:${e.message ?: e::class.java.simpleName}")
+                    val isInvalidKind = e.message?.contains("Invalid gift-wrap inner kind") == true
+                    if (isInvalidKind) {
+                        timber.log.Timber.w(
+                            "AUDIT: Candidate decrypted successfully but produced invalid kind. This is a false positive. candidate=%s",
+                            senderPubkey.take(12)
+                        )
+                    } else {
+                        timber.log.Timber.d("Decrypt attempt failed for candidate senderPubkey=%s", senderPubkey.take(12))
+                    }
                 }
-                14, 15 -> {
-                    // Single-layer gift wrap: the outer decrypted payload already contains the inner message
-                    return sealedMessage
-                }
-                    else -> throw IllegalArgumentException("Unexpected sealed message kind: $sealedKind")
             }
+            if (candidateErrors.isNotEmpty()) {
+                timber.log.Timber.d(
+                    "Gift-wrap decrypt failures: eventId=%s details=%s",
+                    event.optString("id", ""),
+                    candidateErrors.joinToString(" | ")
+                )
+            }
+            throw lastError ?: IllegalStateException("No valid sender key candidate for decrypt")
         } catch (e: Exception) {
-                // Log truncated encrypted content for diagnosis (avoid logging full keys)
-                try { timber.log.Timber.e(e, "Failed to decrypt gift-wrapped message: outerContentSnippet=%s", event.optString("content").take(64)) } catch (_: Exception) {}
+            // External signer may legitimately return plain text like "Could not decrypt the message".
+            // Treat this as an expected decrypt miss instead of hard error noise.
+            val msg = e.message.orEmpty()
+            val expectedMiss = msg.contains("Could not decrypt", ignoreCase = true) ||
+                msg.contains("non-JSON payload", ignoreCase = true)
+            try {
+                if (expectedMiss) {
+                    timber.log.Timber.d(
+                        "Gift-wrap decrypt miss: %s outerContentSnippet=%s",
+                        msg,
+                        event.optString("content").take(64)
+                    )
+                } else {
+                    timber.log.Timber.e(
+                        e,
+                        "Failed to decrypt gift-wrapped message: outerContentSnippet=%s",
+                        event.optString("content").take(64)
+                    )
+                }
+            } catch (_: Exception) {}
             return null
         }
+    }
+
+    private fun parseJsonObjectOrThrow(value: String, context: String): JSONObject {
+        val trimmed = value.trim()
+        if (!trimmed.startsWith("{")) {
+            throw IllegalArgumentException("$context: ${trimmed.take(80)}")
+        }
+        return JSONObject(trimmed)
     }
 
     /**
@@ -300,99 +491,181 @@ object MessageRepository {
         kind: Int,
         tags: List<List<String>>
     ): JSONObject {
-        // Choose a semi-random created_at within the last 2 days for inner event determinism
+        require(recipientPubkey.matches(Regex("[0-9a-fA-F]{64}"))) { "Invalid recipient pubkey" }
+        require(senderPrivateKey.size == 32) { "Sender private key must be 32 bytes" }
+
+        val senderPubkey = derivePublicKey(senderPrivateKey)
         val twoDaysInSeconds = 2 * 24 * 60 * 60
-        val createdAt = generateRandomTimestamp(twoDaysInSeconds)
+        val rumorCreatedAt = generateRandomTimestamp(twoDaysInSeconds)
 
-        // Build inner message and populate pubkey/id deterministically when possible
-        val messageEvent = createMessageEvent(kind, content, tags, createdAt)
-        var senderX25519PubHex: String? = null
-        try {
-            val xPrivParam = X25519PrivateKeyParameters(senderPrivateKey, 0)
-            val xPubParam = xPrivParam.generatePublicKey()
-            val xPub = ByteArray(32)
-            xPubParam.encode(xPub, 0)
-            senderX25519PubHex = bytesToHex(xPub)
-            messageEvent.put("pubkey", senderX25519PubHex)
-            try {
-                val computedId = computeEventIdCanonical(senderX25519PubHex, createdAt, kind, tags, content)
-                messageEvent.put("id", computedId)
-            } catch (_: Exception) { /* best-effort */ }
-        } catch (e: Exception) {
-            if (!messageEvent.has("id")) messageEvent.put("id", "")
+        // Rumor (unsigned kind 14/15 event content)
+        val rumor = createMessageEvent(kind, content, tags, rumorCreatedAt).apply {
+            put("pubkey", senderPubkey)
+            put("id", computeEventIdCanonical(senderPubkey, rumorCreatedAt, kind, tags, content))
         }
 
-        // Encrypt inner message using NIP-44 v2
-        val encryptedContent = nip44Encrypt(messageEvent.toString(), senderPrivateKey, recipientPubkey)
+        // Seal (kind:13) signed by sender key; content is NIP-44 encrypted rumor.
+        val sealContent = nip44Encrypt(rumor.toString(), senderPrivateKey, recipientPubkey.lowercase())
+        val sealCreatedAt = generateRandomTimestamp(twoDaysInSeconds)
+        // NIP-59: seal (kind 13) MUST have empty tags.
+        val sealTags = emptyList<List<String>>()
+        val sealId = computeEventIdCanonical(senderPubkey, sealCreatedAt, 13, sealTags, sealContent)
+        val sealHash = MessageDigest.getInstance("SHA-256").digest(
+            JSONArray().apply {
+                put(0)
+                put(senderPubkey)
+                put(sealCreatedAt)
+                put(13)
+                put(JSONArray().apply { sealTags.forEach { put(JSONArray(it)) } })
+                put(sealContent)
+            }.toString().toByteArray(Charsets.UTF_8)
+        )
+        val sealSig = bytesToHex(schnorrSignBIP340(sealHash, senderPrivateKey))
+        val sealEvent = JSONObject().apply {
+            put("id", sealId)
+            put("pubkey", senderPubkey)
+            put("created_at", sealCreatedAt)
+            put("kind", 13)
+            put("tags", JSONArray())
+            put("content", sealContent)
+            put("sig", sealSig)
+        }
 
-        // Construct outer gift-wrap event but sign it with a secp256k1 ephemeral signing key.
-        // Keep the X25519 ephemeral public key only in the "x" tag.
-        // Generate an ephemeral signing keypair and an ephemeral X25519 key if not already created.
-        val signingKeypair = ECKey()
-        // Ensure we reuse the x25519 pub we derived earlier (senderX25519PubHex) in the x tag.
-        val ephemeralSigningPub = try {
-            derivePublicKey(signingKeypair.privKeyBytes)
-        } catch (e: Exception) { "" }
+        // Gift wrap (kind:1059) signed by one-time key; content is encrypted seal.
+        val ephemeralKey = ECKey()
+        val ephemeralPriv = ephemeralKey.privKeyBytes
+        val ephemeralPub = derivePublicKey(ephemeralPriv)
+        val wrapCreatedAt = generateRandomTimestamp(twoDaysInSeconds)
+        val wrapContent = nip44Encrypt(sealEvent.toString(), ephemeralPriv, recipientPubkey.lowercase())
+        val wrapTags = listOf(listOf("p", recipientPubkey.lowercase()))
+        val wrapId = computeEventIdCanonical(ephemeralPub, wrapCreatedAt, 1059, wrapTags, wrapContent)
+        val wrapHash = MessageDigest.getInstance("SHA-256").digest(
+            JSONArray().apply {
+                put(0)
+                put(ephemeralPub)
+                put(wrapCreatedAt)
+                put(1059)
+                put(JSONArray().apply { wrapTags.forEach { put(JSONArray(it)) } })
+                put(wrapContent)
+            }.toString().toByteArray(Charsets.UTF_8)
+        )
+        val wrapSig = bytesToHex(schnorrSignBIP340(wrapHash, ephemeralPriv))
 
-        // Build tags for canonicalization: keep provided tags and ensure p/x tags exist
-        val tagsList = mutableListOf<List<String>>()
-        tags.forEach { t -> tagsList.add(t) }
-    // Ensure p tag for recipient is present (no relayUrl available here)
-    tagsList.add(listOf("p", recipientPubkey, ""))
-        // Add x tag with the X25519 pub so recipient can decrypt
-        senderX25519PubHex?.let { tagsList.add(listOf("x", it)) }
-
-        // Compute contentEncrypted using the previously produced encryptedContent
-        val contentEncryptedFinal = encryptedContent
-
-        // Compute canonical id using ephemeral signing key's secp pub
-        val outerCreatedAt = createdAt
-        val outerId = computeEventIdCanonical(ephemeralSigningPub, outerCreatedAt, 1059, tagsList, contentEncryptedFinal)
-
-        val giftWrap = JSONObject().apply {
-            put("id", outerId)
-            put("pubkey", ephemeralSigningPub)
-            put("created_at", outerCreatedAt)
+        return JSONObject().apply {
+            put("id", wrapId)
+            put("pubkey", ephemeralPub)
+            put("created_at", wrapCreatedAt)
             put("kind", 1059)
-            put("tags", JSONArray().apply {
-                // reserialize tagsList into JSONArray
-                tagsList.forEach { tag -> put(JSONArray(tag)) }
-            })
-            put("content", contentEncryptedFinal)
+            put("tags", JSONArray().apply { wrapTags.forEach { put(JSONArray(it)) } })
+            put("content", wrapContent)
+            put("sig", wrapSig)
+        }
+    }
+
+    /**
+     * Prepare a NIP-59 gift wrap when sender key material lives in an external signer.
+     * Seal encryption (rumor -> seal content) is delegated to the external signer.
+     * Gift-wrap encryption (seal -> outer content) uses a local ephemeral key.
+     */
+    @RequiresApi(Build.VERSION_CODES.O)
+    suspend fun prepareGiftWrappedMessageExternal(
+        senderSigningPubkey: String,
+        recipientPubkey: String,
+        content: String,
+        kind: Int,
+        tags: List<List<String>>,
+        externalEncryptor: suspend (plaintext: String, recipientPubkey: String) -> String
+    ): JSONObject {
+        require(recipientPubkey.matches(Regex("[0-9a-fA-F]{64}"))) { "Invalid recipient pubkey" }
+        require(senderSigningPubkey.matches(Regex("[0-9a-fA-F]{64}"))) { "Invalid sender pubkey" }
+
+        val twoDaysInSeconds = 2 * 24 * 60 * 60
+        val rumorCreatedAt = generateRandomTimestamp(twoDaysInSeconds)
+        val senderPubkey = senderSigningPubkey.lowercase()
+        val recipient = recipientPubkey.lowercase()
+
+        val rumor = createMessageEvent(kind, content, tags, rumorCreatedAt).apply {
+            put("pubkey", senderPubkey)
+            put("id", computeEventIdCanonical(senderPubkey, rumorCreatedAt, kind, tags, content))
         }
 
-        try {
-            val hash = MessageDigest.getInstance("SHA-256").digest(
-                JSONArray().apply {
-                    put(0)
-                    put(ephemeralSigningPub)
-                    put(outerCreatedAt)
-                    put(1059)
-                    // Build JSONArray of tags for serialization
-                    val tagsArray = JSONArray().apply {
-                        tagsList.forEach { t -> put(JSONArray(t)) }
-                    }
-                    put(tagsArray)
-                    put(contentEncryptedFinal)
-                }.toString().toByteArray(Charsets.UTF_8)
-            )
-            val sigBytes = schnorrSignBIP340(hash, signingKeypair.privKeyBytes)
-            giftWrap.put("sig", bytesToHex(sigBytes))
-        } catch (_: Exception) { }
+        val sealContent = externalEncryptor(rumor.toString(), recipient)
+        val sealCreatedAt = generateRandomTimestamp(twoDaysInSeconds)
+        // NIP-59: seal (kind 13) MUST have empty tags.
+        val sealTags = emptyList<List<String>>()
+        val sealEvent = NostrEventSigner.signEvent(
+            kind = 13,
+            content = sealContent,
+            tags = sealTags,
+            pubkey = senderPubkey,
+            privKey = null,
+            createdAt = sealCreatedAt
+        )
 
-        return giftWrap
+        val ephemeralKey = ECKey()
+        val ephemeralPriv = ephemeralKey.privKeyBytes
+        val ephemeralPub = derivePublicKey(ephemeralPriv)
+        val wrapCreatedAt = generateRandomTimestamp(twoDaysInSeconds)
+        val wrapContent = nip44Encrypt(sealEvent.toString(), ephemeralPriv, recipient)
+        val wrapTags = listOf(listOf("p", recipient))
+        val wrapId = computeEventIdCanonical(ephemeralPub, wrapCreatedAt, 1059, wrapTags, wrapContent)
+        val wrapHash = MessageDigest.getInstance("SHA-256").digest(
+            JSONArray().apply {
+                put(0)
+                put(ephemeralPub)
+                put(wrapCreatedAt)
+                put(1059)
+                put(JSONArray().apply { wrapTags.forEach { put(JSONArray(it)) } })
+                put(wrapContent)
+            }.toString().toByteArray(Charsets.UTF_8)
+        )
+        val wrapSig = bytesToHex(schnorrSignBIP340(wrapHash, ephemeralPriv))
+
+        return JSONObject().apply {
+            put("id", wrapId)
+            put("pubkey", ephemeralPub)
+            put("created_at", wrapCreatedAt)
+            put("kind", 1059)
+            put("tags", JSONArray().apply { wrapTags.forEach { put(JSONArray(it)) } })
+            put("content", wrapContent)
+            put("sig", wrapSig)
+        }
     }
 
     private fun deriveMessageKeys(conversationKey: ByteArray, nonce: ByteArray): Triple<ByteArray, ByteArray, ByteArray> {
-        val hkdf = HKDFBytesGenerator(SHA256Digest())
-        hkdf.init(HKDFParameters(conversationKey, null, nonce))
-        val keys = ByteArray(76)
-        hkdf.generateBytes(keys, 0, keys.size)
+        require(conversationKey.size == 32) { "Invalid conversation key length" }
+        require(nonce.size == NONCE_SIZE) { "Invalid nonce length" }
+        // NIP-44 v2 uses HKDF-expand with info=nonce over the 32-byte conversation key.
+        val keys = hkdfExpandSha256(conversationKey, nonce, 76)
         return Triple(
             keys.copyOfRange(0, 32),    // ChaCha key
-            keys.copyOfRange(32, 44),   // ChaCha nonce
+            keys.copyOfRange(32, 32 + CHACHA_NONCE_SIZE),   // ChaCha nonce
             keys.copyOfRange(44, 76)    // HMAC key
         )
+    }
+
+    private fun hkdfExpandSha256(prk: ByteArray, info: ByteArray, outputLen: Int): ByteArray {
+        val hLen = 32
+        val n = (outputLen + hLen - 1) / hLen
+        require(n <= 255) { "HKDF output too large" }
+
+        val out = ByteArray(outputLen)
+        var previous = ByteArray(0)
+        var offset = 0
+        for (i in 1..n) {
+            val hmac = HMac(SHA256Digest())
+            hmac.init(KeyParameter(prk))
+            if (previous.isNotEmpty()) hmac.update(previous, 0, previous.size)
+            hmac.update(info, 0, info.size)
+            hmac.update(i.toByte())
+            val block = ByteArray(hLen)
+            hmac.doFinal(block, 0)
+            val toCopy = minOf(hLen, outputLen - offset)
+            System.arraycopy(block, 0, out, offset, toCopy)
+            offset += toCopy
+            previous = block
+        }
+        return out
     }
 
 
@@ -478,123 +751,6 @@ object MessageRepository {
         }
     }
 
-    @RequiresApi(Build.VERSION_CODES.O)
-    private fun createNIP59Seal(
-        encryptedContent: String,
-        senderPrivateKey: ByteArray,
-        senderPubkey: String? = null
-    ): JSONObject {
-        // Generate random created_at within last 2 days
-        val twoDaysInSeconds = 2 * 24 * 60 * 60
-        val randomCreatedAt = generateRandomTimestamp(twoDaysInSeconds)
-
-        // Build tags list (empty for seal)
-        val tagsList: List<List<String>> = emptyList()
-
-        // Compute canonical event id using NIP-01 canonicalization
-        val id = computeEventIdCanonical(senderPubkey ?: "", randomCreatedAt, 13, tagsList, encryptedContent)
-
-        val sealEvent = JSONObject().apply {
-            put("id", id)
-            put("pubkey", senderPubkey ?: "")
-            put("created_at", randomCreatedAt)
-            put("kind", 13)
-            put("tags", JSONArray())
-            put("content", encryptedContent)
-        }
-
-        // Sign canonical hash
-        try {
-            val hash = MessageDigest.getInstance("SHA-256").digest(
-                JSONArray().apply {
-                    put(0)
-                    put(senderPubkey ?: "")
-                    put(randomCreatedAt)
-                    put(13)
-                    put(JSONArray())
-                    put(encryptedContent)
-                }.toString().toByteArray(Charsets.UTF_8)
-            )
-            val sigBytes = schnorrSignBIP340(hash, senderPrivateKey)
-            sealEvent.put("sig", bytesToHex(sigBytes))
-        } catch (_: Exception) { }
-
-        return sealEvent
-    }
-
-    @RequiresApi(Build.VERSION_CODES.O)
-    private fun createNIP59GiftWrap(
-        sealEvent: JSONObject,
-        recipientPubkey: String,
-        relayUrl: String? = null
-    ): JSONObject {
-        // Generate a random one-time-use signing keypair (secp256k1) for signing the gift wrap
-        val signingKeypair = ECKey()
-        // Generate a random one-time-use X25519 keypair for encrypting the seal
-        val x25519Priv = generateRandomBytes(32)
-        val x25519PrivParam = X25519PrivateKeyParameters(x25519Priv)
-        val x25519PubParam = x25519PrivParam.generatePublicKey()
-        val x25519Pub = ByteArray(32)
-        x25519PubParam.encode(x25519Pub, 0)
-
-        val twoDaysInSeconds = 2 * 24 * 60 * 60
-        val now = System.currentTimeMillis() / 1000
-        val randomCreatedAt = now - SecureRandom().nextInt(twoDaysInSeconds)
-
-        // Derive the secp256k1 x-only pubkey for the signing keypair so the signature
-        // on the gift-wrap can be verified correctly by relays/clients.
-        val signingPubHex = try {
-            derivePublicKey(signingKeypair.privKeyBytes)
-        } catch (e: Exception) {
-            // Fallback: if derivation fails, leave pubkey empty (signature may still be added best-effort)
-            ""
-        }
-
-        // Build tags as List<List<String>> for canonical id computation
-        val tagsList = mutableListOf<List<String>>()
-        tagsList.add(listOf("p", recipientPubkey, relayUrl ?: ""))
-        tagsList.add(listOf("x", bytesToHex(x25519Pub)))
-
-        val contentEncrypted = nip44Encrypt(sealEvent.toString(), x25519Priv, recipientPubkey)
-
-        // Compute canonical id using signing key's secp256k1 x-only pubkey
-        val id = computeEventIdCanonical(signingPubHex, randomCreatedAt, 1059, tagsList, contentEncrypted)
-
-        val giftWrap = JSONObject().apply {
-            put("id", id)
-            put("pubkey", signingPubHex)
-            put("created_at", randomCreatedAt)
-            put("kind", 1059)
-            put("tags", JSONArray().apply {
-                put(JSONArray().apply { put("p"); put(recipientPubkey); put(relayUrl ?: "") })
-                put(JSONArray().apply { put("x"); put(bytesToHex(x25519Pub)) })
-            })
-            put("content", contentEncrypted)
-        }
-
-        try {
-            val hash = MessageDigest.getInstance("SHA-256").digest(
-                JSONArray().apply {
-                    put(0)
-                    put(signingPubHex)
-                    put(randomCreatedAt)
-                    put(1059)
-                    // Build JSONArray of tags for serialization
-                    val tagsArray = JSONArray().apply {
-                        put(JSONArray().apply { put("p"); put(recipientPubkey); put(relayUrl ?: "") })
-                        put(JSONArray().apply { put("x"); put(bytesToHex(x25519Pub)) })
-                    }
-                    put(tagsArray)
-                    put(contentEncrypted)
-                }.toString().toByteArray(Charsets.UTF_8)
-            )
-            val sigBytes = schnorrSignBIP340(hash, signingKeypair.privKeyBytes)
-            giftWrap.put("sig", bytesToHex(sigBytes))
-        } catch (_: Exception) { }
-
-        return giftWrap
-    }
-
     // Validate a secp256k1 public key
     private fun validatePubkey(pubkey: String): Boolean {
         return when {
@@ -602,65 +758,6 @@ object MessageRepository {
             pubkey.length == 130 && pubkey.startsWith("04") -> true // uncompressed
             else -> false
         }
-    }
-
-    @RequiresApi(Build.VERSION_CODES.O)
-    fun prepareEncryptedMessage(
-        senderPrivateKey: ByteArray,
-        recipientPubkey: String,
-        content: String,
-        subject: String? = null,
-        replyTo: String? = null,
-        relayUrl: String? = null
-    ): List<JSONObject> {
-        // Derive sender's public key
-        val senderPubkey = derivePublicKey(senderPrivateKey)
-        
-        // Format the recipient pubkey with "02" prefix for secp256k1 format if needed
-        val formattedRecipientPubkey = formatPubkey(recipientPubkey)
-        
-        // Create the basic message event (unsigned)
-        val messageEvent = createMessageEvent(
-            senderPubkey = senderPubkey,
-            recipientPubkeys = listOf(formattedRecipientPubkey),
-            content = content,
-            subject = subject,
-            replyTo = replyTo,
-            relayUrls = relayUrl?.let { mapOf(formattedRecipientPubkey to it) }
-        )
-
-        // Encrypt the message using NIP-44 v2
-        val encryptedContent = nip44Encrypt(
-            messageEvent.toString(),
-            senderPrivateKey,
-            recipientPubkey
-        )
-
-        // Create the signed seal
-        val sealEvent = createNIP59Seal(
-            encryptedContent,
-            senderPrivateKey,
-            senderPubkey
-        )
-
-        // Create gift wraps for both sender and recipient
-        val giftWraps = mutableListOf<JSONObject>()
-        
-        // Gift wrap for recipient
-        giftWraps.add(createNIP59GiftWrap(
-            sealEvent,
-            formattedRecipientPubkey,
-            relayUrl
-        ))
-        
-        // Gift wrap for sender (so they can decrypt their own messages)
-        giftWraps.add(createNIP59GiftWrap(
-            sealEvent,
-            senderPubkey,
-            relayUrl
-        ))
-
-        return giftWraps
     }
 
 
@@ -742,20 +839,6 @@ object MessageRepository {
     return xOnly.joinToString("") { "%02x".format(it) }
     }
 
-    // Helper function to format public key correctly for secp256k1
-    private fun formatPubkey(pubkey: String): String {
-        // First strip any prefix if present
-        val strippedKey = when {
-            pubkey.startsWith("02") || pubkey.startsWith("03") -> pubkey.substring(2)
-            pubkey.startsWith("04") -> pubkey.substring(2, 66)
-            pubkey.length == 64 -> pubkey
-            else -> throw IllegalArgumentException("Invalid public key length")
-        }
-        
-        // Then add the compressed format prefix
-        return "02$strippedKey"
-    }
-
     /**
      * Encrypt a file using AES-GCM
      * Returns the encrypted file bytes and encryption parameters
@@ -801,7 +884,15 @@ object MessageRepository {
             
             when (obj.optInt("kind")) {
                 14 -> parseTextMessage(obj)
-                15 -> parseFileMessage(obj)
+                15 -> {
+                    parseFileMessage(obj) ?: run {
+                        android.util.Log.w(
+                            "MessageRepository",
+                            "Kind 15 missing required file tags; falling back to text parse id=${obj.optString("id")}"
+                        )
+                        parseTextMessage(obj)
+                    }
+                }
                 else -> null
             }
         } catch (e: Exception) {
@@ -813,9 +904,15 @@ object MessageRepository {
     private fun parseTextMessage(obj: JSONObject): Message.TextMessage? {
         // Extract common fields
         val (recipientPubkeys, relayUrls, subject, replyTo) = extractCommonFields(obj)
+        val stableId = obj.optString("id").ifBlank {
+            val source = "${obj.optString("pubkey")}:${obj.optLong("created_at")}:${obj.optString("content")}"
+            MessageDigest.getInstance("SHA-256")
+                .digest(source.toByteArray(Charsets.UTF_8))
+                .joinToString("") { "%02x".format(it) }
+        }
         
         return Message.TextMessage(
-            id = obj.getString("id"),
+            id = stableId,
             pubkey = obj.getString("pubkey"),
             recipientPubkeys = recipientPubkeys,
             content = obj.getString("content"),
@@ -829,6 +926,12 @@ object MessageRepository {
     private fun parseFileMessage(obj: JSONObject): Message.FileMessage? {
         // Extract common fields
         val (recipientPubkeys, relayUrls, subject, replyTo) = extractCommonFields(obj)
+        val stableId = obj.optString("id").ifBlank {
+            val source = "${obj.optString("pubkey")}:${obj.optLong("created_at")}:${obj.optString("content")}"
+            MessageDigest.getInstance("SHA-256")
+                .digest(source.toByteArray(Charsets.UTF_8))
+                .joinToString("") { "%02x".format(it) }
+        }
 
         // Extract file-specific tags
         var mimeType: String? = null
@@ -872,11 +975,15 @@ object MessageRepository {
         // Validate required fields
         if (mimeType == null || encryptionAlgorithm == null || 
             decryptionKey == null || decryptionNonce == null || fileHash == null) {
+            android.util.Log.w(
+                "MessageRepository",
+                "Kind 15 parse missing tags id=${obj.optString("id")} mime=$mimeType alg=$encryptionAlgorithm key=${decryptionKey != null} nonce=${decryptionNonce != null} x=${fileHash != null}"
+            )
             return null
         }
 
         return Message.FileMessage(
-            id = obj.getString("id"),
+            id = stableId,
             pubkey = obj.getString("pubkey"),
             recipientPubkeys = recipientPubkeys,
             fileUrl = obj.getString("content"),
