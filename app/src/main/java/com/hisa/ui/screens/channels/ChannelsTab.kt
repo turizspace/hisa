@@ -36,6 +36,8 @@ import com.hisa.data.nostr.SubscriptionManager
 import com.hisa.ui.components.ChannelChip
 import com.hisa.ui.components.TabLoadingPlaceholder
 import com.hisa.ui.components.rememberTabLoadingVisibility
+import com.hisa.ui.components.ChannelsSkeletonLoader
+import com.hisa.ui.components.EmptyChannelsState
 import com.hisa.ui.navigation.Routes
 import com.hisa.viewmodel.ChannelsViewModel
 import com.hisa.viewmodel.ChannelsViewModelFactory
@@ -136,28 +138,36 @@ fun ChannelsTab(
             }
         }
 
+        // First filter by search query if present, then apply selectedCategory
+        val afterSearch = if (searchText.isNullOrEmpty()) {
+            channels
+        } else {
+            channels.filter { ch ->
+                ch.name.contains(searchText, ignoreCase = true) ||
+                ch.about.contains(searchText, ignoreCase = true) ||
+                ch.categories.any { it.contains(searchText, ignoreCase = true) }
+            }
+        }
+
+        val filteredChannels = if (selectedCategory != null && searchText.isEmpty()) {
+            afterSearch.filter { it.categories.contains(selectedCategory) }
+        } else {
+            afterSearch
+        }
+
         if (isLoading) {
-            TabLoadingPlaceholder(
-                title = "Loading Channels",
-                subtitle = "Syncing rooms and participant activity"
+            ChannelsSkeletonLoader(
+                modifier = Modifier.fillMaxSize(),
+                itemCount = 8
+            )
+        } else if (filteredChannels.isEmpty()) {
+            EmptyChannelsState(
+                modifier = Modifier.fillMaxSize(),
+                onCreateChannel = {
+                    navController.navigate(Routes.CREATE_CHANNEL)
+                }
             )
         } else {
-            // First filter by search query if present, then apply selectedCategory
-            val afterSearch = if (searchText.isNullOrEmpty()) {
-                channels
-            } else {
-                channels.filter { ch ->
-                    ch.name.contains(searchText, ignoreCase = true) ||
-                    ch.about.contains(searchText, ignoreCase = true) ||
-                    ch.categories.any { it.contains(searchText, ignoreCase = true) }
-                }
-            }
-
-            val filteredChannels = if (selectedCategory != null && searchText.isEmpty()) {
-                afterSearch.filter { it.categories.contains(selectedCategory) }
-            } else {
-                afterSearch
-            }
 
             // Re-sort the filtered channels by participant count (popularity) desc, then by name
             val sortedChannelsByPopularity = remember(filteredChannels, participantCounts) {

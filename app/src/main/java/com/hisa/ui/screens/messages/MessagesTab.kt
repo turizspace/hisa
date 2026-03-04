@@ -44,6 +44,8 @@ import com.hisa.viewmodel.MessagesViewModel
 import com.hisa.ui.navigation.Routes
 import com.hisa.data.model.Message
 import com.hisa.ui.util.LocalProfileMetaUtil
+import com.hisa.ui.components.MessagesSkeletonLoader
+import com.hisa.ui.components.EmptyMessagesState
 
 @RequiresApi(Build.VERSION_CODES.O)
 @Composable
@@ -69,9 +71,17 @@ fun MessagesTab(
     val conversations = remember(allMessages) { messagesViewModel.getConversations() }
 
     if (isLoading) {
-        TabLoadingPlaceholder(
-            title = "Loading Messages",
-            subtitle = "Decrypting and syncing your conversations"
+        MessagesSkeletonLoader(
+            modifier = Modifier.fillMaxSize(),
+            itemCount = 6
+        )
+        return
+    }
+
+    if (conversations.isEmpty()) {
+        EmptyMessagesState(
+            modifier = Modifier.fillMaxSize(),
+            onStartConversation = null
         )
         return
     }

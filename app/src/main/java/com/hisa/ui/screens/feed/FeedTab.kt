@@ -33,6 +33,9 @@ import com.hisa.ui.components.CategoryChipRow
 import com.hisa.ui.components.SectionedFeed
 import com.hisa.ui.components.TabLoadingPlaceholder
 import com.hisa.ui.components.rememberTabLoadingVisibility
+import com.hisa.ui.components.FeedSkeletonLoader
+import com.hisa.ui.components.EmptyFeedState
+import com.hisa.ui.components.SearchEmptyState
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Text
 import androidx.compose.runtime.LaunchedEffect
@@ -96,12 +99,11 @@ fun FeedTab(
             )
         }
 
-        // When loading, show skeletons
+        // When loading, show skeleton loaders
         if (showLoading) {
-            TabLoadingPlaceholder(
-                title = "Loading Feed",
-                subtitle = "Finding the latest listings for you",
-                modifier = Modifier.fillMaxWidth()
+            FeedSkeletonLoader(
+                modifier = Modifier.fillMaxSize(),
+                itemCount = 5
             )
             return@Column
         }
@@ -213,6 +215,21 @@ fun FeedTab(
                 modifier = Modifier.fillMaxWidth(),
                 userPubkey = userPubkey
             )
+        } else if (filteredServices.isEmpty()) {
+            // Show empty state when no services match filter/search
+            if (searchText.isNotEmpty()) {
+                SearchEmptyState(
+                    searchQuery = searchText,
+                    modifier = Modifier.fillMaxSize()
+                )
+            } else {
+                EmptyFeedState(
+                    modifier = Modifier.fillMaxSize(),
+                    onRefresh = {
+                        feedViewModel.subscribeToFeed()
+                    }
+                )
+            }
         } else {
             // Fall back to a two-column grid for search results or empty-category views
             LazyVerticalGrid(
