@@ -6,6 +6,7 @@ import android.net.Uri
 import android.os.Build
 import androidx.annotation.RequiresApi
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -40,6 +41,7 @@ import androidx.compose.material.icons.filled.PersonOutline
 import androidx.compose.material.icons.filled.SupportAgent
 import androidx.compose.material.icons.filled.WaterDrop
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
@@ -67,8 +69,11 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.shadow
 import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.unit.dp
@@ -99,6 +104,9 @@ fun MainScreen(
     showWelcomeDialog: Boolean = false,
     onDialogDismissed: (() -> Unit)? = null
 ) {
+    // Initialize ViewModels first
+    val feedViewModel: FeedViewModel = hiltViewModel()
+    
     // Try to restore previously selected tab from NavController's SavedStateHandle so navigating
     // away and back (for example opening a channel chat) returns to the same tab.
     val currentEntry = navController.currentBackStackEntry
@@ -109,6 +117,13 @@ fun MainScreen(
     // Keep the saved state handle in sync whenever the selected tab changes
     LaunchedEffect(selectedTab) {
         savedStateHandle?.set("selectedTab", selectedTab)
+    }
+    
+    // Subscribe to feed on initial load if Feed tab is selected
+    LaunchedEffect(Unit) {
+        if (selectedTab == 0) {
+            feedViewModel.subscribeToFeed()
+        }
     }
     var searchQuery by remember { mutableStateOf("") }
     var showDialog by remember { mutableStateOf(showWelcomeDialog) }
@@ -123,7 +138,6 @@ fun MainScreen(
     )
     val drawerState = rememberDrawerState(DrawerValue.Closed)
     val scope = rememberCoroutineScope()
-    val feedViewModel: FeedViewModel = hiltViewModel()
     var feedAtTop by remember { mutableStateOf(true) }
 
     if (showDialog) {
@@ -316,158 +330,129 @@ fun MainScreen(
                 // FAB removed - Create is now a bottom tab
             },
             bottomBar = {
-                // Bottom navigation with stacked icon + label
-                BottomAppBar(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(72.dp),
-                    containerColor = MaterialTheme.colorScheme.surface,
-                    contentColor = MaterialTheme.colorScheme.onSurface,
-                    tonalElevation = 8.dp
-                ) {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(72.dp),
-                        horizontalArrangement = Arrangement.SpaceEvenly,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        tabs.forEachIndexed { index, title ->
-                            val isSelected = selectedTab == index
-
-                            Column(
-                                modifier = Modifier
-                                    .weight(1f)
-                                    .fillMaxHeight()
-                                    .padding(vertical = 8.dp)
-                                    .clickable {
-                                            when (index) {
-                                                0 -> {
-                                                    selectedTab = 0
-                                                    feedViewModel.subscribeToFeed()
-                                                }
-                                                1 -> {
-                                                    selectedTab = 1
-                                                }
-                                                2 -> {
-                                                    // Create - switch to Feed so returning lands on Feed, then navigate
-                                                    selectedTab = 0
-                                                    navController.navigate(Routes.CREATE_SERVICE)
-                                                }
-                                                3 -> {
-                                                    selectedTab = 3
-                                                    // Channels tab handled when selected (subscribe/restore)
-                                                }
-                                                4 -> {
-                                                    selectedTab = 4
-                                                    // MyShop tab - will show Shop inline
-                                                }
-                                            }
-                                    },
-                                horizontalAlignment = Alignment.CenterHorizontally,
-                                verticalArrangement = Arrangement.Center
-                            ) {
-                                val iconModifier = if (index == 2) {
-                                    Modifier
-                                        .size(48.dp)
-                                        .clip(CircleShape)
-                                        .background(if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant)
-                                        .padding(8.dp)
-                                } else {
-                                    Modifier.size(24.dp)
-                                }
-
-                                Icon(
-                                    imageVector = tabIcons[index],
-                                    contentDescription = title,
-                                    tint = if (isSelected)
-                                        MaterialTheme.colorScheme.onPrimary
-                                    else
-                                        MaterialTheme.colorScheme.onSurfaceVariant,
-                                    modifier = iconModifier
-                                )
-
-                                Spacer(modifier = Modifier.height(2.dp))
-
-                                Text(
-                                    text = title,
-                                    style = MaterialTheme.typography.labelSmall.copy(
-                                        fontSize = MaterialTheme.typography.labelSmall.fontSize * 0.8f
-                                    ),
-                                    color = if (isSelected)
-                                        MaterialTheme.colorScheme.primary
-                                    else
-                                        MaterialTheme.colorScheme.onSurfaceVariant,
-                                    maxLines = 1
-                                )
-                            }
-                        }
-
-                    }
-                }
+                // Empty - floating nav handled as overlay
             }
         ) { innerPadding ->
             val focusManager = LocalFocusManager.current
-            Column(modifier = Modifier
-                .padding(innerPadding)
-                .pointerInput(Unit) {
-                    detectTapGestures(onTap = { focusManager.clearFocus() })
-                }
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(innerPadding)
             ) {
-                // TabRow moved to bottom as BottomAppBar with icons
-                
-                // Also handle programmatic tab changes
-                LaunchedEffect(selectedTab) {
+                // Main content column – NO bottom padding so content can scroll under the nav menu
+                Column(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .pointerInput(Unit) {
+                            detectTapGestures(onTap = { focusManager.clearFocus() })
+                        }
+                ) {
+                    // Tab content – each tab MUST add its own bottom content padding
+                    // (e.g., 80.dp) to prevent the last items from being hidden
+                    // behind the floating navigation menu.
                     when (selectedTab) {
-                        0 -> feedViewModel.subscribeToFeed()
-                        1 -> {
-                            // Messages tab lazy-load handled inside MessagesTab
-                        }
-                        2 -> {
-                            // Create tab handled via navigation
-                        }
-                        3 -> {
-                            // When switching to Channels tab, restore any saved channel-specific search
-                            val restoredChannelsSearch = navController.currentBackStackEntry?.savedStateHandle?.get<String>("channels_searchQuery")
-                            if (!restoredChannelsSearch.isNullOrEmpty()) {
-                                searchQuery = restoredChannelsSearch
-                            }
-                        }
-                        4 -> {
-                            // MyShop tab selected (no-op)
-                        }
+                        0 -> FeedTab(
+                            navController = navController,
+                            userPubkey = userPubkey,
+                            searchQuery = searchQuery,
+                            feedViewModel = feedViewModel,
+                            onAtTopChange = { atTop -> feedAtTop = atTop }
+                        )
+                        1 -> MessagesTab(
+                            navController = navController,
+                            userPubkey = userPubkey,
+                            privateKey = privateKey,
+                            messagesViewModel = messagesViewModel
+                        )
+                        2 -> { /* Create tab – navigation handled on click */ }
+                        3 -> ChannelsTab(
+                            navController = navController,
+                            userPubkey = userPubkey,
+                            nostrClient = nostrClient,
+                            subscriptionManager = subscriptionManager,
+                            privateKey = privateKey.encodeToByteArray(),
+                            searchQuery = searchQuery
+                        )
+                        4 -> com.hisa.ui.screens.shop.ShopScreen(
+                            navController = navController,
+                            userPubkey = userPubkey
+                        )
                     }
                 }
 
-                when (selectedTab) {
-                    0 -> FeedTab(
-                        navController = navController,
-                        userPubkey = userPubkey,
-                        searchQuery = searchQuery,
-                        feedViewModel = feedViewModel,
-                        onAtTopChange = { atTop -> feedAtTop = atTop }
-                    )
-                    1 -> MessagesTab(
-                        navController = navController,
-                        userPubkey = userPubkey,
-                        privateKey = privateKey,
-                        messagesViewModel = messagesViewModel
-                    )
-                    2 -> {
-                        // Create tab: navigation already performed on click; keep placeholder
-                    }
-                    3 -> ChannelsTab(
-                        navController = navController,
-                        userPubkey = userPubkey,
-                        nostrClient = nostrClient,
-                        subscriptionManager = subscriptionManager,
-                        privateKey = privateKey.encodeToByteArray(),
-                        // Pass the live searchQuery from the top bar so ChannelsTab updates immediately
-                        searchQuery = searchQuery
-                    )
-                    4 -> {
-                        // MyShop tab: show inline ShopScreen (quick access)
-                        com.hisa.ui.screens.shop.ShopScreen(navController = navController, userPubkey = userPubkey)
+                // Floating Navigation Menu – modern luxury design
+                Row(
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .padding(start = 16.dp, end = 16.dp, bottom = 16.dp)
+                        .fillMaxWidth()
+                        .height(36.dp)
+                        .clip(androidx.compose.foundation.shape.RoundedCornerShape(24.dp))
+                        .background(
+                            color = MaterialTheme.colorScheme.surface.copy(alpha = 0.85f),
+                            shape = androidx.compose.foundation.shape.RoundedCornerShape(24.dp)
+                        )
+                        .shadow(
+                            elevation = 12.dp,
+                            shape = androidx.compose.foundation.shape.RoundedCornerShape(24.dp),
+                            clip = false
+                        )
+                        .padding(horizontal = 4.dp),
+                    horizontalArrangement = Arrangement.SpaceEvenly,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    tabs.forEachIndexed { index, title ->
+                        val isSelected = selectedTab == index
+
+                        Column(
+                            modifier = Modifier
+                                .weight(1f)
+                                .fillMaxHeight()
+                                .background(Color.Transparent)
+                                .clickable {
+                                    when (index) {
+                                        0 -> {
+                                            selectedTab = 0
+                                            feedViewModel.subscribeToFeed()
+                                        }
+                                        1 -> selectedTab = 1
+                                        2 -> {
+                                            selectedTab = 0
+                                            navController.navigate(Routes.CREATE_SERVICE)
+                                        }
+                                        3 -> selectedTab = 3
+                                        4 -> selectedTab = 4
+                                    }
+                                },
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.Center
+                        ) {
+                            val iconModifier = if (index == 2) {
+                                Modifier
+                                    .size(48.dp)
+                                    .clip(CircleShape)
+                                    .background(
+                                        if (isSelected)
+                                            MaterialTheme.colorScheme.primary
+                                        else
+                                            MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
+                                    )
+                                    .padding(8.dp)
+                            } else {
+                                Modifier.size(24.dp)
+                            }
+
+                            Icon(
+                                imageVector = tabIcons[index],
+                                contentDescription = title,
+                                tint = when {
+                                    isSelected && index == 2 -> MaterialTheme.colorScheme.onPrimary
+                                    isSelected -> MaterialTheme.colorScheme.primary
+                                    else -> MaterialTheme.colorScheme.onSurfaceVariant
+                                },
+                                modifier = iconModifier
+                            )
+                        }
                     }
                 }
             }
@@ -475,3 +460,14 @@ fun MainScreen(
     }
 }
 // (Only one MainScreen composable is used by AppNavGraph; the full signature above is the canonical entrypoint.)
+
+@Preview(
+    name = "MainScreen - Light Mode",
+    showBackground = true,
+    showSystemUi = true
+)
+@Composable
+fun MainScreenPreview() {
+    // Note: Preview is for UI layout visualization only.
+    // Actual navigation and data operations require proper runtime initialization.
+}
