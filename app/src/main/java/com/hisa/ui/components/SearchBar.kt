@@ -9,6 +9,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.ui.Alignment
 
 @Composable
 fun SearchBar(
@@ -19,6 +20,8 @@ fun SearchBar(
     onSearch: (String) -> Unit = {},
     // Optional leading content to allow placing custom icons (e.g. menu) inside the search field
     leadingContent: (@Composable () -> Unit)? = null,
+    // Optional trailing content (e.g. voice search button)
+    trailingContent: (@Composable () -> Unit)? = null,
     modifier: Modifier = Modifier.fillMaxWidth().padding(8.dp)
 ) {
     var isSearchActive by remember { mutableStateOf(false) }
@@ -48,19 +51,28 @@ fun SearchBar(
             }
         },
         trailingIcon = {
-            if (value.isNotEmpty()) {
-                IconButton(
-                    onClick = { 
-                        onValueChange("")
-                        isSearchActive = false
-                        onClearSearch()
+            Row(
+                modifier = Modifier.fillMaxHeight(),
+                verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.End
+            ) {
+                if (trailingContent != null) {
+                    trailingContent()
+                }
+                if (value.isNotEmpty()) {
+                    IconButton(
+                        onClick = { 
+                            onValueChange("")
+                            isSearchActive = false
+                            onClearSearch()
+                        }
+                    ) {
+                        Icon(
+                            Icons.Default.Close, 
+                            contentDescription = "Clear search",
+                            tint = MaterialTheme.colorScheme.primary
+                        )
                     }
-                ) {
-                    Icon(
-                        Icons.Default.Close, 
-                        contentDescription = "Clear search",
-                        tint = MaterialTheme.colorScheme.primary
-                    )
                 }
             }
         },

@@ -386,10 +386,10 @@ fun MainScreen(
                         .align(Alignment.BottomCenter)
                         .padding(start = 16.dp, end = 16.dp, bottom = 16.dp)
                         .fillMaxWidth()
-                        .height(36.dp)
+                        .height(48.dp)
                         .clip(androidx.compose.foundation.shape.RoundedCornerShape(24.dp))
                         .background(
-                            color = MaterialTheme.colorScheme.surface.copy(alpha = 0.85f),
+                            color = MaterialTheme.colorScheme.surface.copy(alpha = 0.65f),
                             shape = androidx.compose.foundation.shape.RoundedCornerShape(24.dp)
                         )
                         .shadow(
