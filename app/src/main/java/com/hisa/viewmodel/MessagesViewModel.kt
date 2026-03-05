@@ -60,6 +60,7 @@ class MessagesViewModel @Inject constructor(
         _messages.value = emptyList()
         seenGiftWrapEventIds.clear()
         inboxExternalDecryptRequested.set(false)
+        inboxExternalSkipLogCounter.set(0L)
         directSubscriptionStarted = false
         directEoseReceived = false
         giftWrapProcessingCount.set(0)
@@ -102,6 +103,7 @@ class MessagesViewModel @Inject constructor(
     private var giftWrapProcessingInProgress = false
     private val giftWrapProcessingMutex = Mutex()
     private val inboxExternalDecryptRequested = AtomicBoolean(false)
+    private val inboxExternalSkipLogCounter = AtomicLong(0L)
     private val _messages = MutableStateFlow<List<Message>>(emptyList())
     val messages: StateFlow<List<Message>> = _messages
     // Buffer plain (kind 14) messages that arrive while initial loading is active
@@ -130,14 +132,13 @@ class MessagesViewModel @Inject constructor(
                 if (arr.length() > 2 && arr.getString(0) == "EVENT") {
                     val eventObj = arr.getJSONObject(2)
                     val kind = eventObj.optInt("kind")
-                    // Only process DM-related kinds
-                    if (kind == 12 || kind == 14 || kind == 1059) {
+                    // Only process DM-related kinds we can parse/decrypt in this handler.
+                    if (kind == 14 || kind == 1059) {
                         val eventJson = eventObj.toString()
                         if (dmEventCounter.incrementAndGet() % 500L == 0L) {
                             Timber.d("Received DM event (sample): %s", eventJson)
                         }
                         when (kind) {
-                            12 -> handleGiftWrap(eventObj) // NIP-59 Gift Wrap
                             14 -> { // NIP-17 Direct Message (legacy, if any)
                                 // Plain NIP-17 (kind 14) messages: buffer during initial load to avoid incremental UI
                                 if (_isLoading.value) {
@@ -275,6 +276,8 @@ class MessagesViewModel @Inject constructor(
             directEoseReceived = false
             giftWrapProcessingCount.set(0)
             giftWrapProcessingInProgress = false
+            inboxExternalDecryptRequested.set(false)
+            inboxExternalSkipLogCounter.set(0L)
             _isLoading.value = true
             directLoadTimeoutJob?.cancel()
             directLoadTimeoutJob = viewModelScope.launch(Dispatchers.IO) {
@@ -429,8 +432,17 @@ class MessagesViewModel @Inject constructor(
     val relayUrl: String = Constants.ONBOARDING_RELAYS.firstOrNull() ?: ""
     }
 
+    private sealed interface Nip17DecryptResult {
+        data class Success(val message: Message) : Nip17DecryptResult
+        object UnsupportedInnerKind : Nip17DecryptResult
+        object Failed : Nip17DecryptResult
+    }
+
     @RequiresApi(Build.VERSION_CODES.O)
-    private suspend fun decryptNip17Message(wrapEvent: JSONObject, expectedOtherPubkey: String? = null): Message? {
+    private suspend fun decryptNip17Message(
+        wrapEvent: JSONObject,
+        expectedOtherPubkey: String? = null
+    ): Nip17DecryptResult {
         return try {
             val authContext = resolveAuthContext(refreshOnce = true)
             val senderHints = buildList {
@@ -457,11 +469,11 @@ class MessagesViewModel @Inject constructor(
             } ?: run {
                 if (!com.hisa.data.nostr.ExternalSignerManager.isLauncherRegistered()) {
                     Timber.d("Skipping external decrypt: launcher not registered")
-                    return null
+                    return Nip17DecryptResult.Failed
                 }
-                val signerPkg = authContext.signerPackage ?: return null
+                val signerPkg = authContext.signerPackage ?: return Nip17DecryptResult.Failed
                 val signerPub = authContext.signerPubkey
-                    ?: return null
+                    ?: return Nip17DecryptResult.Failed
                 kotlin.runCatching {
                     com.hisa.data.nostr.ExternalSignerManager.ensureConfigured(
                         signerPub,
@@ -487,7 +499,7 @@ class MessagesViewModel @Inject constructor(
                     Timber.w(e, "External signer decrypt threw; treating as undecryptable for now")
                     null
                 }
-            } ?: return null
+            } ?: return Nip17DecryptResult.Failed
 
             val innerPTags = mutableListOf<String>()
             val innerTags = innerEvent.optJSONArray("tags") ?: JSONArray()
@@ -507,6 +519,17 @@ class MessagesViewModel @Inject constructor(
                 cleanPubkeyFormat(innerEvent.optString("__resolved_sender_pubkey", ""))
             )
 
+            val innerKind = innerEvent.optInt("kind", -1)
+            if (innerKind !in listOf(7, 14, 15)) {
+                Timber.d(
+                    "Skipping decrypted gift-wrap with unsupported inner kind: outerId=%s innerId=%s innerKind=%d",
+                    wrapEvent.optString("id", ""),
+                    innerEvent.optString("id", ""),
+                    innerKind
+                )
+                return Nip17DecryptResult.UnsupportedInnerKind
+            }
+
             // 2. Parse the decrypted message
             val parsed = messageRepository.parseMessage(innerEvent.toString()) ?: run {
                 Timber.w(
@@ -516,11 +539,12 @@ class MessagesViewModel @Inject constructor(
                     innerEvent.optInt("kind", -1),
                     cleanPubkeyFormat(innerEvent.optString("pubkey", ""))
                 )
-                return null
+                return Nip17DecryptResult.Failed
             }
 
             // 3. Normalize the message
-            normalizeMessage(
+            Nip17DecryptResult.Success(
+                normalizeMessage(
                 message = parsed,
                 outerPubkey = wrapEvent.optString("pubkey"),
                 resolvedSenderPubkey = innerEvent.optString("__resolved_sender_pubkey"),
@@ -534,10 +558,10 @@ class MessagesViewModel @Inject constructor(
                     cleanPubkeyFormat(expectedOtherPubkey ?: ""),
                     cleanedUserPubkey
                 )
-            }
+            })
         } catch (e: Exception) {
             Timber.e(e, "Failed to decrypt NIP-17 message")
-            null
+            Nip17DecryptResult.Failed
         }
     }
 
@@ -588,6 +612,16 @@ class MessagesViewModel @Inject constructor(
                 val (pub, recips) = normalizeSenderAndRecipients(message.pubkey, message.recipientPubkeys)
                 message.copy(pubkey = pub, recipientPubkeys = recips)
             }
+            is Message.ReactionMessage -> {
+                val (pub, recips) = normalizeSenderAndRecipients(message.pubkey, message.recipientPubkeys)
+                message.copy(
+                    pubkey = pub,
+                    recipientPubkeys = recips,
+                    targetEventPubkey = message.targetEventPubkey
+                        ?.let { cleanPubkeyFormat(it) }
+                        ?.takeIf { it.isNotBlank() }
+                )
+            }
             else -> message
         }
     }
@@ -628,76 +662,6 @@ class MessagesViewModel @Inject constructor(
                 }
             }
         }
-    }
-
-    /**
-     * Add placeholder for undecryptable messages
-     */
-    private suspend fun addUndecryptablePlaceholder(
-        giftWrap: JSONObject, 
-        expectedOtherPubkey: String?
-    ) {
-        try {
-            val outerPubkey = giftWrap.optString("pubkey")
-            // Prefer the expected conversation partner when available. The outer event
-            // pubkey may be an ephemeral signing key used for the gift-wrap; using that
-            // for UI/grouping causes the wrong pubkey to show when decryption fails.
-            val displayPubkey = if (!expectedOtherPubkey.isNullOrBlank()) {
-                cleanPubkeyFormat(expectedOtherPubkey)
-            } else {
-                cleanPubkeyFormat(outerPubkey)
-            }
-
-            // Skip if the placeholder would point to ourselves
-            if (displayPubkey == cleanedUserPubkey) return
-
-            val placeholder = Message.TextMessage(
-                id = giftWrap.optString("id"),
-                pubkey = displayPubkey,
-                recipientPubkeys = extractRecipients(giftWrap, expectedOtherPubkey),
-                content = "Unable to decrypt message",
-                createdAt = giftWrap.optLong("created_at"),
-                subject = null,
-                replyTo = null,
-                relayUrls = null
-            )
-            Timber.w(
-                "Placeholder trace: eventId=%s outerPub=%s expectedOther=%s displayPub=%s recipients=%s",
-                giftWrap.optString("id", ""),
-                cleanPubkeyFormat(outerPubkey),
-                cleanPubkeyFormat(expectedOtherPubkey ?: ""),
-                cleanPubkeyFormat(displayPubkey),
-                placeholder.recipientPubkeys.map { cleanPubkeyFormat(it) }
-            )
-            
-            _messages.update { current ->
-                if (current.any { it.id == placeholder.id }) current 
-                else (current + placeholder).sortedBy { it.createdAt }
-            }
-        } catch (e: Exception) {
-            Timber.e(e, "Failed to create placeholder")
-        }
-    }
-
-    /**
-     * Extract recipients from event tags
-     */
-    private fun extractRecipients(event: JSONObject, fallbackPubkey: String?): List<String> {
-        val recipients = mutableListOf<String>()
-        val tags = event.optJSONArray("tags") ?: JSONArray()
-        
-        for (i in 0 until tags.length()) {
-            val tag = tags.optJSONArray(i) ?: continue
-            if (tag.optString(0) == "p") {
-                recipients.add(cleanPubkeyFormat(tag.optString(1)))
-            }
-        }
-
-        if (recipients.isEmpty() && fallbackPubkey != null) {
-            recipients.add(cleanPubkeyFormat(fallbackPubkey))
-        }
-
-        return recipients
     }
 
     override fun onCleared() {
@@ -833,28 +797,47 @@ class MessagesViewModel @Inject constructor(
                         val hasNoDecryptCapability = authContext.localPrivateKeyBytes == null && !authContext.hasExternalSigner
 
                         if (hasNoDecryptCapability) {
-                            addUndecryptablePlaceholder(giftWrap, expectedOtherPubkey)
+                            Timber.d(
+                                "Skipping gift-wrap: no local/external decrypt capability eventId=%s",
+                                eventId
+                            )
                             return@withLock
                         }
 
                         if (usingExternalSignerOnly && expectedOtherPubkey.isNullOrBlank()) {
                             if (!com.hisa.data.nostr.ExternalSignerManager.isLauncherRegistered()) {
                                 Timber.d("Skipping single inbox external decrypt: launcher not registered")
-                                addUndecryptablePlaceholder(giftWrap, expectedOtherPubkey)
                                 return@withLock
                             }
-                            // Messages tab (inbox) path: trigger signer request at most once.
-                            // This allows one-time approval prompt while avoiding a request storm.
-                            val shouldRequestOnce = inboxExternalDecryptRequested.compareAndSet(false, true)
-                            if (!shouldRequestOnce) {
-                                addUndecryptablePlaceholder(giftWrap, expectedOtherPubkey)
+                            // Inbox bulk-load path: allow only one signer decrypt request per subscription
+                            // batch to avoid repeated permission prompts/spam on startup.
+                            if (!inboxExternalDecryptRequested.compareAndSet(false, true)) {
+                                val skipCount = inboxExternalSkipLogCounter.incrementAndGet()
+                                if (skipCount % 100L == 0L) {
+                                    Timber.d(
+                                        "Skipping extra inbox external decrypt requests (sample): skipped=%d lastEventId=%s",
+                                        skipCount,
+                                        eventId
+                                    )
+                                }
                                 return@withLock
                             }
-                            val decryptedMessage = decryptNip17Message(giftWrap, expectedOtherPubkey)
-                            if (decryptedMessage != null) {
-                                updateMessageState(decryptedMessage, expectedOtherPubkey)
-                            } else {
-                                addUndecryptablePlaceholder(giftWrap, expectedOtherPubkey)
+                            when (val decryptResult = decryptNip17Message(giftWrap, expectedOtherPubkey)) {
+                                is Nip17DecryptResult.Success -> {
+                                    updateMessageState(decryptResult.message, expectedOtherPubkey)
+                                }
+                                Nip17DecryptResult.UnsupportedInnerKind -> {
+                                    Timber.d(
+                                        "Ignoring non-DM gift-wrap event in inbox path: eventId=%s",
+                                        eventId
+                                    )
+                                }
+                                Nip17DecryptResult.Failed -> {
+                                    Timber.d(
+                                        "External signer single inbox decrypt failed for eventId=%s; remaining inbox events will be skipped",
+                                        eventId
+                                    )
+                                }
                             }
                             return@withLock
                         }
@@ -866,17 +849,22 @@ class MessagesViewModel @Inject constructor(
                         }
 
                         // 2. Decrypt the message
-                        val decryptedMessage = decryptNip17Message(giftWrap, expectedOtherPubkey) ?: run {
-                            Timber.e("Failed to decrypt or parse message %s", eventId)
-                            addUndecryptablePlaceholder(giftWrap, expectedOtherPubkey)
-                            return@withLock
+                        when (val decryptResult = decryptNip17Message(giftWrap, expectedOtherPubkey)) {
+                            is Nip17DecryptResult.Success -> {
+                                // 3. Update state if message is valid
+                                updateMessageState(decryptResult.message, expectedOtherPubkey)
+                            }
+                            Nip17DecryptResult.UnsupportedInnerKind -> {
+                                Timber.d("Ignoring non-DM gift-wrap event: eventId=%s", eventId)
+                                return@withLock
+                            }
+                            Nip17DecryptResult.Failed -> {
+                                Timber.e("Failed to decrypt or parse message %s", eventId)
+                                return@withLock
+                            }
                         }
-
-                        // 3. Update state if message is valid
-                        updateMessageState(decryptedMessage, expectedOtherPubkey)
                     } catch (e: Exception) {
                         Timber.e(e, "Error in handleGiftWrap")
-                        addUndecryptablePlaceholder(giftWrap, expectedOtherPubkey)
                     }
                 }
             } finally {
@@ -910,17 +898,18 @@ class MessagesViewModel @Inject constructor(
     }
 
     fun getConversations(): Map<String, List<Message>> {
-        val messages = _messages.value
+        val messages = _messages.value.filterNot {
+            it is Message.TextMessage && it.content == "Unable to decrypt message"
+        }
         Timber.d("Total messages in state: %d", messages.size)
         // Sample up to 5 messages for tracing to avoid noisy logs
         if (messages.isNotEmpty()) {
             messages.take(5).forEach { msg ->
                 Timber.d(
-                    "Conversation source sample: msgId=%s sender=%s recipients=%s placeholder=%s",
+                    "Conversation source sample: msgId=%s sender=%s recipients=%s",
                     msg.id,
                     cleanPubkeyFormat(msg.pubkey),
-                    msg.recipientPubkeys.map { cleanPubkeyFormat(it) },
-                    (msg is Message.TextMessage && msg.content == "Unable to decrypt message")
+                    msg.recipientPubkeys.map { cleanPubkeyFormat(it) }
                 )
             }
             if (messages.size > 5) {
