@@ -300,7 +300,7 @@ object ExternalSignerManager {
         // Log launch info (sampled) to aid debugging of signer interactions without spamming logs
         try {
             val cnt = responseLogCounter.incrementAndGet()
-            if (cnt % 100L == 0L) {
+            if (cnt <= 5L || cnt % 50L == 0L) {
                 android.util.Log.d("ExternalSigner", "nip44Decrypt launch: pkg=$pkg callId=$callId senderPubkey=${senderPubkey.take(12)} ciphertextLen=${ciphertext.length}")
                 android.util.Log.d("ExternalSigner", "nip44Decrypt envelope: ${envelopeJson.take(400)}")
             }
@@ -316,7 +316,7 @@ object ExternalSignerManager {
         if (firstResult != null) {
             pending.remove(callId)
             val cnt = responseLogCounter.incrementAndGet()
-            if (cnt % 100L == 0L) android.util.Log.d("ExternalSigner", "nip44Decrypt received firstResult (sampled): id=$callId pkg=$pkg presentResult=${!firstResult.result.isNullOrBlank()} presentEvent=${!firstResult.event.isNullOrBlank()}")
+            if (cnt <= 5L || cnt % 50L == 0L) android.util.Log.d("ExternalSigner", "nip44Decrypt received firstResult: id=$callId pkg=$pkg presentResult=${!firstResult.result.isNullOrBlank()} presentEvent=${!firstResult.event.isNullOrBlank()}")
             return when {
                 !firstResult.result.isNullOrBlank() -> firstResult.result
                 !firstResult.event.isNullOrBlank() -> firstResult.event
@@ -335,7 +335,7 @@ object ExternalSignerManager {
         if (secondResult != null) {
             pending.remove(callId)
             val cnt = responseLogCounter.incrementAndGet()
-            if (cnt % 100L == 0L) android.util.Log.d("ExternalSigner", "nip44Decrypt received secondResult (sampled): id=$callId pkg=$pkg presentResult=${!secondResult.result.isNullOrBlank()} presentEvent=${!secondResult.event.isNullOrBlank()}")
+            if (cnt <= 5L || cnt % 50L == 0L) android.util.Log.d("ExternalSigner", "nip44Decrypt received secondResult: id=$callId pkg=$pkg presentResult=${!secondResult.result.isNullOrBlank()} presentEvent=${!secondResult.event.isNullOrBlank()}")
             return when {
                 !secondResult.result.isNullOrBlank() -> secondResult.result
                 !secondResult.event.isNullOrBlank() -> secondResult.event
@@ -363,7 +363,7 @@ object ExternalSignerManager {
             if (remaining <= 0) throw java.util.concurrent.TimeoutException("External signer timed out")
             val res = withTimeout(remaining) { deferred.await() }
             val cnt = responseLogCounter.incrementAndGet()
-            if (cnt % 100L == 0L) android.util.Log.d("ExternalSigner", "nip44Decrypt received finalResult (sampled): id=$callId pkg=$pkg presentResult=${!res.result.isNullOrBlank()} presentEvent=${!res.event.isNullOrBlank()}")
+            if (cnt <= 5L || cnt % 50L == 0L) android.util.Log.d("ExternalSigner", "nip44Decrypt received finalResult: id=$callId pkg=$pkg presentResult=${!res.result.isNullOrBlank()} presentEvent=${!res.event.isNullOrBlank()}")
             return when {
                 !res.result.isNullOrBlank() -> res.result
                 !res.event.isNullOrBlank() -> res.event
