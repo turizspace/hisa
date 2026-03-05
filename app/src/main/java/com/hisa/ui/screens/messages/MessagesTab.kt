@@ -112,9 +112,11 @@ fun MessagesTab(
                     Text(metadata?.name ?: fallback)
                 },
                 supportingContent = { 
-                    Text(when (val lastMessage = messages.firstOrNull()) {
-                        is Message.TextMessage -> lastMessage.content
-                        is Message.FileMessage -> "[File] ${lastMessage.fileUrl}"
+                    val previewMessage = messages.firstOrNull { it !is Message.ReactionMessage } ?: messages.firstOrNull()
+                    Text(when (previewMessage) {
+                        is Message.TextMessage -> previewMessage.content
+                        is Message.FileMessage -> "[File] ${previewMessage.fileUrl}"
+                        is Message.ReactionMessage -> "Reaction ${previewMessage.content.ifBlank { "+" }}"
                         null -> "No messages"
                     })
                 },

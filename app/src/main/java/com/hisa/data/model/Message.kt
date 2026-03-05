@@ -55,4 +55,22 @@ sealed class Message {
         override val replyTo: String? = null,
         override val relayUrls: Map<String, String>? = null
     ) : Message()
+
+    /**
+     * Kind 7: NIP-25 Reaction Message.
+     * targetEventId points to the reacted inner event id (not outer gift-wrap id).
+     */
+    data class ReactionMessage(
+        override val id: String,
+        override val pubkey: String,
+        override val recipientPubkeys: List<String>,
+        val content: String,
+        val targetEventId: String,
+        val targetEventPubkey: String? = null,
+        val targetEventKind: Int? = null,
+        override val createdAt: Long,
+        override val subject: String? = null,
+        override val replyTo: String? = null,
+        override val relayUrls: Map<String, String>? = null
+    ) : Message()
 }

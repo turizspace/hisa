@@ -68,7 +68,10 @@ fun ConversationScreen(
     val normalizedConversationId = cleanPubkeyFormat(conversationId)
     val normalizedUserPubkey = cleanPubkeyFormat(userPubkey)
 
-    val messages = allMessages.filter { message ->
+    val conversationMessages = allMessages.filter { message ->
+        if (message is com.hisa.data.model.Message.TextMessage && message.content == "Unable to decrypt message") {
+            return@filter false
+        }
         val msgPub = cleanPubkeyFormat(message.pubkey)
         val recipients = message.recipientPubkeys.map { cleanPubkeyFormat(it) }.filter { it.isNotBlank() }
         val participants = buildSet {
@@ -97,11 +100,28 @@ fun ConversationScreen(
         }
         match
     }
+    val reactionMessages = conversationMessages.filterIsInstance<com.hisa.data.model.Message.ReactionMessage>()
+    val visibleMessages = conversationMessages.filterNot { it is com.hisa.data.model.Message.ReactionMessage }
+    val reactionsByTarget = remember(reactionMessages) {
+        reactionMessages
+            .groupBy { it.targetEventId }
+            .mapValues { (_, reactions) ->
+                // Keep at most one latest reaction per author+reaction-value pair.
+                reactions
+                    .groupBy { "${cleanPubkeyFormat(it.pubkey)}:${it.content.trim()}" }
+                    .mapNotNull { (_, group) -> group.maxByOrNull { it.createdAt } }
+            }
+    }
     var newMessage by remember { mutableStateOf("") }
 
     var fetchedMeta by remember { mutableStateOf<com.hisa.data.model.Metadata?>(null) }
-    val displayName = contactName ?: fetchedMeta?.name ?: conversationId.take(8) + "..."
+    var ownMeta by remember { mutableStateOf<com.hisa.data.model.Metadata?>(null) }
+    val displayName =
+        contactName ?: fetchedMeta?.displayName ?: fetchedMeta?.name ?: conversationId.take(8) + "..."
     val displayPicture = contactProfilePicture ?: fetchedMeta?.picture
+    val ownDisplayName = ownMeta?.displayName ?: ownMeta?.name ?: "You"
+    val ownDisplayPicture = ownMeta?.picture
+    val profileMetaUtil = LocalProfileMetaUtil.current
 
     // Initialize conversation, load messages and fetch metadata
     var isInitialized by remember { mutableStateOf(false) }
@@ -143,12 +163,19 @@ fun ConversationScreen(
             messagesViewModel.clearSendError()
         }
     }
-    // Fetch profile metadata if needed
-    if ((contactName == null || contactProfilePicture == null) && fetchedMeta == null) {
-        val profileMetaUtil = LocalProfileMetaUtil.current
-        LaunchedEffect(conversationId) {
+    // Fetch profile metadata if needed (contact)
+    LaunchedEffect(conversationId, contactName, contactProfilePicture) {
+        if ((contactName == null || contactProfilePicture == null) && fetchedMeta == null) {
             profileMetaUtil.fetchProfileMetadata(conversationId) { meta ->
                 fetchedMeta = meta
+            }
+        }
+    }
+    // Fetch current user metadata for own-message avatar/name.
+    LaunchedEffect(userPubkey) {
+        if (ownMeta == null) {
+            profileMetaUtil.fetchProfileMetadata(userPubkey) { meta ->
+                ownMeta = meta
             }
         }
     }
@@ -213,13 +240,29 @@ fun ConversationScreen(
             }
             Spacer(modifier = Modifier.height(8.dp))
             LazyColumn(modifier = Modifier.weight(1f)) {
-                items(messages) { message ->
-                    val isOwnMessage = cleanPubkeyFormat(message.pubkey) == normalizedUserPubkey
-                    com.hisa.ui.components.MessageBubble(message, isOwnMessage)
-                    Text(
-                        text = java.text.SimpleDateFormat("HH:mm", java.util.Locale.getDefault()).format(java.util.Date(message.createdAt * 1000)),
-                        style = MaterialTheme.typography.labelSmall,
-                        modifier = Modifier.padding(start = if (isOwnMessage) 48.dp else 8.dp, end = if (isOwnMessage) 8.dp else 48.dp, bottom = 2.dp)
+                items(visibleMessages) { message ->
+                    val normalizedSender = cleanPubkeyFormat(message.pubkey)
+                    val isOwnMessage = normalizedSender == normalizedUserPubkey
+                    val incomingDisplayName = if (normalizedSender.equals(normalizedConversationId, true)) {
+                        displayName
+                    } else if (normalizedSender.isNotBlank()) {
+                        normalizedSender.take(12) + "..."
+                    } else {
+                        "Unknown"
+                    }
+                    val incomingDisplayPicture = if (normalizedSender.equals(normalizedConversationId, true)) {
+                        displayPicture
+                    } else {
+                        null
+                    }
+                    com.hisa.ui.components.MessageBubble(
+                        message = message,
+                        isOwnMessage = isOwnMessage,
+                        displayName = incomingDisplayName,
+                        profilePicUrl = incomingDisplayPicture,
+                        ownDisplayName = ownDisplayName,
+                        ownProfilePicUrl = ownDisplayPicture,
+                        reactions = reactionsByTarget[message.id].orEmpty()
                     )
                 }
             }

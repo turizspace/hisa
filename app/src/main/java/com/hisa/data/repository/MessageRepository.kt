@@ -268,13 +268,9 @@ object MessageRepository {
 
             // Extract encrypted payload.
             val encryptedContent = event.getString("content")
-            // Prefer outer pubkey for spec-compliant wraps. If outer verification failed, include
-            // legacy x-tag candidates first to recover older malformed events produced by prior builds.
+            // Prefer outer pubkey first for NIP-59 wraps (the wrapper key is the correct sender
+            // for decrypting the outer ciphertext). Keep other candidates as fallback.
             val senderCandidates = mutableListOf<String>()
-            senderPubkeyHints
-                .map { it.trim().lowercase() }
-                .filter { it.matches(Regex("[0-9a-f]{64}")) }
-                .forEach { senderCandidates.add(it) }
             val outerPubkey = event.optString("pubkey", "").trim().lowercase()
             val xTagCandidates = mutableListOf<String>()
             val pTagCandidates = mutableListOf<String>()
@@ -294,15 +290,15 @@ object MessageRepository {
                     }
                 }
             }
-            // Include p-tag candidates (some implementations put pubkey hints in p-tags)
-            if (pTagCandidates.isNotEmpty()) {
-                senderCandidates.addAll(pTagCandidates)
-            }
-            if (!outerVerified) {
-                senderCandidates.addAll(xTagCandidates)
-            }
             if (outerPubkey.matches(Regex("[0-9a-f]{64}"))) {
                 senderCandidates.add(outerPubkey)
+            }
+            senderPubkeyHints
+                .map { it.trim().lowercase() }
+                .filter { it.matches(Regex("[0-9a-f]{64}")) }
+                .forEach { senderCandidates.add(it) }
+            if (!outerVerified) {
+                senderCandidates.addAll(xTagCandidates)
             }
             if (outerVerified) {
                 senderCandidates.addAll(xTagCandidates)
@@ -348,9 +344,11 @@ object MessageRepository {
                         sealedMessage.optString("pubkey", "").take(12)
                     )
                     
-                    // Validate that kind makes sense for a gift-wrapped message
-                    // Outer layer should decrypt to kind 13 (rumor/seal), 14 (seal), or 15 (DM)
-                    if (sealedKind !in listOf(13, 14, 15)) {
+                    // Validate that kind makes sense for a gift-wrapped message.
+                    // Outer layer should decrypt to:
+                    // - kind 13 (seal), or
+                    // - inner content directly (kind 14/15 DM, or kind 7 reaction to a DM).
+                    if (sealedKind !in listOf(13, 14, 15, 7)) {
                         timber.log.Timber.w(
                             "Rejecting candidate: kind=%d is invalid for gift-wrap. candidate=%s",
                             sealedKind,
@@ -438,7 +436,7 @@ object MessageRepository {
                             )
                             throw innerLastError ?: IllegalArgumentException("All inner seal decrypt candidates failed")
                         }
-                        14, 15 -> {
+                        14, 15, 7 -> {
                             // Single-layer gift wrap: the outer decrypted payload already contains the inner message
                             sealedMessage.put("__resolved_sender_pubkey", senderPubkey.lowercase())
                             return sealedMessage
@@ -936,7 +934,7 @@ object MessageRepository {
     }
 
     /**
-     * Parse a NIP-17 event (Kind 14 or 15) from JSON
+     * Parse decrypted NIP-17/NIP-25 message-like events (Kind 14/15/7) from JSON.
      */
     fun parseMessage(eventJson: String): Message? {
         return try {
@@ -953,6 +951,7 @@ object MessageRepository {
                         parseTextMessage(obj)
                     }
                 }
+                7 -> parseReactionMessage(obj)
                 else -> null
             }
         } catch (e: Exception) {
@@ -1061,6 +1060,67 @@ object MessageRepository {
             fallbackUrls = if (fallbackUrls.isNotEmpty()) fallbackUrls else null,
             subject = subject,
             replyTo = replyTo,
+            relayUrls = if (relayUrls.isNotEmpty()) relayUrls else null
+        )
+    }
+
+    private fun parseReactionMessage(obj: JSONObject): Message.ReactionMessage? {
+        val (recipientPubkeys, relayUrls, _, _) = extractCommonFields(obj)
+        val stableId = obj.optString("id").ifBlank {
+            val source = "${obj.optString("pubkey")}:${obj.optLong("created_at")}:${obj.optString("content")}:${obj.optJSONArray("tags")}"
+            MessageDigest.getInstance("SHA-256")
+                .digest(source.toByteArray(Charsets.UTF_8))
+                .joinToString("") { "%02x".format(it) }
+        }
+
+        val tags = obj.optJSONArray("tags") ?: JSONArray()
+        var targetEventId: String? = null
+        var targetEventPubkey: String? = null
+        var targetEventKind: Int? = null
+        for (i in 0 until tags.length()) {
+            val tag = tags.optJSONArray(i) ?: continue
+            when (tag.optString(0)) {
+                "e" -> {
+                    val id = tag.optString(1, "").trim()
+                    if (id.isNotBlank()) targetEventId = id
+                }
+                "p" -> {
+                    val pk = tag.optString(1, "").trim()
+                    if (pk.isNotBlank()) targetEventPubkey = pk
+                }
+                "k" -> {
+                    val kindStr = tag.optString(1, "").trim()
+                    targetEventKind = kindStr.toIntOrNull() ?: targetEventKind
+                }
+            }
+        }
+
+        if (targetEventId.isNullOrBlank()) {
+            android.util.Log.w(
+                "MessageRepository",
+                "Kind 7 reaction missing required e-tag target id. id=${obj.optString("id")}"
+            )
+            return null
+        }
+        val targetId = targetEventId ?: return null
+
+        val normalizedRecipients = recipientPubkeys.toMutableList()
+        val targetPub = targetEventPubkey
+        if (!targetPub.isNullOrBlank() && normalizedRecipients.none { it.equals(targetPub, true) }) {
+            normalizedRecipients.add(targetPub)
+        }
+
+        return Message.ReactionMessage(
+            id = stableId,
+            pubkey = obj.optString("pubkey", ""),
+            recipientPubkeys = normalizedRecipients,
+            content = obj.optString("content", ""),
+            targetEventId = targetId,
+            targetEventPubkey = targetPub,
+            targetEventKind = targetEventKind,
+            createdAt = obj.optLong("created_at"),
+            subject = null,
+            replyTo = null,
             relayUrls = if (relayUrls.isNotEmpty()) relayUrls else null
         )
     }
