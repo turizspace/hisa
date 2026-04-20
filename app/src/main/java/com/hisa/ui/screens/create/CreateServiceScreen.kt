@@ -22,6 +22,10 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
+import com.hisa.ui.navigation.NAV_RESULT_UPLOADED_MEDIA_URL
+import com.hisa.ui.navigation.Routes
+import com.hisa.ui.navigation.consumeUploadedMediaUrls
+import com.hisa.ui.navigation.prepareUploadResult
 import coil.compose.AsyncImage
 import java.time.Instant
 import java.util.UUID
@@ -102,6 +106,13 @@ fun CreateServiceScreen(
                                 selectedImageUrls.forEach { url ->
                                     add(listOf("image", url))
                                 }
+                            }
+                            // Also add an `imeta` tag that contains all image URLs as additional
+                            // tag elements (so consumers can read multiple image URLs from one tag).
+                            if (selectedImageUrls.isNotEmpty()) {
+                                val imetaTag = mutableListOf<String>("imeta")
+                                imetaTag.addAll(selectedImageUrls)
+                                add(imetaTag)
                             }
                         }
 
@@ -390,15 +401,9 @@ fun CreateServiceScreen(
                             onClick = {
                                 try {
                                     // Defensive: set the target on both current and previous entries so callers can read it
-                                    val current = navController?.currentBackStackEntry
-                                    val previous = navController?.previousBackStackEntry
-                                    try { current?.savedStateHandle?.remove<String>("uploaded_media_url") } catch (_: Exception) {}
-                                    try { previous?.savedStateHandle?.remove<String>("uploaded_media_url") } catch (_: Exception) {}
-                                    current?.savedStateHandle?.set("upload_target", "service_image")
-                                    previous?.savedStateHandle?.set("upload_target", "service_image")
-                                    android.util.Log.i("CreateServiceScreen", "Opening UPLOAD: set upload_target=service_image current=${current?.destination?.route} previous=${previous?.destination?.route}")
+                                    navController.prepareUploadResult("service_image")
                                     if (navController != null) {
-                                        navController.navigate(com.hisa.ui.navigation.Routes.UPLOAD)
+                                        navController.navigate(Routes.UPLOAD)
                                     } else {
                                         // Helpful debug feedback when navController isn't available
                                         android.widget.Toast.makeText(ctx, "Navigation not available", android.widget.Toast.LENGTH_SHORT).show()
@@ -508,28 +513,25 @@ fun CreateServiceScreen(
             }
         } catch (_: Exception) {}
 
-        val saved = navController?.currentBackStackEntry?.savedStateHandle?.getLiveData<String>("uploaded_media_url")
-        saved?.observeForever { url ->
-            if (!url.isNullOrBlank()) {
-                val parts = url.split('\n').map { it.trim() }.filter { it.isNotEmpty() }
-                if (parts.isNotEmpty()) {
-                    val target = navController.currentBackStackEntry?.savedStateHandle?.get<String>("upload_target") ?: ""
-                    if (target == "service_image") {
-                        // Merge new uploaded URLs into the selected list and append extras to description
-                        if (selectedImageUrls.isEmpty()) {
-                            selectedImageUrls = parts
-                            if (parts.size > 1) {
-                                description = description + "\n" + parts.drop(1).joinToString("\n")
-                            }
-                        } else {
-                            // Already have images: append all returned URLs to description
-                            description = description + "\n" + parts.joinToString("\n")
-                        }
-                    }
+    }
+
+    val uploadHandle = navController?.currentBackStackEntry?.savedStateHandle
+    val uploadedMediaUrlState = uploadHandle
+        ?.getStateFlow<String?>(NAV_RESULT_UPLOADED_MEDIA_URL, null)
+        ?.collectAsState()
+        ?: remember { mutableStateOf<String?>(null) }
+    val uploadedMediaUrl = uploadedMediaUrlState.value
+
+    LaunchedEffect(uploadedMediaUrl, uploadHandle) {
+        val parts = uploadHandle?.consumeUploadedMediaUrls("service_image").orEmpty()
+        if (parts.isNotEmpty()) {
+            val merged = selectedImageUrls.toMutableList()
+            parts.forEach { part ->
+                if (!merged.contains(part)) {
+                    merged.add(part)
                 }
-                navController.currentBackStackEntry?.savedStateHandle?.remove<String>("uploaded_media_url")
-                navController.currentBackStackEntry?.savedStateHandle?.remove<String>("upload_target")
             }
+            selectedImageUrls = merged
         }
     }
 }

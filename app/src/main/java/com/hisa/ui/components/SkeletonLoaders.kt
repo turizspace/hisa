@@ -182,10 +182,10 @@ fun MessageItemSkeleton(modifier: Modifier = Modifier) {
 }
 
 /**
- * Channel item skeleton loader
+ * Stall item skeleton loader
  */
 @Composable
-fun ChannelItemSkeleton(modifier: Modifier = Modifier) {
+fun StallItemSkeleton(modifier: Modifier = Modifier) {
     Column(
         modifier = modifier
             .fillMaxWidth()
@@ -247,13 +247,13 @@ fun MessagesSkeletonLoader(modifier: Modifier = Modifier, itemCount: Int = 6) {
 }
 
 /**
- * Channels skeleton loader
+ * Stalls skeleton loader
  */
 @Composable
-fun ChannelsSkeletonLoader(modifier: Modifier = Modifier, itemCount: Int = 8) {
+fun StallsSkeletonLoader(modifier: Modifier = Modifier, itemCount: Int = 8) {
     LazyColumn(modifier = modifier) {
         items(itemCount) {
-            ChannelItemSkeleton()
+            StallItemSkeleton()
             Spacer(modifier = Modifier.height(4.dp))
         }
     }

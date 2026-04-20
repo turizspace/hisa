@@ -26,6 +26,7 @@ import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.navigation.NavHostController
 import coil.compose.rememberAsyncImagePainter
+import com.hisa.util.hexToByteArrayOrNull
 import com.hisa.viewmodel.UploadViewModel
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.launch
@@ -143,7 +144,18 @@ fun UploadScreen(
                     if (selectedUris.isEmpty()) return@Button
                     val privHex = privHexState ?: ""
                     val pubkey = pubkeyState ?: ""
-                    val privBytes = if (privHex.isNotBlank()) hexToBytes(privHex) else ByteArray(0)
+                    val privBytes = hexToByteArrayOrNull(privHex, 32)
+                    val externalSignerPubkey = authVm.getExternalSignerPubkey()
+                    val externalSignerPackage = authVm.getExternalSignerPackage()
+                    val hasExternalSigner = !externalSignerPubkey.isNullOrBlank() && !externalSignerPackage.isNullOrBlank()
+                    if (pubkey.isBlank() || (privBytes == null && !hasExternalSigner)) {
+                        android.widget.Toast.makeText(
+                            context,
+                            "No signing key available for upload.",
+                            android.widget.Toast.LENGTH_SHORT
+                        ).show()
+                        return@Button
+                    }
 
                     scope.launch {
                         val uploadedUrls = mutableListOf<String>()
@@ -163,7 +175,15 @@ fun UploadScreen(
                                 }
                             }
 
-                            uploadViewModel.uploadFile(file, mime, pubkey, privBytes, endpoint) { url ->
+                            uploadViewModel.uploadFile(
+                                file = file,
+                                contentType = mime,
+                                pubkeyHex = pubkey,
+                                privKey = privBytes,
+                                endpoint = endpoint,
+                                externalSignerPubkey = externalSignerPubkey,
+                                externalSignerPackage = externalSignerPackage
+                            ) { url ->
                                 if (!resultDeferred.isCompleted) resultDeferred.complete(url)
                             }
 
@@ -175,7 +195,6 @@ fun UploadScreen(
                         uploadViewModel.reset()
                         if (uploadedUrls.isNotEmpty()) {
                             val resultString = if (uploadedUrls.size == 1) uploadedUrls[0] else uploadedUrls.joinToString("\n")
-                            android.util.Log.i("UploadScreen", "All uploads completed, returning urls=$resultString")
                             try { onUploadComplete(resultString) } catch (_: Exception) {}
                         }
                     }
@@ -241,14 +260,4 @@ fun uriToFile(context: Context, uri: Uri): File? {
     } catch (e: Exception) {
         null
     }
-}
-
-fun hexToBytes(hex: String): ByteArray {
-    val clean = hex.trim().removePrefix("0x")
-    val out = ByteArray(clean.length / 2)
-    for (i in out.indices) {
-        val idx = i * 2
-        out[i] = clean.substring(idx, idx + 2).toInt(16).toByte()
-    }
-    return out
 }

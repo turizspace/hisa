@@ -6,6 +6,8 @@ import androidx.lifecycle.viewModelScope
 import com.hisa.data.cache.ProfileCache
 import com.hisa.data.model.Metadata
 import com.hisa.data.nostr.NostrClient
+import com.hisa.data.nostr.toNostrEvent
+import com.hisa.util.hexToByteArrayOrNull
 import dagger.hilt.android.lifecycle.HiltViewModel
 import javax.inject.Inject
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -14,6 +16,7 @@ import kotlinx.coroutines.launch
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 
+private val profileMetadataJson = Json { ignoreUnknownKeys = true }
 
 @HiltViewModel
 class ProfileViewModel @Inject constructor(
@@ -64,93 +67,17 @@ class ProfileViewModel @Inject constructor(
         }
     }
 
+    fun refreshMetadata() {
+        fetchMetadata()
+    }
+
     private fun fetchMetadata() {
         viewModelScope.launch {
             try {
-                android.util.Log.d("ProfileViewModel", "Preparing to fetch profile metadata...")
-                // Register message handler only once (idempotent)
-                nostrClient.registerMessageHandler { message ->
-                    try {
-                        val element = kotlinx.serialization.json.Json.parseToJsonElement(message)
-                        if (element is kotlinx.serialization.json.JsonArray) {
-                            val type = element.getOrNull(0)?.toString()?.removeSurrounding("\"")
-                            val subId = element.getOrNull(1)?.toString()?.removeSurrounding("\"")
-                            if (type == "EVENT" && subId == "profile" && element.size > 2) {
-                                val eventObj = element[2] as? kotlinx.serialization.json.JsonObject
-                                if (eventObj != null && eventObj["kind"]?.toString() == "0" && eventObj["pubkey"]?.toString()?.removeSurrounding("\"") == pubkey) {
-                                    val contentRaw = eventObj["content"]?.toString()?.removeSurrounding("\"") ?: run {
-                                        android.util.Log.w("ProfileViewModel", "No content field in event: $eventObj")
-                                        return@registerMessageHandler
-                                    }
-                                    android.util.Log.d("ProfileViewModel", "Raw content received: $contentRaw")
-                                    val meta = try {
-                                        // First try: direct parse with lenient settings
-                                        try {
-                                            Json { ignoreUnknownKeys = true }.decodeFromString<Metadata>(contentRaw)
-                                        } catch (e: Exception) {
-                                            // Second try: unescape and parse
-                                            val unescaped = contentRaw.replace("\\\"", "\"")
-                                                                     .replace("\"{", "{")
-                                                                     .replace("}\"", "}")
-                                            android.util.Log.d("ProfileViewModel", "Attempting with unescaped content: $unescaped")
-                                            Json { ignoreUnknownKeys = true }.decodeFromString<Metadata>(unescaped)
-                                        }
-                                    } catch (e: Exception) {
-                                        android.util.Log.e("ProfileViewModel", "All attempts to decode metadata failed: ${e.localizedMessage}")
-                                        null
-                                    }
-                                    if (meta != null) {
-                                        if (_allMetadata.value.none { it == meta }) {
-                                            android.util.Log.d("ProfileViewModel", "Profile metadata for pubkey $pubkey: $meta")
-                                            val newHistory = _allMetadata.value + meta
-                                            _allMetadata.value = newHistory
-                                            _metadata.value = meta
-                                            // Update cache
-                                            profileCache.cacheProfile(pubkey, meta)
-                                            profileCache.cacheProfileHistory(pubkey, newHistory)
-                                        }
-                                    }
-                                } else {
-                                    android.util.Log.d("ProfileViewModel", "Event is not kind 0 or pubkey mismatch: $eventObj")
-                                }
-                            }
-                        } else if (element is kotlinx.serialization.json.JsonObject) {
-                            if (element["kind"]?.toString() == "0") {
-                                val content = element["content"]?.toString()?.removeSurrounding("\"") ?: run {
-                                    android.util.Log.w("ProfileViewModel", "No content field in object: $element")
-                                    return@registerMessageHandler
-                                }
-                                android.util.Log.d("ProfileViewModel", "Extracted content (object): $content")
-                                val meta = try {
-                                    Json.decodeFromString<Metadata>(content)
-                                } catch (e: Exception) {
-                                    android.util.Log.w("ProfileViewModel", "Failed to decode metadata from content: $content\nError: ${e.localizedMessage}")
-                                    null
-                                }
-                                if (meta != null) {
-                                    if (_allMetadata.value.none { it == meta }) {
-                                        android.util.Log.d("ProfileViewModel", "Adding new metadata: $meta")
-                                        val newHistory = _allMetadata.value + meta
-                                        _allMetadata.value = newHistory
-                                        _metadata.value = meta
-                                        // Update cache
-                                        profileCache.cacheProfile(pubkey, meta)
-                                        profileCache.cacheProfileHistory(pubkey, newHistory)
-                                    } else {
-                                        android.util.Log.d("ProfileViewModel", "Duplicate metadata ignored: $meta")
-                                    }
-                                }
-                            }
-                        } else {
-                            android.util.Log.w("ProfileViewModel", "Unknown message format: $element")
-                        }
-                    } catch (e: Exception) {
-                        android.util.Log.e("ProfileViewModel", "Error parsing message: ${e.localizedMessage}\nRaw message: $message")
-                    }
-                }
+                profileSubscriptionId?.let { subscriptionManager.unsubscribe(it) }
+                profileSubscriptionId = null
                 // Only connect if not already connected
                 if (nostrClient.connectionState.value != com.hisa.data.nostr.NostrClient.ConnectionState.CONNECTED) {
-                    android.util.Log.d("ProfileViewModel", "Connecting to relays...")
                     nostrClient.connect()
                 }
                 // Subscribe to kind:0 events for this pubkey (after connection is ready)
@@ -164,7 +91,7 @@ class ProfileViewModel @Inject constructor(
                         if (event.kind == 0 && event.pubkey == pubkey) {
                             val content = event.content
                             val meta = try {
-                                Json { ignoreUnknownKeys = true }.decodeFromString<Metadata>(content)
+                                profileMetadataJson.decodeFromString<Metadata>(content)
                             } catch (e: Exception) {
                                 android.util.Log.w("ProfileViewModel", "Failed to decode metadata content for pubkey $pubkey: ${e.localizedMessage}")
                                 null
@@ -208,8 +135,8 @@ class ProfileViewModel @Inject constructor(
         viewModelScope.launch {
             try {
                 val content = Json.encodeToString(meta)
-                require(!privateKeyHex.isNullOrBlank()) { "Private key is missing!" }
-                val privateKey = hexStringToByteArray(privateKeyHex)
+                val privateKey = hexToByteArrayOrNull(privateKeyHex, 32)
+                    ?: error("Private key is missing!")
                 val eventJson = com.hisa.data.nostr.NostrEventSigner.signEvent(
                     kind = 0,
                     content = content,
@@ -217,20 +144,8 @@ class ProfileViewModel @Inject constructor(
                     pubkey = pubkey,
                     privKey = privateKey
                 )
-                val nostrEvent = com.hisa.data.nostr.NostrEvent(
-                    id = eventJson.getString("id"),
-                    pubkey = eventJson.getString("pubkey"),
-                    createdAt = eventJson.getLong("created_at"),
-                    kind = eventJson.getInt("kind"),
-                    tags = (0 until eventJson.getJSONArray("tags").length()).map { i ->
-                        val tagArr = eventJson.getJSONArray("tags").getJSONArray(i)
-                        (0 until tagArr.length()).map { tagArr.getString(it) }
-                    },
-                    content = eventJson.getString("content"),
-                    sig = eventJson.getString("sig")
-                )
                 nostrClient.connect()
-                nostrClient.publishEvent(nostrEvent)
+                nostrClient.publishEvent(eventJson.toNostrEvent())
                 _saveStatus.value = SaveStatus.Success
             } catch (e: Exception) {
                 _saveStatus.value = SaveStatus.Error("Failed to save: ${e.localizedMessage}")
@@ -245,15 +160,6 @@ class ProfileViewModel @Inject constructor(
         } catch (e: Exception) {
             android.util.Log.w("ProfileViewModel", "Failed to unsubscribe profile subscription: ${e.localizedMessage}")
         }
-    }
-
-    // Helper to convert hex string to byte array
-    private fun hexStringToByteArray(hex: String): ByteArray {
-        val result = ByteArray(hex.length / 2)
-        for (i in hex.indices step 2) {
-            result[i / 2] = ((hex[i].digitToInt(16) shl 4) + hex[i + 1].digitToInt(16)).toByte()
-        }
-        return result
     }
 
     fun clearSaveStatus() {

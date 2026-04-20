@@ -21,6 +21,7 @@ import androidx.compose.material.icons.filled.Feed
 import androidx.compose.material.icons.filled.Mail
 import androidx.compose.material.icons.filled.Groups
 import androidx.compose.material.icons.filled.ShoppingCart
+import androidx.compose.material.icons.filled.Store
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -80,7 +81,7 @@ import androidx.compose.ui.unit.dp
 import androidx.navigation.NavController
 import com.hisa.ui.navigation.Routes
 import com.hisa.ui.screens.feed.FeedTab
-import com.hisa.ui.screens.lists.ChannelsTab
+import com.hisa.ui.screens.shop.StallsTab
 import com.hisa.ui.screens.messages.MessagesTab
 import com.hisa.R
 import androidx.hilt.navigation.compose.hiltViewModel
@@ -127,14 +128,14 @@ fun MainScreen(
     }
     var searchQuery by remember { mutableStateOf("") }
     var showDialog by remember { mutableStateOf(showWelcomeDialog) }
-    // Order changed so Create is in the middle and MyShop is at the end: Feed | Messages | Create | Channels | MyShop
-    val tabs = listOf("Feed", "Messages", "Create", "Channels", "My Shop")
+    // Order changed so Create is in the middle and MyShop is at the end: Feed | Messages | Create | Stalls | MyShop
+    val tabs = listOf("Feed", "Messages", "Create", "Stalls", "My Shop")
     val tabIcons = listOf(
         Icons.Filled.Feed,
         Icons.Filled.Mail,
         Icons.Filled.Add,
-        Icons.Filled.Groups,
-        Icons.Filled.ShoppingCart
+        Icons.Filled.Store,        // Stalls: Store icon (merchants/shops)
+        Icons.Filled.ShoppingCart  // My Shop: Shopping cart (user's shop/listings)
     )
     val drawerState = rememberDrawerState(DrawerValue.Closed)
     val scope = rememberCoroutineScope()
@@ -298,9 +299,9 @@ fun MainScreen(
                             value = searchQuery,
                             onValueChange = { new ->
                                 searchQuery = new
-                                // Keep channels saved state in sync when user types while on Channels tab
+                                // Keep stalls saved state in sync when user types while on Stalls tab
                                 if (selectedTab == 3) {
-                                    navController.currentBackStackEntry?.savedStateHandle?.set("channels_searchQuery", searchQuery)
+                                    navController.currentBackStackEntry?.savedStateHandle?.set("stalls_searchQuery", searchQuery)
                                 }
                             },
                             onClearSearch = {
@@ -308,8 +309,8 @@ fun MainScreen(
                                 if (selectedTab == 0) {
                                     feedViewModel.refreshFeed()
                                 }
-                                // Also clear any saved channels search so clearing the bar truly resets Channels list
-                                navController.currentBackStackEntry?.savedStateHandle?.set("channels_searchQuery", "")
+                                // Also clear any saved stalls search so clearing the bar truly resets Stalls list
+                                navController.currentBackStackEntry?.savedStateHandle?.set("stalls_searchQuery", "")
                                 focusManager.clearFocus()
                             },
                             placeholder = "Search...",
@@ -365,7 +366,7 @@ fun MainScreen(
                             messagesViewModel = messagesViewModel
                         )
                         2 -> { /* Create tab – navigation handled on click */ }
-                        3 -> ChannelsTab(
+                        3 -> com.hisa.ui.screens.shop.StallsTab(
                             navController = navController,
                             userPubkey = userPubkey,
                             nostrClient = nostrClient,

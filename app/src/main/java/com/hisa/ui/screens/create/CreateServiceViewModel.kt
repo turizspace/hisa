@@ -1,19 +1,18 @@
 package com.hisa.ui.screens.create
 
-import android.app.Application
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
-import com.hisa.data.model.Event
 import com.hisa.data.nostr.NostrClient
 import com.hisa.data.nostr.NostrEvent
+import com.hisa.data.nostr.NostrEventSigner
+import com.hisa.data.nostr.NostrStallUtils
+import com.hisa.data.nostr.toNostrEvent
+import com.hisa.util.hexToByteArrayOrNull
 import dagger.hilt.android.lifecycle.HiltViewModel
 import javax.inject.Inject
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
-import com.hisa.data.nostr.NostrEventSigner
-import org.json.JSONArray
 
 @HiltViewModel
 class CreateServiceViewModel @Inject constructor(
@@ -58,15 +57,7 @@ class CreateServiceViewModel @Inject constructor(
 
                 // If privateKeyHex is null or blank, treat this as an external-signer login
                 // and pass null so NostrEventSigner will delegate to ExternalSignerManager.
-                val privKeyBytes: ByteArray? = if (!privateKeyHex.isNullOrBlank()) {
-                    try {
-                        privateKeyHex.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
-                    } catch (e: Exception) {
-                        null
-                    }
-                } else {
-                    null
-                }
+                val privKeyBytes = hexToByteArrayOrNull(privateKeyHex, 32)
 
                 val eventJson = NostrEventSigner.signEvent(
                     kind = event.kind,
@@ -77,20 +68,48 @@ class CreateServiceViewModel @Inject constructor(
                     createdAt = event.createdAt
                 )
 
-                val nostrEvent = NostrEvent(
-                    id = eventJson.getString("id"),
-                    pubkey = eventJson.getString("pubkey"),
-                    createdAt = eventJson.getLong("created_at"),
-                    kind = eventJson.getInt("kind"),
-                    tags = (0 until eventJson.getJSONArray("tags").length()).map { i ->
-                        val tagArr = eventJson.getJSONArray("tags").getJSONArray(i)
-                        (0 until tagArr.length()).map { tagArr.getString(it) }
-                    },
-                    content = eventJson.getString("content"),
-                    sig = eventJson.getString("sig")
+                nostrClient.publishEvent(eventJson.toNostrEvent())
+
+                onSuccess()
+            } catch (e: Exception) {
+                _error.value = e.message
+            } finally {
+                _isLoading.value = false
+            }
+        }
+    }
+
+    fun createStall(
+        title: String,
+        summary: String,
+        description: String,
+        tags: List<List<String>>,
+        privateKeyHex: String?,
+        pubKey: String,
+        onSuccess: () -> Unit
+    ) {
+        viewModelScope.launch {
+            _isLoading.value = true
+            try {
+                val privKeyBytes = hexToByteArrayOrNull(privateKeyHex, 32)
+                // extract categories from tags (t tags)
+                val categories = tags.mapNotNull { t ->
+                    if (t.isNotEmpty() && t[0] == "t" && t.size > 1) t[1] else null
+                }
+
+                val stallEvent = NostrStallUtils.createStall(
+                    name = title,
+                    about = summary,
+                    picture = "",
+                    relays = emptyList<String>(),
+                    categories = categories,
+                    location = null,
+                    geohash = null,
+                    privateKey = privKeyBytes,
+                    pubkey = pubKey
                 )
 
-                nostrClient.publishEvent(nostrEvent)
+                nostrClient.publishEvent(stallEvent)
 
                 onSuccess()
             } catch (e: Exception) {

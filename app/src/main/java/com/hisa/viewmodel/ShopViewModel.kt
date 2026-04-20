@@ -17,8 +17,10 @@ import kotlinx.coroutines.withTimeoutOrNull
 import timber.log.Timber
 import javax.inject.Inject
 import com.hisa.util.cleanPubkeyFormat
-import org.bitcoinj.core.Bech32
+import com.hisa.util.hexToByteArrayOrNull
+import com.hisa.util.normalizeNostrPubkey
 import org.json.JSONArray
+import com.hisa.data.nostr.toNostrEvent
 
 @HiltViewModel
 class ShopViewModel @Inject constructor(
@@ -37,36 +39,7 @@ class ShopViewModel @Inject constructor(
         isSubscribed = true
         viewModelScope.launch {
             nostrClient.connect()
-            // ensure connection handled in client state; subscribe through SubscriptionManager
-            // Normalize owner pubkey: accept hex or bech32 npub
-            fun npubToHex(npub: String): String? {
-                return try {
-                    val bech = Bech32.decode(npub)
-                    if (bech.hrp != "npub") return null
-                    val data = bech.data
-                    var acc = 0
-                    var bits = 0
-                    val out = mutableListOf<Byte>()
-                    for (v in data) {
-                        val value = v.toInt() and 0xff
-                        acc = (acc shl 5) or value
-                        bits += 5
-                        while (bits >= 8) {
-                            bits -= 8
-                            out.add(((acc shr bits) and 0xff).toByte())
-                        }
-                    }
-                    if (bits >= 5 || ((acc shl (8 - bits)) and 0xff) != 0) return null
-                    out.joinToString("") { "%02x".format(it) }
-                } catch (e: Exception) {
-                    null
-                }
-            }
-
-            val normalizedOwner = when {
-                ownerHex.startsWith("npub", true) -> npubToHex(ownerHex) ?: cleanPubkeyFormat(ownerHex)
-                else -> cleanPubkeyFormat(ownerHex)
-            }
+            val normalizedOwner = normalizeNostrPubkey(ownerHex) ?: cleanPubkeyFormat(ownerHex)
 
             // Try to fetch preferred relays for the owner first, then subscribe using those relays
             val prefEventDeferred = CompletableDeferred<com.hisa.data.nostr.NostrEvent?>()
@@ -159,9 +132,7 @@ class ShopViewModel @Inject constructor(
 
                 val content = "" // optional reason; UI can be extended to collect a reason
 
-                val privBytes: ByteArray? = try {
-                    if (!privateKeyHex.isNullOrBlank()) privateKeyHex.chunked(2).map { it.toInt(16).toByte() }.toByteArray() else null
-                } catch (e: Exception) { null }
+                val privBytes = hexToByteArrayOrNull(privateKeyHex, 32)
 
                 val signed = com.hisa.data.nostr.NostrEventSigner.signEvent(
                     kind = 5,
@@ -171,20 +142,7 @@ class ShopViewModel @Inject constructor(
                     privKey = privBytes
                 )
 
-                val nostrEvent = com.hisa.data.nostr.NostrEvent(
-                    id = signed.getString("id"),
-                    pubkey = signed.getString("pubkey"),
-                    createdAt = signed.getLong("created_at"),
-                    kind = signed.getInt("kind"),
-                    tags = (0 until signed.getJSONArray("tags").length()).map { i ->
-                        val tagArr = signed.getJSONArray("tags").getJSONArray(i)
-                        (0 until tagArr.length()).map { tagArr.getString(it) }
-                    },
-                    content = signed.getString("content"),
-                    sig = signed.getString("sig")
-                )
-
-                nostrClient.publishEvent(nostrEvent)
+                nostrClient.publishEvent(signed.toNostrEvent())
                 onResult(true, null)
             } catch (e: Exception) {
                 Timber.e(e, "Failed to publish deletion request")

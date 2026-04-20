@@ -1,14 +1,22 @@
 package com.hisa.viewmodel
 
-import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.hisa.data.nostr.NostrClient
+import com.hisa.data.nostr.SubscriptionManager
+import androidx.lifecycle.ViewModel
 import com.hisa.data.model.ServiceListing
 import com.hisa.data.repository.ServiceRepository
+import dagger.hilt.android.lifecycle.HiltViewModel
+import javax.inject.Inject
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 
-class ServiceDetailViewModel : ViewModel() {
+@HiltViewModel
+class ServiceDetailViewModel @Inject constructor(
+    private val nostrClient: NostrClient,
+    private val subscriptionManager: SubscriptionManager
+) : ViewModel() {
     private val _service = MutableStateFlow<ServiceListing?>(null)
     val service: StateFlow<ServiceListing?> = _service
     private val _isLoading = MutableStateFlow(false)
@@ -18,24 +26,25 @@ class ServiceDetailViewModel : ViewModel() {
     private val _rawEvent = MutableStateFlow<String?>(null)
     val rawEvent: StateFlow<String?> = _rawEvent
 
-    fun loadService(eventId: String) {
+    fun loadService(eventId: String, pubkey: String) {
         _isLoading.value = true
         _error.value = null
         viewModelScope.launch {
             try {
+                nostrClient.connect()
                 val service = ServiceRepository.getServiceByEventId(eventId)
+                    ?: ServiceRepository.fetchServiceByEventId(
+                        eventId = eventId,
+                        authorPubkey = pubkey,
+                        subscriptionManager = subscriptionManager
+                    )
                 _service.value = service
                 
-                // Store and log raw event for debugging
                 service?.rawEvent?.let { rawEvent ->
                     try {
-                        val prettyJson = org.json.JSONObject(rawEvent).toString(4)
-                        _rawEvent.value = prettyJson
-                        android.util.Log.d("ServiceDetail", "Fetched Event JSON:\n$prettyJson")
+                        _rawEvent.value = org.json.JSONObject(rawEvent).toString(4)
                     } catch (e: Exception) {
                         _rawEvent.value = rawEvent
-                        android.util.Log.e("ServiceDetail", "Error formatting JSON: ${e.message}")
-                        android.util.Log.d("ServiceDetail", "Raw event: $rawEvent")
                     }
                 }
                 

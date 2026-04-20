@@ -46,47 +46,7 @@ class SubscriptionManager @Inject constructor(
         }
     }
 
-    // NIP-28 Channel Subscriptions
-    fun subscribeToChannels(
-        onEvent: (NostrEvent) -> Unit,
-        onEndOfStoredEvents: () -> Unit = {}
-    ): String {
-        return subscribe(
-            filter = createFilter {
-                putKinds(listOf(40, 41)) // Channel creation and metadata
-            },
-            onEvent = onEvent,
-            onEndOfStoredEvents = onEndOfStoredEvents
-        )
-    }
-
-    fun subscribeToChannelMessages(
-        channelId: String? = null,
-        since: Long? = null,
-        onEvent: (NostrEvent) -> Unit,
-        onEndOfStoredEvents: () -> Unit = {}
-    ): String {
-        return subscribe(
-            filter = createFilter {
-                putKinds(listOf(42))
-                channelId?.let { 
-                    putTag("e", listOf(it))
-                }
-                since?.let { putSince(it) }
-            },
-            onEvent = onEvent,
-            onEndOfStoredEvents = onEndOfStoredEvents
-        )
-    }
-
-    fun subscribeToModeration(onEvent: (NostrEvent) -> Unit): String {
-        return subscribe(
-            filter = createFilter {
-                putKinds(listOf(43, 44)) // Hide message and mute user events
-            },
-            onEvent = onEvent
-        )
-    }
+    // (Channel subscription helpers removed — channels feature deprecated)
 
     /**
      * Subscribe to incoming direct messages addressed to [userPubkey] using p-tags.
@@ -412,6 +372,14 @@ class SubscriptionManager @Inject constructor(
             putKinds(listOf(30402))
         }
 
+        fun filterNIP15Stalls(): JSONObject = createFilter {
+            putKinds(listOf(30017))
+        }
+
+        fun filterNIP15Products(): JSONObject = createFilter {
+            putKinds(listOf(30018))
+        }
+
         fun filterNIP17(pubkey: String): JSONObject = createFilter {
             putKinds(listOf(14))
             put("authors", JSONArray().put(pubkey))
@@ -421,17 +389,6 @@ class SubscriptionManager @Inject constructor(
             putKinds(listOf(30000))
         }
 
-        fun filterNIP28Channels(): JSONObject = createFilter {
-            putKinds(listOf(40, 41))
-        }
-
-        fun filterNIP28Messages(channelId: String? = null): JSONObject = createFilter {
-            putKinds(listOf(42))
-            channelId?.let { putTag("e", listOf(it)) }
-        }
-
-        fun filterNIP28Moderation(): JSONObject = createFilter {
-            putKinds(listOf(43, 44))
-        }
+        // Channel/NIP-28 specific filters removed — use NIP-15 stalls/products filters instead
     }
 }

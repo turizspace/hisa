@@ -49,28 +49,28 @@ fun EmptyState(
             modifier = Modifier.size(64.dp),
             tint = MaterialTheme.colorScheme.primary.copy(alpha = 0.6f)
         )
-        
+
         Spacer(modifier = Modifier.height(24.dp))
-        
+
         Text(
             text = title,
             style = MaterialTheme.typography.headlineSmall,
             color = MaterialTheme.colorScheme.onSurface,
             textAlign = TextAlign.Center
         )
-        
+
         Spacer(modifier = Modifier.height(12.dp))
-        
+
         Text(
             text = message,
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             textAlign = TextAlign.Center
         )
-        
+
         if (actionLabel != null && onAction != null) {
             Spacer(modifier = Modifier.height(24.dp))
-            
+
             Button(
                 onClick = onAction,
                 modifier = Modifier.fillMaxWidth(0.6f)
@@ -118,20 +118,20 @@ fun EmptyMessagesState(
 }
 
 /**
- * Empty Channels State
+ * Empty Stalls State
  */
 @Composable
-fun EmptyChannelsState(
+fun EmptyStallsState(
     modifier: Modifier = Modifier,
-    onCreateChannel: (() -> Unit)? = null
+    onCreateStall: (() -> Unit)? = null
 ) {
     EmptyState(
         icon = Icons.Default.Group,
-        title = "No Channels",
-        message = "Create a new channel or join existing ones to connect with communities.",
+        title = "No Stalls",
+        message = "Create a new stall (shop) or discover local stalls to connect with sellers.",
         modifier = modifier,
-        actionLabel = if (onCreateChannel != null) "Create Channel" else null,
-        onAction = onCreateChannel
+        actionLabel = if (onCreateStall != null) "Create Stall" else null,
+        onAction = onCreateStall
     )
 }
 
@@ -193,18 +193,18 @@ fun SearchEmptyState(
             modifier = Modifier.size(64.dp),
             tint = MaterialTheme.colorScheme.primary.copy(alpha = 0.6f)
         )
-        
+
         Spacer(modifier = Modifier.height(24.dp))
-        
+
         Text(
             text = "No Results Found",
             style = MaterialTheme.typography.headlineSmall,
             color = MaterialTheme.colorScheme.onSurface,
             textAlign = TextAlign.Center
         )
-        
+
         Spacer(modifier = Modifier.height(12.dp))
-        
+
         Text(
             text = "No items match \"$searchQuery\"\n\nTry searching with different keywords.",
             style = MaterialTheme.typography.bodyMedium,

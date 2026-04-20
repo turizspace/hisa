@@ -330,6 +330,14 @@ object MessageRepository {
                         senderPubkey
                     )
                     val sealedJson = decryptFn(encryptedContent, senderPubkey)
+                    
+                    timber.log.Timber.d(
+                        "decryptFn returned (candidate=%s): resultLen=%d resultStart=%s",
+                        senderPubkey.take(12),
+                        sealedJson.length,
+                        sealedJson.take(50)
+                    )
+                    
                     val sealedMessage = parseJsonObjectOrThrow(
                         sealedJson,
                         "Outer decrypt returned non-JSON payload"
@@ -453,7 +461,12 @@ object MessageRepository {
                             senderPubkey.take(12)
                         )
                     } else {
-                        timber.log.Timber.d("Decrypt attempt failed for candidate senderPubkey=%s", senderPubkey.take(12))
+                        timber.log.Timber.d(
+                            "Decrypt attempt failed: candidate=%s error=%s class=%s",
+                            senderPubkey.take(12),
+                            e.message ?: "unknown",
+                            e::class.simpleName
+                        )
                     }
                 }
             }
@@ -632,6 +645,8 @@ object MessageRepository {
         content: String,
         kind: Int,
         tags: List<List<String>>,
+        externalSignerPubkey: String? = null,
+        externalSignerPackage: String? = null,
         externalEncryptor: suspend (plaintext: String, recipientPubkey: String) -> String
     ): JSONObject {
         require(recipientPubkey.matches(Regex("[0-9a-fA-F]{64}"))) { "Invalid recipient pubkey" }
@@ -657,6 +672,8 @@ object MessageRepository {
             tags = sealTags,
             pubkey = senderPubkey,
             privKey = null,
+            externalSignerPubkey = externalSignerPubkey,
+            externalSignerPackage = externalSignerPackage,
             createdAt = sealCreatedAt
         )
 

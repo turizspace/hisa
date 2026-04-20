@@ -23,7 +23,6 @@ import androidx.compose.ui.unit.dp
 import coil.compose.AsyncImage
 import androidx.compose.ui.graphics.vector.rememberVectorPainter
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.getValue
@@ -61,11 +60,6 @@ fun MessagesTab(
     val showLoading = rememberTabLoadingVisibility(isLoading = isLoading)
     LaunchedEffect(Unit) {
         messagesViewModel.ensureSubscribed()
-    }
-    DisposableEffect(Unit) {
-        onDispose {
-            messagesViewModel.stopDirectMessagesSubscription()
-        }
     }
 
     val conversations = remember(allMessages) { messagesViewModel.getConversations() }

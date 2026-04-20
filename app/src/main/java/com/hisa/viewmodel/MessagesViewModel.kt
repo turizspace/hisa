@@ -1025,12 +1025,15 @@ class MessagesViewModel @Inject constructor(
             if (!com.hisa.data.nostr.ExternalSignerManager.isLauncherRegistered()) {
                 throw IllegalStateException("External signer launcher not registered")
             }
+            val authCtx = resolveAuthContext(refreshOnce = false)
             messageRepository.prepareGiftWrappedMessageExternal(
                 senderSigningPubkey = senderSigningPubkey,
                 recipientPubkey = recipientPubkey,
                 content = innerContent,
                 kind = innerKind,
                 tags = innerTags,
+                externalSignerPubkey = authCtx.signerPubkey,
+                externalSignerPackage = authCtx.signerPackage,
                 externalEncryptor = { plaintext, peerPubkey ->
                     com.hisa.data.nostr.ExternalSignerManager.nip44Encrypt(plaintext, peerPubkey)
                 }

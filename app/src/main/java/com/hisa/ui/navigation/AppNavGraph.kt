@@ -36,19 +36,18 @@ import com.hisa.viewmodel.AuthViewModel
 import com.hisa.viewmodel.MessagesViewModel
 import com.hisa.data.nostr.NostrClient
 import com.hisa.data.nostr.SubscriptionManager
-import com.hisa.ui.screens.channels.ChannelChatScreen
 import com.hisa.ui.screens.shop.ShopScreen
 import com.hisa.ui.screens.donate.DonateScreen
-import com.hisa.ui.screens.lists.ChannelDetailScreen
+import com.hisa.ui.screens.lists.StallDetailScreen
 import com.hisa.ui.screens.faq.FAQScreen
+import com.hisa.util.hexToByteArrayOrNull
 
 object Routes {
     const val LOGIN = "login"
     const val SIGNUP = "signup"
     const val MAIN = "main?showDialog={showDialog}"
     const val PROFILE = "profile/{pubkey}"
-    const val CHANNEL_DETAIL = "channelDetail"
-    const val CHANNEL_CHAT = "channelChat"
+    const val STALL_DETAIL = "stallDetail"
     const val SETTINGS = "settings"
     const val CONVERSATION = "conversation/{conversationId}"
     const val DM = "dm/{pubkey}"
@@ -80,14 +79,6 @@ private fun SettingsScreenWrapper(
             didLogout = false
         }
     }
-    val relayList by authViewModel.relays.collectAsState()
-    val currentPubKey by authViewModel.pubKey.collectAsState(initial = "")
-    androidx.compose.runtime.LaunchedEffect(currentPubKey, isDarkTheme) {
-        android.util.Log.i("AppNavGraph", "Opening Settings: pubKey=$currentPubKey isDarkTheme=$isDarkTheme")
-    }
-    androidx.compose.runtime.LaunchedEffect(Unit) {
-        android.util.Log.i("AppNavGraph", "SettingsScreenWrapper authViewModel hash=${authViewModel.hashCode()}")
-    }
     SettingsScreen(
         authViewModel = authViewModel,
         onLogout = {
@@ -113,10 +104,6 @@ fun AppNavGraph(
     isDarkTheme: Boolean = false,
     onToggleTheme: () -> Unit = {}
 ) {
-    // Ensure theme changes trigger recomposition across all screens
-    LaunchedEffect(isDarkTheme) {
-        android.util.Log.i("AppNavGraph", "Theme changed in AppNavGraph: isDarkTheme=$isDarkTheme, authViewModelHash=${authViewModel.hashCode()}")
-    }
     val initState by authViewModel.initState.collectAsState()
     val pubKeyState = authViewModel.pubKey.collectAsState(initial = "")
     val pubKey = pubKeyState.value ?: ""
@@ -296,28 +283,16 @@ fun AppNavGraph(
         composable(Routes.UPLOAD) { backStackEntry ->
             // Hilt-injected view models
             val uploadViewModel: com.hisa.viewmodel.UploadViewModel = androidx.hilt.navigation.compose.hiltViewModel()
-            val authVm: com.hisa.viewmodel.AuthViewModel = androidx.hilt.navigation.compose.hiltViewModel()
             com.hisa.ui.screens.upload.UploadScreen(
                 uploadViewModel = uploadViewModel,
                 navController = navController,
                 onUploadComplete = { url ->
-                    android.util.Log.i("AppNavGraph", "UPLOAD onUploadComplete called with url=$url")
-                    // Put URL into previous back stack entry's savedStateHandle so caller can read it.
-                    // Also write into the current back stack entry as a robust fallback because
-                    // some screens observe the current entry's SavedStateHandle instead of the previous one.
-                    val previousEntry = navController.previousBackStackEntry
-                    val currentEntry = navController.currentBackStackEntry
-                    android.util.Log.i("AppNavGraph", "previousBackStackEntry route=${previousEntry?.destination?.route} currentRoute=${currentEntry?.destination?.route}")
                     try {
-                        previousEntry?.savedStateHandle?.set("uploaded_media_url", url)
-                        currentEntry?.savedStateHandle?.set("uploaded_media_url", url)
-                        android.util.Log.i("AppNavGraph", "Set uploaded_media_url on target savedStateHandle(s)")
+                        navController.deliverUploadResult(url)
                     } catch (e: Exception) {
-                        android.util.Log.w("AppNavGraph", "Failed to set uploaded_media_url on savedStateHandle: ${e.message}")
+                        android.util.Log.w("AppNavGraph", "Failed to deliver upload result: ${e.message}")
                     }
-                    // Safety: ensure Upload screen is popped so the caller can observe the savedStateHandle
                     try {
-                        android.util.Log.i("AppNavGraph", "Attempting popBackStack from AppNavGraph")
                         navController.popBackStack()
                     } catch (e: Exception) {
                         android.util.Log.w("AppNavGraph", "popBackStack failed: ${e.message}")
@@ -348,121 +323,32 @@ fun AppNavGraph(
             )
         }
         composable(Routes.CREATE_CHANNEL) {
-            val vm: com.hisa.ui.screens.create.CreateChannelViewModel = androidx.hilt.navigation.compose.hiltViewModel()
-            // Get ChannelsViewModel for refresh
-            val pkBytesForChannels: ByteArray? = if (privateKey.isNotBlank()) {
-                try { privateKey.chunked(2).map { it.toInt(16).toByte() }.toByteArray() } catch (e: Exception) { null }
-            } else null
-            val channelsViewModel: com.hisa.viewmodel.ChannelsViewModel = androidx.lifecycle.viewmodel.compose.viewModel(
-                factory = com.hisa.viewmodel.ChannelsViewModelFactory(
-                    nostrClient = nostrClient,
-                    subscriptionManager = subscriptionManager,
-                    privateKey = pkBytesForChannels,
-                    pubkey = pubKey
-                )
-            )
-                vm.userPubkey = pubKey
-            com.hisa.ui.screens.create.CreateChannelScreen(
-                onCreateChannel = { name, about, picture, relays, categories, onSuccess ->
-                    vm.createChannel(
-                        name = name,
-                        about = about,
-                        picture = picture,
-                        relays = relays,
-                        categories = categories,
-                        privateKey = privateKey,
-                        onSuccess = { newChannelId ->
-                            onSuccess(newChannelId)
-                        }
-                    )
-                },
-                onNavigateToChannel = { channelId ->
-                     if (channelId.isNotBlank()) {
-                        // Find channel and navigate to chat
-                        val channel = channelsViewModel.channels.value.find { it.id == channelId }
-                        if (channel != null) {
-                            navController.currentBackStackEntry?.savedStateHandle?.apply {
-                                set("channelId", channel.id)
-                                set("channelName", channel.name)
-                                set("channelPicture", channel.picture)
-                            }
-                            navController.navigate(Routes.CHANNEL_CHAT)
-                        } else {
-                            navController.popBackStack()
-                        }
-                    } else {
-                        navController.popBackStack()
+            // Reuse create channel route to create stalls (shops) using CreateServiceScreen -> createStall
+            val vm: com.hisa.ui.screens.create.CreateServiceViewModel = androidx.hilt.navigation.compose.hiltViewModel()
+            com.hisa.ui.screens.create.CreateServiceScreen(
+                onCreateService = { title, summary, description, tags, onSuccess ->
+                    vm.createStall(title, summary, description, tags, if (privateKey.isBlank()) null else privateKey, pubKey) {
+                        onSuccess()
                     }
                 },
-                onRefreshChannels = { channelsViewModel.refreshChannels() },
+                onNavigateBack = { navController.popBackStack() },
                 navController = navController
-             )
+            )
         }
-        composable(Routes.CHANNEL_CHAT) { backStackEntry ->
-            val channelId = backStackEntry.savedStateHandle.get<String>("channelId")
-            val channelName = backStackEntry.savedStateHandle.get<String>("channelName")
-            val channelPicture = backStackEntry.savedStateHandle.get<String>("channelPicture")
-            
-            android.util.Log.d("AppNavGraph", "Composing CHANNEL_CHAT route with id: $channelId, name: $channelName")
-            
-            if (channelId != null && channelName != null) {
-                val userPrivateKey by authViewModel.privateKey.collectAsState()
-                val userPubkey by authViewModel.pubKey.collectAsState()
-
-                // Store in local variables for smart casting
-                val currentPrivateKey = userPrivateKey?.toString()
-                val currentPubkey = userPubkey?.toString()
-
-                // Allow composing ChannelChatScreen if we have at least the current pubkey.
-                // If there's no local private key (external signer), pass an empty ByteArray so
-                // the screen composes. Sending should be guarded in the ViewModel/UI.
-                if (currentPubkey != null) {
-                    val privateKeyBytes: ByteArray? = if (!currentPrivateKey.isNullOrBlank()) {
-                        // Convert hex string to ByteArray
-                        try {
-                            currentPrivateKey.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
-                        } catch (e: Exception) {
-                            null
-                        }
-                    } else {
-                        null
-                    }
-
-                    val externalPub = authViewModel.getExternalSignerPubkey()
-                    val externalPackage = authViewModel.getExternalSignerPackage()
-
-                    ChannelChatScreen(
-                        channelId = channelId,
-                        channelName = channelName,
-                        channelPicture = channelPicture ?: "",
-                        userPubkey = currentPubkey,
-                        privateKey = privateKeyBytes,
-                        nostrClient = nostrClient,
-                        subscriptionManager = subscriptionManager,
-                        navController = navController,
-                        externalSignerPubkey = externalPub,
-                        externalSignerPackage = externalPackage
-                    )
-                }
-            }
-        }
-
-        composable(Routes.CHANNEL_DETAIL) { backStackEntry ->
-            // we store the kind-40 creation event id as "channelEventId" in SavedStateHandle
-            val channelEventId = backStackEntry.savedStateHandle.get<String>("channelEventId")
-            if (!channelEventId.isNullOrBlank()) {
-                val pkBytesForDetail: ByteArray? = if (privateKey.isNotBlank()) {
-                    try { privateKey.chunked(2).map { it.toInt(16).toByte() }.toByteArray() } catch (e: Exception) { null }
-                } else null
-                ChannelDetailScreen(
-                    channelId = channelEventId,
+        composable(Routes.STALL_DETAIL) { backStackEntry ->
+            // we store the stall event id as "channelEventId" in SavedStateHandle for compatibility
+            val stallEventId = backStackEntry.savedStateHandle.get<String>("channelEventId")
+            if (!stallEventId.isNullOrBlank()) {
+                val pkBytesForDetail = hexToByteArrayOrNull(privateKey, 32)
+                StallDetailScreen(
+                    stallId = stallEventId,
                     nostrClient = nostrClient,
                     subscriptionManager = subscriptionManager,
                     privateKey = pkBytesForDetail,
                     userPubkey = pubKey
                 )
             } else {
-                Text("Channel not found")
+                Text("Stall not found")
             }
         }
         composable(Routes.DM) { backStackEntry ->

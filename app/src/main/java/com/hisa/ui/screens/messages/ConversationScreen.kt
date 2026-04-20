@@ -34,6 +34,11 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
 import com.hisa.data.repository.ConversationRepository
+import com.hisa.ui.navigation.NAV_RESULT_UPLOADED_MEDIA_URL
+import com.hisa.ui.navigation.NAV_STATE_COMPOSE_DRAFT
+import com.hisa.ui.navigation.Routes
+import com.hisa.ui.navigation.consumeUploadedMediaUrls
+import com.hisa.ui.navigation.prepareUploadResult
 import com.hisa.ui.util.LocalProfileMetaUtil
 import com.hisa.viewmodel.MessagesViewModel
 import timber.log.Timber
@@ -321,9 +326,9 @@ fun ConversationScreen(
                         .border(BorderStroke(1.dp, MaterialTheme.colorScheme.onSurface.copy(alpha = 0.08f)), androidx.compose.foundation.shape.CircleShape)
                         .background(MaterialTheme.colorScheme.surface)
                         .clickable {
-                            // Save current draft so it can be restored after returning from Upload screen
-                            navController?.currentBackStackEntry?.savedStateHandle?.set("compose_draft", newMessage)
-                            navController?.navigate(com.hisa.ui.navigation.Routes.UPLOAD)
+                            navController?.currentBackStackEntry?.savedStateHandle?.set(NAV_STATE_COMPOSE_DRAFT, newMessage)
+                            navController.prepareUploadResult("direct_message_attachment")
+                            navController?.navigate(Routes.UPLOAD)
                         },
                     contentAlignment = Alignment.Center
                 ) {
@@ -357,26 +362,21 @@ fun ConversationScreen(
         }
     }
 
-    // Listen for uploaded media URL from UploadScreen, restore draft and append URLs to avoid replacing typed text
-    LaunchedEffect(navController) {
-        val saved = navController?.currentBackStackEntry?.savedStateHandle?.getLiveData<String>("uploaded_media_url")
-        saved?.observeForever { url ->
-            if (!url.isNullOrBlank()) {
-                // restore draft saved before navigating to Upload only if current message is blank
-                val draft = navController.currentBackStackEntry?.savedStateHandle?.get<String>("compose_draft") ?: ""
+    val uploadHandle = navController?.currentBackStackEntry?.savedStateHandle
+    val uploadedMediaState = uploadHandle
+        ?.getStateFlow<String?>(NAV_RESULT_UPLOADED_MEDIA_URL, null)
+        ?.collectAsState()
+        ?: remember { mutableStateOf<String?>(null) }
+    val uploadedMedia = uploadedMediaState.value
 
-                // support multiple URLs separated by newline
-                val parts = url.split('\n').map { it.trim() }.filter { it.isNotEmpty() }
-                if (parts.isNotEmpty()) {
-                    val combined = parts.joinToString(" ")
-                    val base = if (newMessage.isBlank()) draft else newMessage
-                    newMessage = if (base.isBlank()) combined else base + " " + combined
-                }
+    LaunchedEffect(uploadedMedia, uploadHandle) {
+        val parts = uploadHandle?.consumeUploadedMediaUrls("direct_message_attachment").orEmpty()
+        if (parts.isEmpty()) return@LaunchedEffect
 
-                // clear saved keys to avoid re-triggering
-                navController.currentBackStackEntry?.savedStateHandle?.remove<String>("uploaded_media_url")
-                navController.currentBackStackEntry?.savedStateHandle?.remove<String>("compose_draft")
-            }
-        }
+        val draft = uploadHandle?.get<String>(NAV_STATE_COMPOSE_DRAFT).orEmpty()
+        val combined = parts.joinToString(" ")
+        val base = if (newMessage.isBlank()) draft else newMessage
+        newMessage = if (base.isBlank()) combined else "$base $combined"
+        uploadHandle?.remove<String>(NAV_STATE_COMPOSE_DRAFT)
     }
 }

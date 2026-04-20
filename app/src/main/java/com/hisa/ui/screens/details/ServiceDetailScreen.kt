@@ -73,6 +73,7 @@ import androidx.navigation.NavController
 import com.hisa.ui.util.formatTimeAgo
 import com.hisa.viewmodel.ServiceDetailViewModel
 import com.hisa.ui.util.LocalProfileMetaUtil
+import com.hisa.util.JsonFormatter
 import com.hisa.data.model.Metadata
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.material.icons.filled.Person
@@ -82,6 +83,7 @@ import androidx.compose.ui.unit.sp
 import androidx.navigation.compose.rememberNavController
 import coil.compose.rememberAsyncImagePainter
 import com.hisa.ui.navigation.Routes
+import androidx.hilt.navigation.compose.hiltViewModel
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class,
     ExperimentalFoundationApi::class, ExperimentalFoundationApi::class
@@ -92,7 +94,7 @@ fun ServiceDetailScreen(
     pubkey: String,
     onBack: () -> Unit,
     navController: NavController,
-    viewModel: ServiceDetailViewModel = viewModel()
+    viewModel: ServiceDetailViewModel = hiltViewModel()
 ) {
     val context = LocalContext.current
     val service by viewModel.service.collectAsState()
@@ -103,7 +105,7 @@ fun ServiceDetailScreen(
     val padding = PaddingValues(16.dp)
 
     LaunchedEffect(eventId) {
-        viewModel.loadService(eventId)
+        viewModel.loadService(eventId, pubkey)
     }
 
     Scaffold(
@@ -152,7 +154,7 @@ fun ServiceDetailScreen(
                                 .heightIn(max = 400.dp)
                         ) {
                             Text(
-                                text = rawEvent ?: "No raw event data available",
+                                text = JsonFormatter.prettyPrint(rawEvent) ?: "No raw event data available",
                                 style = MaterialTheme.typography.bodyMedium,
                                 fontFamily = FontFamily.Monospace
                             )

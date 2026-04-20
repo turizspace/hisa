@@ -23,7 +23,7 @@ import androidx.navigation.NavController
 import com.hisa.data.repository.ServiceRepository
 import com.hisa.ui.components.CompactServiceCard
 import com.hisa.util.cleanPubkeyFormat
-import org.bitcoinj.core.Bech32
+import com.hisa.util.normalizeNostrPubkey
 
 /**
  * Simple placeholder screen for the user's Shop. Add UI and actions as needed.
@@ -34,41 +34,7 @@ fun ShopScreen(
     navController: NavController,
     userPubkey: String
 ) {
-    // Helper: convert bech32 npub -> hex (32 bytes hex)
-    fun npubToHex(npub: String): String? {
-        return try {
-            val bech = Bech32.decode(npub)
-            if (bech.hrp != "npub") return null
-            val data = bech.data
-            var acc = 0
-            var bits = 0
-            val out = mutableListOf<Byte>()
-            for (v in data) {
-                val value = v.toInt() and 0xff
-                acc = (acc shl 5) or value
-                bits += 5
-                while (bits >= 8) {
-                    bits -= 8
-                    out.add(((acc shr bits) and 0xff).toByte())
-                }
-            }
-            if (bits >= 5 || ((acc shl (8 - bits)) and 0xff) != 0) return null
-            out.joinToString("") { "%02x".format(it) }
-        } catch (e: Exception) {
-            null
-        }
-    }
-
-    // Normalize a pubkey: accept hex, compressed/uncompressed, or npub bech32
-    fun normalizePubkey(p: String): String {
-        val trimmed = p.trim()
-        return when {
-            trimmed.startsWith("npub", true) -> npubToHex(trimmed) ?: cleanPubkeyFormat(trimmed)
-            else -> cleanPubkeyFormat(trimmed)
-        }
-    }
-
-    val ownerHex = remember(userPubkey) { normalizePubkey(userPubkey) }
+    val ownerHex = remember(userPubkey) { normalizeNostrPubkey(userPubkey) ?: cleanPubkeyFormat(userPubkey) }
 
     val shopViewModel: ShopViewModel = hiltViewModel()
     val authViewModel: AuthViewModel = hiltViewModel()

@@ -29,13 +29,23 @@ class UploadViewModel @Inject constructor(
         file: File,
         contentType: String,
         pubkeyHex: String,
-        privKey: ByteArray,
+        privKey: ByteArray?,
         endpoint: String = "upload",
-    insertUrlCallback: ((String) -> Unit)? = null
+        externalSignerPubkey: String? = null,
+        externalSignerPackage: String? = null,
+        insertUrlCallback: ((String) -> Unit)? = null
     ) {
         viewModelScope.launch {
             _state.value = UploadState.Uploading(0, file.length())
-            val result = blossomClient.uploadFile(file, contentType, pubkeyHex, privKey, endpoint) { sent, total ->
+            val result = blossomClient.uploadFile(
+                file = file,
+                contentType = contentType,
+                pubkeyHex = pubkeyHex,
+                privKey = privKey,
+                endpoint = endpoint,
+                externalSignerPubkey = externalSignerPubkey,
+                externalSignerPackage = externalSignerPackage
+            ) { sent, total ->
                 _state.value = UploadState.Uploading(sent, total)
             }
             if (result.ok) {

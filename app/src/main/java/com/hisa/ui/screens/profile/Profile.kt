@@ -3,6 +3,7 @@ package com.hisa.ui.screens.profile
 
 import android.content.Intent
 import android.net.Uri
+import android.util.Log
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Column
@@ -23,7 +24,6 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.unit.dp
-import androidx.lifecycle.viewmodel.compose.viewModel
 import com.hisa.viewmodel.ProfileViewModel
 import coil.compose.rememberAsyncImagePainter
 import kotlinx.coroutines.delay
@@ -60,6 +60,9 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.zIndex
 import androidx.core.net.toUri
 import androidx.navigation.NavHostController
+import com.hisa.ui.navigation.NAV_RESULT_UPLOADED_MEDIA_URL
+import com.hisa.ui.navigation.consumeUploadedMediaResult
+import com.hisa.ui.navigation.prepareUploadResult
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -77,10 +80,6 @@ fun ProfileScreen(
     val allMetadata by profileViewModel.allMetadata.collectAsState()
     val saveStatus by profileViewModel.saveStatus.collectAsState()
     val latestMeta = allMetadata.lastOrNull()
-    LaunchedEffect(allMetadata) {
-        android.util.Log.d("ProfileScreen", "allMetadata updated: $allMetadata")
-        android.util.Log.d("ProfileScreen", "latestMeta: $latestMeta")
-    }
     var showEdit by remember { mutableStateOf(false) }
     var editName by remember { mutableStateOf("") }
     var editAbout by remember { mutableStateOf("") }
@@ -107,35 +106,27 @@ fun ProfileScreen(
         }
     }
 
-    // Observe uploaded media URL and apply to the correct edit field (picture/banner) based on an
-    // "upload_target" entry that we set before navigating to the Upload screen.
-    LaunchedEffect(navController) {
-        val saved = navController?.currentBackStackEntry?.savedStateHandle?.getLiveData<String>("uploaded_media_url")
-        saved?.observeForever { url ->
-            if (!url.isNullOrBlank()) {
-                val parts = url.split('\n').map { it.trim() }.filter { it.isNotEmpty() }
-                if (parts.isNotEmpty()) {
-                    val target = navController.currentBackStackEntry?.savedStateHandle?.get<String>("upload_target") ?: "picture"
-                    val first = parts[0]
-                    when (target) {
-                        "banner" -> editBanner = first
-                        "picture" -> editPicture = first
-                        "lud16" -> editLud16 = first
-                        else -> editPicture = first
-                    }
-                    // If there are extra URLs, append them to the About field so user can see them and decide what to do
-                    if (parts.size > 1) {
-                        val extras = parts.drop(1).joinToString("\n")
-                        editAbout = if (editAbout.isBlank()) extras else editAbout + "\n" + extras
-                    }
-                }
-                // Ensure the edit dialog is open so user can continue editing after upload
-                showEdit = true
-                // Clear both keys to avoid re-triggering
-                navController.currentBackStackEntry?.savedStateHandle?.remove<String>("uploaded_media_url")
-                navController.currentBackStackEntry?.savedStateHandle?.remove<String>("upload_target")
-            }
+    val uploadHandle = navController?.currentBackStackEntry?.savedStateHandle
+    val uploadedMediaState = uploadHandle
+        ?.getStateFlow<String?>(NAV_RESULT_UPLOADED_MEDIA_URL, null)
+        ?.collectAsState()
+        ?: remember { mutableStateOf<String?>(null) }
+    val uploadedMedia = uploadedMediaState.value
+
+    LaunchedEffect(uploadedMedia, uploadHandle) {
+        val uploadResult = uploadHandle?.consumeUploadedMediaResult() ?: return@LaunchedEffect
+        val first = uploadResult.urls.firstOrNull() ?: return@LaunchedEffect
+        when (uploadResult.target) {
+            "banner" -> editBanner = first
+            "picture" -> editPicture = first
+            "lud16" -> editLud16 = first
+            else -> editPicture = first
         }
+        if (uploadResult.urls.size > 1) {
+            val extras = uploadResult.urls.drop(1).joinToString("\n")
+            editAbout = if (editAbout.isBlank()) extras else editAbout + "\n" + extras
+        }
+        showEdit = true
     }
     // Refresh trigger
     var isRefreshing by remember { mutableStateOf(false) }
@@ -306,8 +297,7 @@ fun ProfileScreen(
                                                 context.startActivity(Intent(Intent.ACTION_VIEW, uri))
                                             }
                                         } catch (e: Exception) {
-                                            e.printStackTrace()
-                                            // Optionally show a Toast or Snackbar to the user
+                                            Log.w("ProfileScreen", "Failed to open website link", e)
                                         }
                                     },
                                     label = {
@@ -341,7 +331,7 @@ fun ProfileScreen(
                 onClick = {
                     isRefreshing = true
                     profileViewModel.clearSaveStatus()
-                    profileViewModel::class.java.getDeclaredMethod("fetchMetadata").apply { isAccessible = true }.invoke(profileViewModel)
+                    profileViewModel.refreshMetadata()
                 },
                 enabled = !isRefreshing,
                 modifier = Modifier.padding(top = 16.dp, bottom = 8.dp)
@@ -458,8 +448,7 @@ fun ProfileScreen(
                                     .border(BorderStroke(1.dp, MaterialTheme.colorScheme.onSurface.copy(alpha = 0.08f)), CircleShape)
                                     .background(MaterialTheme.colorScheme.surface)
                                     .clickable {
-                                        // mark target so returned URL is applied to picture
-                                        navController?.currentBackStackEntry?.savedStateHandle?.set("upload_target", "picture")
+                                        navController.prepareUploadResult("picture")
                                         navController?.navigate(com.hisa.ui.navigation.Routes.UPLOAD)
                                     },
                                 contentAlignment = Alignment.Center
@@ -494,7 +483,7 @@ fun ProfileScreen(
                                     .border(BorderStroke(1.dp, MaterialTheme.colorScheme.onSurface.copy(alpha = 0.08f)), CircleShape)
                                     .background(MaterialTheme.colorScheme.surface)
                                     .clickable {
-                                        navController?.currentBackStackEntry?.savedStateHandle?.set("upload_target", "banner")
+                                        navController.prepareUploadResult("banner")
                                         navController?.navigate(com.hisa.ui.navigation.Routes.UPLOAD)
                                     },
                                 contentAlignment = Alignment.Center

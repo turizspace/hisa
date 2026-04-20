@@ -24,3 +24,19 @@ data class NostrEvent(
         }
     }
 }
+
+fun JSONObject.toNostrEvent(): NostrEvent {
+    val tagsArray = optJSONArray("tags") ?: JSONArray()
+    return NostrEvent(
+        id = getString("id"),
+        pubkey = getString("pubkey"),
+        createdAt = getLong("created_at"),
+        kind = getInt("kind"),
+        tags = (0 until tagsArray.length()).map { i ->
+            val tagArr = tagsArray.getJSONArray(i)
+            (0 until tagArr.length()).map { tagArr.getString(it) }
+        },
+        content = getString("content"),
+        sig = getString("sig")
+    )
+}

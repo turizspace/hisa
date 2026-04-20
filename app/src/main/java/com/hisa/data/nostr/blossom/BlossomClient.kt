@@ -2,11 +2,9 @@ package com.hisa.data.nostr.blossom
 
 import android.util.Base64
 import com.hisa.data.nostr.NostrEventSigner
-import com.hisa.data.repository.MessageRepository
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
-import okhttp3.MultipartBody
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody
@@ -49,10 +47,12 @@ class BlossomClient(
     // Build a BUD-compliant authorization event (kind 24242) and return the raw JSON string
     private suspend fun buildAuthEventJson(
         pubkey: String,
-        privKey: ByteArray,
+        privKey: ByteArray?,
         verb: String,
         fileSha256Hex: String? = null,
-        content: String = ""
+        content: String = "",
+        externalSignerPubkey: String? = null,
+        externalSignerPackage: String? = null
     ): String {
         val kind = 24242
         val tags = mutableListOf<List<String>>()
@@ -63,8 +63,16 @@ class BlossomClient(
         if (!fileSha256Hex.isNullOrBlank()) {
             tags.add(listOf("x", fileSha256Hex))
         }
-    val evt = NostrEventSigner.signEvent(kind, content, tags, pubkey, privKey)
-    return evt.toString()
+        val evt = NostrEventSigner.signEvent(
+            kind = kind,
+            content = content,
+            tags = tags,
+            pubkey = pubkey,
+            privKey = privKey,
+            externalSignerPubkey = externalSignerPubkey,
+            externalSignerPackage = externalSignerPackage
+        )
+        return evt.toString()
     }
 
     // Base64-encode the event JSON and format as Authorization: Nostr <base64>
@@ -80,14 +88,29 @@ class BlossomClient(
         file: File,
         contentType: String,
         pubkeyHex: String,
-        privKey: ByteArray,
+        privKey: ByteArray?,
         endpoint: String = "upload",
+        externalSignerPubkey: String? = null,
+        externalSignerPackage: String? = null,
         onProgress: ((bytesSent: Long, totalBytes: Long) -> Unit)? = null
     ): UploadResult = withContext(Dispatchers.IO) {
     val totalBytes = file.length()
     val sha = sha256HexFromFile(file)
-    val authEventJson = if (pubkeyHex.isNotBlank() && privKey.isNotEmpty()) buildAuthEventJson(pubkeyHex, privKey, verb = "upload", fileSha256Hex = sha, content = "Upload ${file.name}") else ""
-    val authHeaderValue = if (authEventJson.isNotBlank()) buildAuthorizationHeaderValue(authEventJson) else ""
+    val hasLocalKey = privKey?.isNotEmpty() == true
+    val hasExternalSigner = !externalSignerPubkey.isNullOrBlank() && !externalSignerPackage.isNullOrBlank()
+    if (pubkeyHex.isBlank() || (!hasLocalKey && !hasExternalSigner)) {
+        return@withContext UploadResult(false, 0, "Missing signing credentials for authenticated upload")
+    }
+    val authEventJson = buildAuthEventJson(
+        pubkey = pubkeyHex,
+        privKey = privKey,
+        verb = "upload",
+        fileSha256Hex = sha,
+        content = "Upload ${file.name}",
+        externalSignerPubkey = externalSignerPubkey,
+        externalSignerPackage = externalSignerPackage
+    )
+    val authHeaderValue = buildAuthorizationHeaderValue(authEventJson)
 
         val url = "$baseUrl/${endpoint.trimStart('/') }"
 

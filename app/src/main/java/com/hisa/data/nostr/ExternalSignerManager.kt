@@ -3,6 +3,7 @@ package com.hisa.data.nostr
 import android.content.ContentResolver
 import android.content.Intent
 import android.net.Uri
+import com.hisa.util.normalizeNostrPubkey
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.withTimeout
 import org.json.JSONObject
@@ -17,6 +18,7 @@ import java.util.concurrent.atomic.AtomicLong
  * - Builds a minimal unsigned event for the signer.
  * - Uses unique extras (no duplicate "request" key).
  * - Validates signer responses before completing pending deferreds.
+ * - Normalizes pubkeys from npub (bech32) to hex format.
  */
 object ExternalSignerManager {
     private val responseLogCounter = AtomicLong(0)
@@ -25,6 +27,42 @@ object ExternalSignerManager {
     private var launcher: ((Intent) -> Unit)? = null
 
     private val pending = ConcurrentHashMap<String, CompletableDeferred<IntentResultLocal>>()
+
+    /**
+     * Convert npub (bech32) to hex public key format.
+     * Returns the hex string if valid, otherwise null.
+     */
+    private fun npubToHex(npub: String): String? {
+        return try {
+            val bech = org.bitcoinj.core.Bech32.decode(npub)
+            if (bech.hrp != "npub") return null
+            val data = bech.data
+            var acc = 0
+            var bits = 0
+            val out = mutableListOf<Byte>()
+            for (v in data) {
+                val value = v.toInt() and 0xff
+                acc = (acc shl 5) or value
+                bits += 5
+                while (bits >= 8) {
+                    bits -= 8
+                    out.add(((acc shr bits) and 0xff).toByte())
+                }
+            }
+            if (bits >= 5 || ((acc shl (8 - bits)) and 0xff) != 0) return null
+            out.joinToString("") { "%02x".format(it) }
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    /**
+     * Normalize a pubkey: convert npub to hex if needed, otherwise return as-is.
+     */
+    private fun normalizePubkey(pubkey: String?): String? {
+        if (pubkey.isNullOrBlank()) return null
+        return normalizeNostrPubkey(pubkey) ?: pubkey.trim()
+    }
 
     data class IntentResultLocal(
         val id: String? = null,
@@ -69,18 +107,38 @@ object ExternalSignerManager {
             }
 
             val id = intent.getStringExtra("id")
-            val result = intent.getStringExtra("result")
+            var result = intent.getStringExtra("result")
             // Some signers use "event", some "event_json" or EXTRA_TEXT
             val event = intent.getStringExtra("event") ?: intent.getStringExtra("event_json") ?: intent.getStringExtra(Intent.EXTRA_TEXT)
             val pkg = intent.getStringExtra("package")
 
-            if (!id.isNullOrBlank() && (!event.isNullOrBlank() || !result.isNullOrBlank())) {
-                val count = responseLogCounter.incrementAndGet()
-                if (count % 100L == 0L) {
-                    android.util.Log.d("ExternalSigner", "Signer returned (sampled): id=$id pkg=$pkg eventPresent=${!event.isNullOrBlank()} resultPresent=${!result.isNullOrBlank()}")
+            android.util.Log.d("ExternalSigner", "newResponse RECEIVED: id=$id resultPresent=${!result.isNullOrBlank()} resultLen=${result?.length ?: 0} eventPresent=${!event.isNullOrBlank()} eventLen=${event?.length ?: 0} pkg=$pkg")
+
+            // Normalize result if it's a pubkey (might be in npub format from signer)
+            // Check if result looks like a pubkey (64 hex chars or npub format)
+            if (!result.isNullOrBlank()) {
+                val trimmedResult = result.trim()
+                if (trimmedResult.startsWith("npub", ignoreCase = true)) {
+                    val normalized = npubToHex(trimmedResult)
+                    if (normalized != null) {
+                        android.util.Log.d("ExternalSigner", "newResponse NORMALIZE: id=$id result_was_npub '${trimmedResult.take(12)}...' → '${normalized.take(12)}...'")
+                        result = normalized
+                    }
+                } else if (trimmedResult.matches(Regex("[0-9a-f]{64}", RegexOption.IGNORE_CASE))) {
+                    android.util.Log.d("ExternalSigner", "newResponse PUBKEY: id=$id result_is_hex_pubkey '${trimmedResult.take(12)}...'")
                 }
+            }
+
+            if (!id.isNullOrBlank() && (!event.isNullOrBlank() || !result.isNullOrBlank())) {
+                android.util.Log.d("ExternalSigner", "newResponse COMPLETE: id=$id with result/event")
                 val res = IntentResultLocal(id = id, result = result, event = event, packageName = pkg)
-                pending.remove(id)?.complete(res)
+                val pending_deferred = pending.remove(id)
+                if (pending_deferred != null) {
+                    android.util.Log.d("ExternalSigner", "newResponse COMPLETING_DEFERRED: id=$id")
+                    pending_deferred.complete(res)
+                } else {
+                    android.util.Log.w("ExternalSigner", "newResponse NO_PENDING_DEFERRED: id=$id (might be timeout or duplicate response)")
+                }
             } else {
                 // If signer returned something but without id, try to complete any pending deferred with raw result
                 if (!result.isNullOrBlank() || !event.isNullOrBlank()) {
@@ -105,8 +163,14 @@ object ExternalSignerManager {
     }
 
     suspend fun ensureConfigured(pubkeyHex: String, packageName: String, contentResolver: ContentResolver?) {
-        externalPubKey = pubkeyHex
+        // Normalize pubkey in case it's in npub format
+        val normalizedPubkey = normalizePubkey(pubkeyHex) ?: pubkeyHex
+        externalPubKey = normalizedPubkey
         externalPackage = packageName
+        
+        if (normalizedPubkey != pubkeyHex && pubkeyHex.startsWith("npub", ignoreCase = true)) {
+            android.util.Log.d("ExternalSigner", "Normalized signer pubkey from npub to hex: ${pubkeyHex.take(12)}...→${normalizedPubkey.take(12)}...")
+        }
     }
 
     fun getConfiguredPubkey(): String? = externalPubKey
@@ -130,31 +194,6 @@ object ExternalSignerManager {
             obj.toString()
         } catch (_: Exception) {
             eventJsonRaw
-        }
-
-        // Helper: convert npub -> hex if caller sent npub in pubkey
-        fun npubToHex(npub: String): String? {
-            return try {
-                val bech = org.bitcoinj.core.Bech32.decode(npub)
-                if (bech.hrp != "npub") return null
-                val data = bech.data
-                var acc = 0
-                var bits = 0
-                val out = mutableListOf<Byte>()
-                for (v in data) {
-                    val value = v.toInt() and 0xff
-                    acc = (acc shl 5) or value
-                    bits += 5
-                    while (bits >= 8) {
-                        bits -= 8
-                        out.add(((acc shr bits) and 0xff).toByte())
-                    }
-                }
-                if (bits >= 5 || ((acc shl (8 - bits)) and 0xff) != 0) return null
-                out.joinToString("") { "%02x".format(it) }
-            } catch (e: Exception) {
-                null
-            }
         }
 
         // Build a minimal unsigned event for the signer (avoid sending any sig)
@@ -208,7 +247,6 @@ object ExternalSignerManager {
         }
 
         android.util.Log.d("ExternalSigner", "Launching extras-only intent: pkg=$pkg callId=$callId eventId=$eventId")
-        android.util.Log.d("ExternalSigner", "Envelope JSON: $envelopeJson")
         try { l(extrasOnlyIntent) } catch (e: Exception) {
             android.util.Log.w("ExternalSigner", "Extras-only launch failed: ${e.message}")
         }
@@ -270,105 +308,89 @@ object ExternalSignerManager {
         val pub = externalPubKey ?: throw IllegalStateException("External signer pubkey not configured")
         val l = launcher ?: throw IllegalStateException("No ActivityResult launcher registered")
 
+        // Normalize incoming pubkey in case it's in npub format
+        val normalizedSenderPubkey = normalizePubkey(senderPubkey) ?: senderPubkey
+        
+        android.util.Log.d("ExternalSigner", "nip44Decrypt START: callId=<pending> currentUser=${pub.take(12)} senderPubkey=${normalizedSenderPubkey.take(12)} ciphertextLen=${ciphertext.length} timeoutMs=$timeoutMs")
+
         val callId = java.util.UUID.randomUUID().toString().replace("-", "").take(32)
         val deferred = CompletableDeferred<IntentResultLocal>()
         pending[callId] = deferred
 
-        // Build a minimal envelope similar to signEvent to pass in extras
-        val envelopeJson = JSONObject().apply {
-            put("type", "nip44_decrypt")
-            put("id", callId)
-            put("request_id", callId)
-            put("current_user", pub)
-            put("ciphertext", ciphertext)
-            put("pubkey", senderPubkey)
-        }.toString()
+        val start = System.currentTimeMillis()
 
-        // Extras-only intent: avoid embedding ciphertext in the URI
+        // --- 1st attempt: extras-only intent (scheme-only data, safer encoding) ---
         val extrasOnlyIntent = Intent(Intent.ACTION_VIEW).apply {
-            data = Uri.parse("nostrsigner:")
+            data = Uri.parse("nostrsigner:")  // scheme-only URI, no content in data
             `package` = pkg
             putExtra("type", "nip44_decrypt")
             putExtra("id", callId)
             putExtra("current_user", pub)
-            putExtra("pubkey", senderPubkey)
+            putExtra("pubkey", normalizedSenderPubkey)
+            // Include ciphertext in extras to avoid percent-encoding issues
             putExtra("ciphertext", ciphertext)
-            putExtra("nostr_request", envelopeJson)
-            putExtra(Intent.EXTRA_TEXT, envelopeJson)
         }
 
-        // Log launch info (sampled) to aid debugging of signer interactions without spamming logs
         try {
-            val cnt = responseLogCounter.incrementAndGet()
-            if (cnt % 100L == 0L) {
-                android.util.Log.d("ExternalSigner", "nip44Decrypt launch: pkg=$pkg callId=$callId senderPubkey=${senderPubkey.take(12)} ciphertextLen=${ciphertext.length}")
-                android.util.Log.d("ExternalSigner", "nip44Decrypt envelope: ${envelopeJson.take(400)}")
-            }
+            android.util.Log.d("ExternalSigner", "nip44Decrypt LAUNCH(extras-only): callId=$callId ciphertextLen=${ciphertext.length} senderPubkey=${normalizedSenderPubkey.take(12)}")
             l(extrasOnlyIntent)
         } catch (e: Exception) {
-            android.util.Log.w("ExternalSigner", "Extras-only launch failed: ${e.message}")
+            android.util.Log.w("ExternalSigner", "nip44Decrypt extras-only launch failed: callId=$callId error=${e.message}")
         }
 
-        // Grace period waiting for extras-only response
+        // Wait briefly for response from extras-only attempt
         val extrasGraceMs = minOf(10_000L, timeoutMs)
-        val start = System.currentTimeMillis()
-        val firstResult = try { withTimeout(extrasGraceMs) { deferred.await() } } catch (_: Throwable) { null }
-        if (firstResult != null) {
-            pending.remove(callId)
-            val cnt = responseLogCounter.incrementAndGet()
-            if (cnt % 100L == 0L) android.util.Log.d("ExternalSigner", "nip44Decrypt received firstResult (sampled): id=$callId pkg=$pkg presentResult=${!firstResult.result.isNullOrBlank()} presentEvent=${!firstResult.event.isNullOrBlank()}")
-            return when {
-                !firstResult.result.isNullOrBlank() -> firstResult.result
-                !firstResult.event.isNullOrBlank() -> firstResult.event
-                else -> throw IllegalStateException("External signer returned no decrypt result")
-            }
+        val firstResult = try { withTimeout(extrasGraceMs) { deferred.await() } } catch (t: Throwable) {
+            android.util.Log.d("ExternalSigner", "nip44Decrypt extras-only timeout after ${System.currentTimeMillis() - start}ms: callId=$callId")
+            null
+        }
+        if (firstResult != null && !firstResult.result.isNullOrBlank()) {
+            val elapsed = System.currentTimeMillis() - start
+            android.util.Log.d("ExternalSigner", "nip44Decrypt SUCCESS(extras-only): callId=$callId elapsed=${elapsed}ms resultLen=${firstResult.result!!.length}")
+            return firstResult.result!!
+        }
+        if (firstResult != null && firstResult.result.isNullOrBlank()) {
+            android.util.Log.w("ExternalSigner", "nip44Decrypt EMPTY_RESULT(extras-only): callId=$callId")
         }
 
-        // ACTION_SEND fallback (application/json body)
-        val sendIntent = Intent(Intent.ACTION_SEND).apply {
-            `package` = pkg
-            type = "application/json"
-            putExtra(Intent.EXTRA_TEXT, envelopeJson)
-        }
-        try { l(sendIntent) } catch (_: Exception) {}
-        val secondResult = try { withTimeout(5_000L) { deferred.await() } } catch (_: Throwable) { null }
-        if (secondResult != null) {
-            pending.remove(callId)
-            val cnt = responseLogCounter.incrementAndGet()
-            if (cnt % 100L == 0L) android.util.Log.d("ExternalSigner", "nip44Decrypt received secondResult (sampled): id=$callId pkg=$pkg presentResult=${!secondResult.result.isNullOrBlank()} presentEvent=${!secondResult.event.isNullOrBlank()}")
-            return when {
-                !secondResult.result.isNullOrBlank() -> secondResult.result
-                !secondResult.event.isNullOrBlank() -> secondResult.event
-                else -> throw IllegalStateException("External signer returned no decrypt result")
-            }
-        }
-
-        // URI fallback: scheme-only with extras
-        val uriIntent = Intent(Intent.ACTION_VIEW, Uri.parse("nostrsigner:")).apply {
+        // --- 2nd attempt: URI-encoded ciphertext (original NIP-55 style) ---
+        val encodedCiphertext = android.net.Uri.encode(ciphertext)
+        val uriIntent = Intent(Intent.ACTION_VIEW).apply {
+            data = Uri.parse("nostrsigner:$encodedCiphertext")
             `package` = pkg
             putExtra("type", "nip44_decrypt")
             putExtra("id", callId)
             putExtra("current_user", pub)
-            putExtra("pubkey", senderPubkey)
-            putExtra("ciphertext", ciphertext)
-            putExtra("nostr_request", envelopeJson)
-            putExtra(Intent.EXTRA_TEXT, envelopeJson)
+            putExtra("pubkey", normalizedSenderPubkey)
         }
-        try { l(uriIntent) } catch (_: Exception) {}
 
-        // Wait remaining time for response
+        try {
+            android.util.Log.d("ExternalSigner", "nip44Decrypt LAUNCH(uri-encoded): callId=$callId ciphertextLen=${ciphertext.length} encodedLen=${encodedCiphertext.length} senderPubkey=${normalizedSenderPubkey.take(12)}")
+            l(uriIntent)
+        } catch (e: Exception) {
+            android.util.Log.w("ExternalSigner", "nip44Decrypt uri-encoded launch failed: callId=$callId error=${e.message}")
+        }
+
+        // Wait for response
         try {
             val elapsed = System.currentTimeMillis() - start
             val remaining = timeoutMs - elapsed
-            if (remaining <= 0) throw java.util.concurrent.TimeoutException("External signer timed out")
-            val res = withTimeout(remaining) { deferred.await() }
-            val cnt = responseLogCounter.incrementAndGet()
-            if (cnt % 100L == 0L) android.util.Log.d("ExternalSigner", "nip44Decrypt received finalResult (sampled): id=$callId pkg=$pkg presentResult=${!res.result.isNullOrBlank()} presentEvent=${!res.event.isNullOrBlank()}")
-            return when {
-                !res.result.isNullOrBlank() -> res.result
-                !res.event.isNullOrBlank() -> res.event
-                else -> throw IllegalStateException("External signer returned no decrypt result")
+            if (remaining <= 0) {
+                android.util.Log.e("ExternalSigner", "nip44Decrypt TIMEOUT: callId=$callId elapsed=${elapsed}ms totalTimeout=$timeoutMs")
+                throw java.util.concurrent.TimeoutException("External signer timed out for nip44_decrypt")
             }
+            val res = withTimeout(remaining) { deferred.await() }
+            val totalElapsed = System.currentTimeMillis() - start
+            android.util.Log.d("ExternalSigner", "nip44Decrypt SUCCESS(uri): callId=$callId elapsed=${totalElapsed}ms resultLen=${res.result?.length ?: 0}")
+            if (res.result.isNullOrBlank()) {
+                android.util.Log.e("ExternalSigner", "nip44Decrypt EMPTY_RESULT(uri): callId=$callId")
+                throw IllegalStateException("External signer returned empty decrypt result")
+            }
+            return res.result!!
+        } catch (t: Throwable) {
+            val elapsed = System.currentTimeMillis() - start
+            android.util.Log.e("ExternalSigner", "nip44Decrypt FAILED: callId=$callId elapsed=${elapsed}ms error=${t.message} class=${t::class.simpleName}", t)
+            throw t
         } finally {
             pending.remove(callId)
         }
@@ -383,83 +405,88 @@ object ExternalSignerManager {
         val pub = externalPubKey ?: throw IllegalStateException("External signer pubkey not configured")
         val l = launcher ?: throw IllegalStateException("No ActivityResult launcher registered")
 
+        // Normalize incoming pubkey in case it's in npub format
+        val normalizedRecipientPubkey = normalizePubkey(recipientPubkey) ?: recipientPubkey
+        
+        android.util.Log.d("ExternalSigner", "nip44Encrypt START: callId=<pending> currentUser=${pub.take(12)} recipientPubkey=${normalizedRecipientPubkey.take(12)} plaintextLen=${plaintext.length} timeoutMs=$timeoutMs")
+
         val callId = java.util.UUID.randomUUID().toString().replace("-", "").take(32)
         val deferred = CompletableDeferred<IntentResultLocal>()
         pending[callId] = deferred
 
-        val envelopeJson = JSONObject().apply {
-            put("type", "nip44_encrypt")
-            put("id", callId)
-            put("request_id", callId)
-            put("current_user", pub)
-            put("plaintext", plaintext)
-            put("pubkey", recipientPubkey)
-        }.toString()
+        val start = System.currentTimeMillis()
 
+        // --- 1st attempt: extras-only intent (safer encoding) ---
         val extrasOnlyIntent = Intent(Intent.ACTION_VIEW).apply {
             data = Uri.parse("nostrsigner:")
             `package` = pkg
             putExtra("type", "nip44_encrypt")
             putExtra("id", callId)
             putExtra("current_user", pub)
-            putExtra("pubkey", recipientPubkey)
+            putExtra("pubkey", normalizedRecipientPubkey)
+            // Include plaintext in extras to avoid percent-encoding issues
             putExtra("plaintext", plaintext)
-            putExtra("nostr_request", envelopeJson)
-            putExtra(Intent.EXTRA_TEXT, envelopeJson)
         }
 
-        try { l(extrasOnlyIntent) } catch (_: Exception) {}
+        try {
+            android.util.Log.d("ExternalSigner", "nip44Encrypt LAUNCH(extras-only): callId=$callId plaintextLen=${plaintext.length} recipientPubkey=${normalizedRecipientPubkey.take(12)}")
+            l(extrasOnlyIntent)
+        } catch (e: Exception) {
+            android.util.Log.w("ExternalSigner", "nip44Encrypt extras-only launch failed: callId=$callId error=${e.message}")
+        }
 
+        // Wait briefly for response from extras-only attempt
         val extrasGraceMs = minOf(10_000L, timeoutMs)
-        val start = System.currentTimeMillis()
-        val firstResult = try { withTimeout(extrasGraceMs) { deferred.await() } } catch (_: Throwable) { null }
-        if (firstResult != null) {
-            pending.remove(callId)
-            return when {
-                !firstResult.result.isNullOrBlank() -> firstResult.result
-                !firstResult.event.isNullOrBlank() -> firstResult.event
-                else -> throw IllegalStateException("External signer returned no encrypt result")
-            }
+        val firstResult = try { withTimeout(extrasGraceMs) { deferred.await() } } catch (t: Throwable) {
+            android.util.Log.d("ExternalSigner", "nip44Encrypt extras-only timeout after ${System.currentTimeMillis() - start}ms: callId=$callId")
+            null
+        }
+        if (firstResult != null && !firstResult.result.isNullOrBlank()) {
+            val elapsed = System.currentTimeMillis() - start
+            android.util.Log.d("ExternalSigner", "nip44Encrypt SUCCESS(extras-only): callId=$callId elapsed=${elapsed}ms resultLen=${firstResult.result!!.length}")
+            return firstResult.result!!
+        }
+        if (firstResult != null && firstResult.result.isNullOrBlank()) {
+            android.util.Log.w("ExternalSigner", "nip44Encrypt EMPTY_RESULT(extras-only): callId=$callId")
         }
 
-        val sendIntent = Intent(Intent.ACTION_SEND).apply {
-            `package` = pkg
-            type = "application/json"
-            putExtra(Intent.EXTRA_TEXT, envelopeJson)
-        }
-        try { l(sendIntent) } catch (_: Exception) {}
-        val secondResult = try { withTimeout(5_000L) { deferred.await() } } catch (_: Throwable) { null }
-        if (secondResult != null) {
-            pending.remove(callId)
-            return when {
-                !secondResult.result.isNullOrBlank() -> secondResult.result
-                !secondResult.event.isNullOrBlank() -> secondResult.event
-                else -> throw IllegalStateException("External signer returned no encrypt result")
-            }
-        }
-
-        val uriIntent = Intent(Intent.ACTION_VIEW, Uri.parse("nostrsigner:")).apply {
+        // --- 2nd attempt: URI-encoded plaintext (traditional NIP-55 style) ---
+        val encodedPlaintext = android.net.Uri.encode(plaintext)
+        val uriIntent = Intent(Intent.ACTION_VIEW).apply {
+            data = Uri.parse("nostrsigner:$encodedPlaintext")
             `package` = pkg
             putExtra("type", "nip44_encrypt")
             putExtra("id", callId)
             putExtra("current_user", pub)
-            putExtra("pubkey", recipientPubkey)
-            putExtra("plaintext", plaintext)
-            putExtra("nostr_request", envelopeJson)
-            putExtra(Intent.EXTRA_TEXT, envelopeJson)
+            putExtra("pubkey", normalizedRecipientPubkey)
         }
-        try { l(uriIntent) } catch (_: Exception) {}
+
+        try {
+            android.util.Log.d("ExternalSigner", "nip44Encrypt LAUNCH(uri-encoded): callId=$callId plaintextLen=${plaintext.length} encodedLen=${encodedPlaintext.length} recipientPubkey=${normalizedRecipientPubkey.take(12)}")
+            l(uriIntent)
+        } catch (e: Exception) {
+            android.util.Log.w("ExternalSigner", "nip44Encrypt uri-encoded launch failed: callId=$callId error=${e.message}")
+        }
 
         try {
             val elapsed = System.currentTimeMillis() - start
             val remaining = timeoutMs - elapsed
-            if (remaining <= 0) throw java.util.concurrent.TimeoutException("External signer timed out")
-            val res = withTimeout(remaining) { deferred.await() }
-            return when {
-                !res.result.isNullOrBlank() -> res.result
-                !res.event.isNullOrBlank() -> res.event
-                else -> throw IllegalStateException("External signer returned no encrypt result")
+            if (remaining <= 0) {
+                android.util.Log.e("ExternalSigner", "nip44Encrypt TIMEOUT: callId=$callId elapsed=${elapsed}ms totalTimeout=$timeoutMs")
+                throw java.util.concurrent.TimeoutException("External signer timed out for nip44_encrypt")
             }
+            val res = withTimeout(remaining) { deferred.await() }
+            val totalElapsed = System.currentTimeMillis() - start
+            android.util.Log.d("ExternalSigner", "nip44Encrypt SUCCESS(uri): callId=$callId elapsed=${totalElapsed}ms resultLen=${res.result?.length ?: 0}")
+            if (res.result.isNullOrBlank()) {
+                android.util.Log.e("ExternalSigner", "nip44Encrypt EMPTY_RESULT(uri): callId=$callId")
+                throw IllegalStateException("External signer returned empty encrypt result")
+            }
+            return res.result!!
+        } catch (t: Throwable) {
+            val elapsed = System.currentTimeMillis() - start
+            android.util.Log.e("ExternalSigner", "nip44Encrypt FAILED: callId=$callId elapsed=${elapsed}ms error=${t.message} class=${t::class.simpleName}", t)
+            throw t
         } finally {
             pending.remove(callId)
         }

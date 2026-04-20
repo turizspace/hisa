@@ -1,7 +1,14 @@
 package com.hisa.data.repository
 
 import com.hisa.data.model.ServiceListing
+import com.hisa.data.nostr.SubscriptionManager
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
+import org.json.JSONArray
 import org.json.JSONObject
+import java.util.concurrent.TimeUnit
 
 object ServiceRepository {
     // Global cache for ServiceListing objects
@@ -37,6 +44,50 @@ object ServiceRepository {
             )
         }
         return null
+    }
+
+    suspend fun fetchServiceByEventId(
+        eventId: String,
+        authorPubkey: String?,
+        subscriptionManager: SubscriptionManager
+    ): ServiceListing? = withContext(Dispatchers.IO) {
+        getCachedService(eventId)?.let { return@withContext it }
+
+        var result: ServiceListing? = null
+        val finished = CompletableDeferred<Unit>()
+        val filter = JSONObject().apply {
+            put("ids", JSONArray().put(eventId))
+            put("kinds", JSONArray().put(30402))
+            authorPubkey?.takeIf { it.isNotBlank() }?.let { put("authors", JSONArray().put(it)) }
+            put("limit", 1)
+        }
+
+        val subId = subscriptionManager.subscribe(
+            filter = filter,
+            onEvent = { event ->
+                if (event.id == eventId) {
+                    parseServiceEvent(event.toJson().toString())?.let { service ->
+                        cacheService(service)
+                        result = service
+                    }
+                }
+            },
+            onEndOfStoredEvents = {
+                if (!finished.isCompleted) {
+                    finished.complete(Unit)
+                }
+            }
+        )
+
+        try {
+            withTimeoutOrNull(TimeUnit.SECONDS.toMillis(5)) {
+                finished.await()
+            }
+        } finally {
+            runCatching { subscriptionManager.unsubscribe(subId) }
+        }
+
+        return@withContext result
     }
     /**
      * Parses a NIP-30402 service event

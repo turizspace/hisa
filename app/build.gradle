@@ -15,6 +15,19 @@ android {
     namespace 'com.hisa'
     compileSdk 35
 
+    def releaseStoreFilePath = System.getenv("CI_ANDROID_KEYSTORE_PATH") ?:
+            project.findProperty("CI_ANDROID_KEYSTORE_PATH") ?:
+            project.findProperty("RELEASE_STORE_FILE")
+    def releaseStorePassword = System.getenv("CI_ANDROID_KEYSTORE_PASSWORD") ?:
+            project.findProperty("RELEASE_STORE_PASSWORD")
+    def releaseKeyAlias = System.getenv("CI_ANDROID_KEY_ALIAS") ?:
+            project.findProperty("RELEASE_KEY_ALIAS")
+    def releaseKeyPassword = System.getenv("CI_ANDROID_KEY_PASSWORD") ?:
+            project.findProperty("RELEASE_KEY_PASSWORD")
+    def hasReleaseSigning = [releaseStoreFilePath, releaseStorePassword, releaseKeyAlias, releaseKeyPassword].every { value ->
+        value != null && value.toString().trim()
+    }
+
     defaultConfig {
         applicationId "com.hisa"
         minSdk 24
@@ -37,29 +50,13 @@ android {
         targetCompatibility JavaVersion.VERSION_17
     }
     signingConfigs {
-        
-    }
-
-    signingConfigs {
-        // Placeholder signing config for CI. Provide signing properties via
-        // environment variables or gradle.properties in CI and do NOT commit
-        // production keystore files to the repo.
         release {
-            // First, try environment variables or project properties
-            def ksPath = System.getenv("CI_ANDROID_KEYSTORE_PATH") ?: project.findProperty("CI_ANDROID_KEYSTORE_PATH") ?: project.findProperty("RELEASE_STORE_FILE")
-            def ksStorePassword = System.getenv("CI_ANDROID_KEYSTORE_PASSWORD") ?: project.findProperty("RELEASE_STORE_PASSWORD")
-            def ksKeyAlias = System.getenv("CI_ANDROID_KEY_ALIAS") ?: project.findProperty("RELEASE_KEY_ALIAS")
-            def ksKeyPassword = System.getenv("CI_ANDROID_KEY_PASSWORD") ?: project.findProperty("RELEASE_KEY_PASSWORD")
-
-            if (ksPath) {
-                storeFile file(ksPath)
-            } else {
-                storeFile file("turiz.keystore")
+            if (hasReleaseSigning) {
+                storeFile file(releaseStoreFilePath)
+                storePassword releaseStorePassword
+                keyAlias releaseKeyAlias
+                keyPassword releaseKeyPassword
             }
-
-            storePassword ksStorePassword ?: "ch0wd3r@t"
-            keyAlias ksKeyAlias ?: "mykey"
-            keyPassword ksKeyPassword ?: "ch0wd3r@t"
         }
     }
 
@@ -68,13 +65,10 @@ android {
             minifyEnabled true
             shrinkResources true
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro', 'proguard-secp256k1.pro', 'proguard-serialization.pro'
-            // Use the configured release signing config when a keystore is provided.
-            // Fall back to the debug signing config for local/dev builds where a release
-            // keystore isn't available (avoid committing keystore files to repo).
-            if (signingConfigs.release.storeFile != null) {
+            if (hasReleaseSigning) {
                 signingConfig signingConfigs.release
             } else {
-                println "[build.gradle] WARNING: Release keystore not configured. Falling back to debug signing config for local build."
+                println "[build.gradle] WARNING: Release signing is incomplete. Falling back to debug signing config for local build."
                 signingConfig signingConfigs.debug
             }
         }

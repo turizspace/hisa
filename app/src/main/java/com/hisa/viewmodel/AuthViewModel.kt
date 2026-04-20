@@ -12,7 +12,9 @@ import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
 import com.hisa.data.nostr.NostrClient
 import com.hisa.data.nostr.SubscriptionManager
+import com.hisa.data.nostr.toNostrEvent
 import com.hisa.util.KeyGenerator
+import com.hisa.util.hexToByteArrayOrNull
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
@@ -171,7 +173,8 @@ class AuthViewModel @Inject constructor(
                     if (privateKeyHex.isNullOrBlank() || pubkeyHex.isNullOrBlank()) {
                         throw Exception("Missing privateKey or pubkey")
                     }
-                    val privateKeyBytes = privateKeyHex.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
+                    val privateKeyBytes = hexToByteArrayOrNull(privateKeyHex, 32)
+                        ?: throw IllegalArgumentException("Invalid private key format")
                     val event = com.hisa.data.nostr.NostrEventSigner.signEvent(
                         kind = 0,
                         content = metadataJson,
@@ -179,19 +182,7 @@ class AuthViewModel @Inject constructor(
                         pubkey = pubkeyHex,
                         privKey = privateKeyBytes
                     )
-                    val nostrEvent = com.hisa.data.nostr.NostrEvent(
-                        id = event.getString("id"),
-                        pubkey = event.getString("pubkey"),
-                        createdAt = event.getLong("created_at"),
-                        kind = event.getInt("kind"),
-                        tags = (0 until event.getJSONArray("tags").length()).map { i ->
-                            val tagArr = event.getJSONArray("tags").getJSONArray(i)
-                            (0 until tagArr.length()).map { tagArr.getString(it) }
-                        },
-                        content = event.getString("content"),
-                        sig = event.getString("sig")
-                    )
-                    nostrClient.publishEvent(nostrEvent)
+                    nostrClient.publishEvent(event.toNostrEvent())
                     // Set signup success only once to avoid races with background tasks
                     if (signupAtom.compareAndSet(false, true)) {
                         _signupSuccess.value = true
