@@ -1,7 +1,6 @@
 package com.hisa.di
 
-import com.hisa.data.nostr.NostrClient
-import com.hisa.data.nostr.SubscriptionManager
+import com.hisa.data.repository.FeedRepository
 import com.hisa.viewmodel.FeedViewModel
 import dagger.Module
 import dagger.Provides
@@ -16,9 +15,8 @@ object ViewModelModule {
     @Provides
     @ViewModelScoped
     fun provideFeedViewModel(
-        nostrClient: NostrClient,
-        subscriptionManager: SubscriptionManager
+        feedRepository: FeedRepository
     ): FeedViewModel {
-        return FeedViewModel(nostrClient, subscriptionManager)
+        return FeedViewModel(feedRepository)
     }
 }

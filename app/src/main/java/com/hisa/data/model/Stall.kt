@@ -2,6 +2,7 @@ package com.hisa.data.model
 
 data class Stall(
     val id: String,
+    val eventId: String = id,
     val ownerPubkey: String,
     val name: String,
     val description: String,

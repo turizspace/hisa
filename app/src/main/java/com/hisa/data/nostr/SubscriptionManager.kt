@@ -17,9 +17,9 @@ class SubscriptionManager @Inject constructor(
     private val nostrClient: NostrClient,
     private val collectorScope: kotlinx.coroutines.CoroutineScope
 ) {
-    private val activeSubscriptions = ConcurrentHashMap<String, SubscriptionInfo>()
-    // Persist subscription definitions to re-apply on reconnects or relay changes
-    private val persistedSubscriptions = ConcurrentHashMap<String, String>()
+    private val activeSubscriptions = ConcurrentHashMap<String, SubscriptionRecord>()
+    private val subscriptionIdByFilter = ConcurrentHashMap<String, String>()
+    private val listenerRecords = ConcurrentHashMap<String, ListenerRecord>()
     // De-duplicate repeated EVENT deliveries for the same subscription id.
     // Key format: "<subId>:<eventId>".
     private val deliveredEventKeys = object : LinkedHashMap<String, Unit>(4096, 0.75f, true) {
@@ -28,6 +28,7 @@ class SubscriptionManager @Inject constructor(
         }
     }
     private val deliveredEventLock = Any()
+    private val subscriptionLock = Any()
 
     init {
         // Start collecting centralized incoming messages and handle them on the injected scope
@@ -102,30 +103,17 @@ class SubscriptionManager @Inject constructor(
         onEvent: (NostrEvent) -> Unit,
         onEndOfStoredEvents: () -> Unit = {}
     ): String {
-        // Prevent duplicate subscriptions for equivalent filter objects by normalizing the JSON
         val filterKey = try {
-            // Re-serialize with a stable ordering by parsing and constructing a JSONObject
             JSONObject(filter.toString()).toString()
         } catch (e: Exception) {
             filter.toString()
         }
-        val existing = activeSubscriptions.entries.find { (_, info) ->
-            try {
-                info.filter == filterKey
-            } catch (e: Exception) {
-                false
-            }
-        }
-        if (existing != null) {
-            val existingId = existing.key
-            return existingId
-        }
-
-    val subId = generateSubscriptionId()
-        activeSubscriptions[subId] = SubscriptionInfo(filterKey, onEvent, onEndOfStoredEvents)
-        persistedSubscriptions[subId] = filterKey
-        nostrClient.sendSubscription(subId, filter.toString())
-        return subId
+        return subscribeInternal(
+            filterKey = filterKey,
+            requestPayload = filter.toString(),
+            onEvent = onEvent,
+            onEndOfStoredEvents = onEndOfStoredEvents
+        )
     }
 
     /**
@@ -138,47 +126,46 @@ class SubscriptionManager @Inject constructor(
         onEndOfStoredEvents: () -> Unit = {}
     ): String {
         val filterKey = try {
-            // Normalize by parsing then re-serializing
             JSONArray(filtersArray.toString()).toString()
         } catch (e: Exception) {
             filtersArray.toString()
         }
-        val existing = activeSubscriptions.entries.find { (_, info) ->
-            try {
-                info.filter == filterKey
-            } catch (e: Exception) {
-                false
-            }
-        }
-        if (existing != null) {
-            val existingId = existing.key
-            return existingId
-        }
-
-        val subId = generateSubscriptionId()
-        activeSubscriptions[subId] = SubscriptionInfo(filterKey, onEvent, onEndOfStoredEvents)
-    persistedSubscriptions[subId] = filterKey
-    nostrClient.sendSubscription(subId, filtersArray.toString())
-    return subId
+        return subscribeInternal(
+            filterKey = filterKey,
+            requestPayload = filtersArray.toString(),
+            onEvent = onEvent,
+            onEndOfStoredEvents = onEndOfStoredEvents
+        )
     }
 
     fun unsubscribe(subscriptionId: String) {
-    activeSubscriptions.remove(subscriptionId)
-    persistedSubscriptions.remove(subscriptionId)
-        try {
-            // Use NostrClient.closeSubscription to ensure internal subscription tracking is cleaned
-            nostrClient.closeSubscription(subscriptionId)
-        } catch (e: Exception) {
-            android.util.Log.e("SubscriptionManager", "Failed to close subscription on client: ${e.localizedMessage}")
-            // Fallback: try sending a CLOSE message directly
+        val listenerRecord = listenerRecords.remove(subscriptionId) ?: return
+        var requestIdToClose: String? = null
+
+        synchronized(subscriptionLock) {
+            val record = activeSubscriptions[listenerRecord.requestId] ?: return@synchronized
+            record.listeners.remove(subscriptionId)
+            if (record.listeners.isEmpty()) {
+                activeSubscriptions.remove(listenerRecord.requestId)
+                subscriptionIdByFilter.remove(record.filter)
+                requestIdToClose = listenerRecord.requestId
+            }
+        }
+
+        requestIdToClose?.let { requestId ->
             try {
-                val closeMsg = JSONArray().apply {
-                    put("CLOSE")
-                    put(subscriptionId)
+                nostrClient.closeSubscription(requestId)
+            } catch (e: Exception) {
+                android.util.Log.e("SubscriptionManager", "Failed to close subscription on client: ${e.localizedMessage}")
+                try {
+                    val closeMsg = JSONArray().apply {
+                        put("CLOSE")
+                        put(requestId)
+                    }
+                    nostrClient.sendMessage(closeMsg.toString())
+                } catch (ex: Exception) {
+                    android.util.Log.e("SubscriptionManager", "Fallback close failed: ${ex.localizedMessage}")
                 }
-                nostrClient.sendMessage(closeMsg.toString())
-            } catch (ex: Exception) {
-                android.util.Log.e("SubscriptionManager", "Fallback close failed: ${ex.localizedMessage}")
             }
         }
     }
@@ -249,23 +236,27 @@ class SubscriptionManager @Inject constructor(
                             if (!shouldDispatchEvent(subId, event.id)) {
                                 return
                             }
-                            val callback = activeSubscriptions[subId]?.onEvent
-                            if (callback == null) {
+                            val callbacks = activeSubscriptions[subId]?.listeners?.values?.toList().orEmpty()
+                            if (callbacks.isEmpty()) {
                                 android.util.Log.w("SubscriptionManager", "No callback registered for subId=$subId")
                             } else {
-                                try {
-                                    callback.invoke(event)
-                                } catch (cbEx: Exception) {
-                                    android.util.Log.e("SubscriptionManager", "Callback threw while handling eventId=${event.id} for subId=$subId", cbEx)
+                                callbacks.forEach { listener ->
+                                    try {
+                                        listener.onEvent.invoke(event)
+                                    } catch (cbEx: Exception) {
+                                        android.util.Log.e("SubscriptionManager", "Callback threw while handling eventId=${event.id} for subId=$subId", cbEx)
+                                    }
                                 }
                             }
                         } else {
                             // No subscription id provided by the relay; dispatch to all active subscriptions
                             activeSubscriptions.values.forEach { info ->
-                                try {
-                                    info.onEvent.invoke(event)
-                                } catch (cbEx: Exception) {
-                                    android.util.Log.e("SubscriptionManager", "Callback threw while handling eventId=${event.id} for subscription", cbEx)
+                                info.listeners.values.forEach { listener ->
+                                    try {
+                                        listener.onEvent.invoke(event)
+                                    } catch (cbEx: Exception) {
+                                        android.util.Log.e("SubscriptionManager", "Callback threw while handling eventId=${event.id} for subscription", cbEx)
+                                    }
                                 }
                             }
                         }
@@ -275,8 +266,17 @@ class SubscriptionManager @Inject constructor(
                 }
                 "EOSE" -> {
                     val subId = jsonArray.getString(1)
-
-                    activeSubscriptions[subId]?.onEndOfStoredEvents?.invoke()
+                    val record = activeSubscriptions[subId]
+                    if (record != null) {
+                        record.hasReachedEose = true
+                        record.listeners.values.forEach { listener ->
+                            try {
+                                listener.onEndOfStoredEvents.invoke()
+                            } catch (cbEx: Exception) {
+                                android.util.Log.e("SubscriptionManager", "EOSE callback threw for subId=$subId", cbEx)
+                            }
+                        }
+                    }
                 }
                 "NOTICE" -> {
                     val notice = jsonArray.getString(1)
@@ -344,10 +344,66 @@ class SubscriptionManager @Inject constructor(
         put("authors", JSONArray(authors))
     }
 
-    private data class SubscriptionInfo(
+    private fun subscribeInternal(
+        filterKey: String,
+        requestPayload: String,
+        onEvent: (NostrEvent) -> Unit,
+        onEndOfStoredEvents: () -> Unit
+    ): String {
+        val listenerId = generateSubscriptionId()
+        var requestIdToSend: String? = null
+        var shouldInvokeEoseImmediately = false
+
+        synchronized(subscriptionLock) {
+            val existingRequestId = subscriptionIdByFilter[filterKey]
+            if (existingRequestId != null) {
+                val record = activeSubscriptions[existingRequestId]
+                if (record != null) {
+                    record.listeners[listenerId] = ListenerCallbacks(onEvent, onEndOfStoredEvents)
+                    listenerRecords[listenerId] = ListenerRecord(existingRequestId)
+                    shouldInvokeEoseImmediately = record.hasReachedEose
+                } else {
+                    subscriptionIdByFilter.remove(filterKey)
+                }
+            }
+
+            if (!listenerRecords.containsKey(listenerId)) {
+                val requestId = generateSubscriptionId()
+                val record = SubscriptionRecord(
+                    filter = filterKey,
+                    requestPayload = requestPayload,
+                    listeners = ConcurrentHashMap<String, ListenerCallbacks>().apply {
+                        put(listenerId, ListenerCallbacks(onEvent, onEndOfStoredEvents))
+                    }
+                )
+                activeSubscriptions[requestId] = record
+                subscriptionIdByFilter[filterKey] = requestId
+                listenerRecords[listenerId] = ListenerRecord(requestId)
+                requestIdToSend = requestId
+            }
+        }
+
+        requestIdToSend?.let { nostrClient.sendSubscription(it, requestPayload) }
+        if (shouldInvokeEoseImmediately) {
+            onEndOfStoredEvents.invoke()
+        }
+        return listenerId
+    }
+
+    private data class SubscriptionRecord(
         val filter: String,
+        val requestPayload: String,
+        val listeners: ConcurrentHashMap<String, ListenerCallbacks>,
+        @Volatile var hasReachedEose: Boolean = false
+    )
+
+    private data class ListenerCallbacks(
         val onEvent: (NostrEvent) -> Unit,
         val onEndOfStoredEvents: () -> Unit = {}
+    )
+
+    private data class ListenerRecord(
+        val requestId: String
     )
 
     // Predefined filters
@@ -368,16 +424,43 @@ class SubscriptionManager @Inject constructor(
             put("since", timestamp)
         }
 
-        fun filterNIP99(): JSONObject = createFilter {
+        fun filterNIP99(
+            authors: List<String>? = null,
+            since: Long? = null,
+            limit: Int? = null
+        ): JSONObject = createFilter {
             putKinds(listOf(30402))
+            authors?.takeIf { it.isNotEmpty() }?.let { put("authors", JSONArray(it)) }
+            since?.let { put("since", it) }
+            limit?.let { put("limit", it) }
         }
 
-        fun filterNIP15Stalls(): JSONObject = createFilter {
+        fun filterNIP15Stalls(
+            authors: List<String>? = null,
+            since: Long? = null,
+            limit: Int? = null
+        ): JSONObject = createFilter {
             putKinds(listOf(30017))
+            authors?.takeIf { it.isNotEmpty() }?.let { put("authors", JSONArray(it)) }
+            since?.let { put("since", it) }
+            limit?.let { put("limit", it) }
         }
 
-        fun filterNIP15Products(): JSONObject = createFilter {
+        fun filterNIP15Stall(stallId: String, authorPubkey: String? = null): JSONObject = createFilter {
+            putKinds(listOf(30017))
+            put("#d", JSONArray().put(stallId))
+            authorPubkey?.takeIf { it.isNotBlank() }?.let { put("authors", JSONArray().put(it)) }
+        }
+
+        fun filterNIP15Products(
+            authorPubkey: String? = null,
+            since: Long? = null,
+            limit: Int? = null
+        ): JSONObject = createFilter {
             putKinds(listOf(30018))
+            authorPubkey?.takeIf { it.isNotBlank() }?.let { put("authors", JSONArray().put(it)) }
+            since?.let { put("since", it) }
+            limit?.let { put("limit", it) }
         }
 
         fun filterNIP17(pubkey: String): JSONObject = createFilter {
