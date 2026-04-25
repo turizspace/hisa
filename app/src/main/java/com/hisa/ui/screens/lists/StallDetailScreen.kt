@@ -2,115 +2,104 @@ package com.hisa.ui.screens.lists
 
 import android.os.Build
 import androidx.annotation.RequiresApi
-import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.*
-import androidx.compose.runtime.*
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
-import androidx.lifecycle.viewmodel.compose.viewModel
-import com.hisa.data.nostr.NostrClient
-import com.hisa.data.nostr.SubscriptionManager
-import com.hisa.ui.util.LocalProfileMetaUtil
-import com.hisa.viewmodel.StallsViewModel
-import com.hisa.viewmodel.StallsViewModelFactory
-import com.hisa.viewmodel.ProductsViewModel
-import com.hisa.viewmodel.ProductsViewModelFactory
-import com.hisa.data.model.Stall
-import com.hisa.ui.components.StallCard
+import androidx.hilt.navigation.compose.hiltViewModel
 import com.hisa.ui.components.ProductCard
+import com.hisa.ui.components.StallCard
+import com.hisa.viewmodel.StallDetailViewModel
 
 @RequiresApi(Build.VERSION_CODES.O)
 @Composable
 fun StallDetailScreen(
-    stallId: String,
-    nostrClient: NostrClient,
-    subscriptionManager: SubscriptionManager,
-    privateKey: ByteArray?,
-    userPubkey: String
+    viewModel: StallDetailViewModel = hiltViewModel()
 ) {
-    val profileMetaUtil = LocalProfileMetaUtil.current
-    val stallsViewModel: StallsViewModel = viewModel(
-        factory = StallsViewModelFactory(nostrClient = nostrClient, subscriptionManager = subscriptionManager, profileMetaUtil = profileMetaUtil)
-    )
-    val productsViewModel: ProductsViewModel = viewModel(
-        factory = ProductsViewModelFactory(nostrClient = nostrClient, subscriptionManager = subscriptionManager, stallId = stallId),
-        key = "products_$stallId"
-    )
+    val stall by viewModel.stall.collectAsState()
+    val products by viewModel.products.collectAsState()
 
-    val stalls by stallsViewModel.stalls.collectAsState()
-    val stall = stalls.find { it.id == stallId }
-
-    val products by productsViewModel.products.collectAsState()
-    val rawEvents by productsViewModel.rawEvents.collectAsState()
-
-    LazyColumn(modifier = Modifier.fillMaxSize()) {
+    LazyColumn(
+        modifier = Modifier.fillMaxSize(),
+        verticalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
         item {
-            stall?.let {
-                StallCard(stall = it, modifier = Modifier.fillMaxWidth())
-            } ?: Text("Stall not found", modifier = Modifier.padding(16.dp))
-        }
-
-        item {
-            if (products.isNotEmpty()) {
-                Text(
-                    text = "Products (${products.size})",
-                    style = MaterialTheme.typography.headlineSmall,
-                    modifier = Modifier.padding(16.dp)
-                )
-            }
-        }
-
-        items(products) { product ->
-            Column(modifier = Modifier.padding(8.dp)) {
-                ProductCard(product = product, modifier = Modifier.fillMaxWidth())
-
-                // Show formatted raw event for this product
-                var showRawEvent by remember { mutableStateOf(false) }
-                if (showRawEvent) {
-                    val eventJson = rawEvents[product.id] ?: "{}"
-                    Surface(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(8.dp),
-                        color = MaterialTheme.colorScheme.surfaceVariant,
-                        shape = MaterialTheme.shapes.small
-                    ) {
-                        Text(
-                            text = eventJson,
-                            style = MaterialTheme.typography.labelSmall.copy(fontFamily = FontFamily.Monospace),
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(8.dp)
-                                .verticalScroll(rememberScrollState()),
-                            maxLines = 50
-                        )
-                    }
-                }
-
-                Button(
-                    onClick = { showRawEvent = !showRawEvent },
+            stall?.let { currentStall ->
+                StallCard(
+                    stall = currentStall,
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(8.dp)
-                ) {
-                    Text(text = if (showRawEvent) "Hide Event Data" else "Show Event Data")
-                }
-            }
+                        .padding(horizontal = 8.dp, vertical = 8.dp)
+                )
+            } ?: LoadingCard(
+                title = "Loading stall...",
+                subtitle = "Fetching marketplace data"
+            )
         }
 
-        if (products.isEmpty()) {
+        item {
+            Text(
+                text = "Products",
+                style = MaterialTheme.typography.headlineSmall,
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)
+            )
+        }
+
+        if (products.isNotEmpty()) {
+            items(
+                items = products,
+                key = { it.id }
+            ) { product ->
+                ProductCard(
+                    product = product,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 8.dp)
+                )
+            }
+        } else if (stall != null) {
             item {
                 Text(
-                    text = "No products found for this stall",
-                    modifier = Modifier.padding(16.dp),
+                    text = "No products found for this stall.",
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
+        }
+    }
+}
+
+@Composable
+private fun LoadingCard(title: String, subtitle: String) {
+    Surface(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 8.dp, vertical = 8.dp),
+        color = MaterialTheme.colorScheme.surfaceVariant,
+        shape = MaterialTheme.shapes.medium
+    ) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Text(
+                text = title,
+                style = MaterialTheme.typography.titleMedium
+            )
+            Text(
+                text = subtitle,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(top = 4.dp)
+            )
         }
     }
 }

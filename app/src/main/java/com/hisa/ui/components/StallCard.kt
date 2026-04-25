@@ -17,6 +17,9 @@ import com.hisa.data.model.Stall
 
 @Composable
 fun StallCard(stall: Stall, modifier: Modifier = Modifier, onClick: (() -> Unit)? = null) {
+    val ownerName = stall.ownerDisplayName.ifBlank { "Shop by ${stall.ownerPubkey.take(8)}" }
+    val ownerPicture = stall.ownerProfilePicture
+
     ElevatedCard(
         modifier = modifier.padding(8.dp),
         onClick = { onClick?.invoke() },
@@ -38,9 +41,9 @@ fun StallCard(stall: Stall, modifier: Modifier = Modifier, onClick: (() -> Unit)
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
                     // Owner profile picture or avatar
-                    if (stall.ownerProfilePicture.isNotEmpty()) {
+                    if (ownerPicture.isNotEmpty()) {
                         AsyncImage(
-                            model = stall.ownerProfilePicture,
+                            model = ownerPicture,
                             contentDescription = "Owner profile picture",
                             modifier = Modifier
                                 .size(36.dp)
@@ -65,7 +68,7 @@ fun StallCard(stall: Stall, modifier: Modifier = Modifier, onClick: (() -> Unit)
                     // Owner name or pubkey display
                     Column {
                         Text(
-                            text = stall.ownerDisplayName.ifEmpty { "Shop by ${stall.ownerPubkey.take(8)}" },
+                            text = ownerName,
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             maxLines = 1,

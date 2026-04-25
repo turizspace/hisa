@@ -1,5 +1,6 @@
 package com.hisa.ui.navigation
 
+import android.net.Uri
 import android.os.Build
 import androidx.annotation.RequiresApi
 import androidx.compose.foundation.layout.Box
@@ -47,7 +48,7 @@ object Routes {
     const val SIGNUP = "signup"
     const val MAIN = "main?showDialog={showDialog}"
     const val PROFILE = "profile/{pubkey}"
-    const val STALL_DETAIL = "stallDetail"
+    const val STALL_DETAIL = "stallDetail/{stallId}/{ownerPubkey}/{eventId}"
     const val SETTINGS = "settings"
     const val CONVERSATION = "conversation/{conversationId}"
     const val DM = "dm/{pubkey}"
@@ -58,6 +59,9 @@ object Routes {
     const val FAQ = "faq"
     const val DONATE = "donate"
     const val UPLOAD = "upload"
+
+    fun stallDetail(stallId: String, ownerPubkey: String, eventId: String): String =
+        "stallDetail/${Uri.encode(stallId)}/${Uri.encode(ownerPubkey)}/${Uri.encode(eventId)}"
 }
 
 @RequiresApi(Build.VERSION_CODES.O)
@@ -132,6 +136,8 @@ fun AppNavGraph(
     // Register/unregister lifecycle-aware
     DisposableEffect(Unit) {
         ExternalSignerManager.registerForegroundLauncher(foregroundLauncher)
+        // Trigger retry of any pending decryptions that were queued
+        messagesViewModel.retryPendingDecryptions()
         onDispose {
             ExternalSignerManager.unregisterForegroundLauncher(foregroundLauncher)
         }
@@ -335,18 +341,19 @@ fun AppNavGraph(
                 navController = navController
             )
         }
-        composable(Routes.STALL_DETAIL) { backStackEntry ->
-            // we store the stall event id as "channelEventId" in SavedStateHandle for compatibility
-            val stallEventId = backStackEntry.savedStateHandle.get<String>("channelEventId")
-            if (!stallEventId.isNullOrBlank()) {
-                val pkBytesForDetail = hexToByteArrayOrNull(privateKey, 32)
-                StallDetailScreen(
-                    stallId = stallEventId,
-                    nostrClient = nostrClient,
-                    subscriptionManager = subscriptionManager,
-                    privateKey = pkBytesForDetail,
-                    userPubkey = pubKey
-                )
+        composable(
+            route = Routes.STALL_DETAIL,
+            arguments = listOf(
+                androidx.navigation.navArgument("stallId") { type = androidx.navigation.NavType.StringType },
+                androidx.navigation.navArgument("ownerPubkey") { type = androidx.navigation.NavType.StringType },
+                androidx.navigation.navArgument("eventId") { type = androidx.navigation.NavType.StringType }
+            )
+        ) { backStackEntry ->
+            val stallId = backStackEntry.arguments?.getString("stallId")
+            val ownerPubkey = backStackEntry.arguments?.getString("ownerPubkey")
+            val eventId = backStackEntry.arguments?.getString("eventId")
+            if (!stallId.isNullOrBlank() && !ownerPubkey.isNullOrBlank() && !eventId.isNullOrBlank()) {
+                StallDetailScreen()
             } else {
                 Text("Stall not found")
             }

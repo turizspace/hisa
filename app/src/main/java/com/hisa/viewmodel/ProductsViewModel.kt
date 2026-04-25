@@ -4,6 +4,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.hisa.data.model.Product
 import com.hisa.data.nostr.NostrClient
+import com.hisa.data.nostr.NostrMarketplaceParser
 import com.hisa.data.nostr.SubscriptionManager
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -33,36 +34,16 @@ class ProductsViewModel(
                     filter = SubscriptionManager.filterNIP15Products(),
                     onEvent = { event ->
                         try {
-                            // Filter products for this stall only (stall_id tag matches)
-                            val stallIdFromEvent = event.tags.find { it.isNotEmpty() && it[0] == "stall_id" }?.getOrNull(1) ?: ""
-                            if (stallIdFromEvent != stallId) return@subscribe
-
-                            // Parse product fields from tags
-                            val productId = event.tags.find { it.isNotEmpty() && it[0] == "d" }?.getOrNull(1) ?: event.id
-                            val name = event.tags.find { it.isNotEmpty() && it[0] == "title" }?.getOrNull(1) ?: ""
-                            val description = event.tags.find { it.isNotEmpty() && it[0] == "description" }?.getOrNull(1) ?: ""
-                            val priceStr = event.tags.find { it.isNotEmpty() && it[0] == "price" }?.getOrNull(1) ?: "0"
-                            val price = priceStr.toDoubleOrNull() ?: 0.0
-                            val currency = event.tags.find { it.isNotEmpty() && it[0] == "currency" }?.getOrNull(1) ?: "USD"
-                            val quantityStr = event.tags.find { it.isNotEmpty() && it[0] == "quantity" }?.getOrNull(1)
-                            val quantity = quantityStr?.toIntOrNull()
-                            val pictures = event.tags.filter { it.isNotEmpty() && it[0] == "image" }.mapNotNull { it.getOrNull(1) }
-                            val categories = event.tags.filter { it.isNotEmpty() && it[0] == "t" }.mapNotNull { it.getOrNull(1) }
-
-                            val product = Product(
-                                id = productId,
-                                stallId = stallId,
-                                name = name,
-                                description = description,
-                                price = price.toString(),
-                                currency = currency,
-                                quantity = quantity,
-                                pictures = pictures,
-                                categories = categories
-                            )
+                            val product = NostrMarketplaceParser.parseProduct(event) ?: return@subscribe
+                            if (product.stallId != stallId) return@subscribe
 
                             // Store product
-                            _products.value = (_products.value + product).distinctBy { it.id }
+                            val nextProducts = _products.value.associateBy { it.id }.toMutableMap()
+                            val existing = nextProducts[product.id]
+                            if (existing == null || product.createdAt >= existing.createdAt) {
+                                nextProducts[product.id] = product
+                            }
+                            _products.value = nextProducts.values.sortedByDescending { it.createdAt }
 
                             // Also store formatted raw event for display
                             val formattedEvent = try {
@@ -71,7 +52,7 @@ class ProductsViewModel(
                                 event.toString()
                             }
                             _rawEvents.value = _rawEvents.value.toMutableMap().apply {
-                                this[productId] = formattedEvent
+                                this[product.id] = formattedEvent
                             }
                         } catch (_: Exception) {}
                     }

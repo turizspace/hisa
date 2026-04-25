@@ -99,7 +99,7 @@ class CreateServiceViewModel @Inject constructor(
 
                 val stallEvent = NostrStallUtils.createStall(
                     name = title,
-                    about = summary,
+                    about = summary.ifBlank { description },
                     picture = "",
                     relays = emptyList<String>(),
                     categories = categories,
