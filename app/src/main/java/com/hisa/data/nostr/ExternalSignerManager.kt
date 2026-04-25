@@ -9,6 +9,7 @@ import kotlinx.coroutines.withTimeout
 import org.json.JSONObject
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * ExternalSignerManager (revised)
@@ -25,6 +26,7 @@ object ExternalSignerManager {
     private var externalPubKey: String? = null
     private var externalPackage: String? = null
     private var launcher: ((Intent) -> Unit)? = null
+    private val launcherRegistered = AtomicBoolean(false)
 
     private val pending = ConcurrentHashMap<String, CompletableDeferred<IntentResultLocal>>()
 
@@ -73,13 +75,41 @@ object ExternalSignerManager {
 
     fun registerForegroundLauncher(l: (Intent) -> Unit) {
         launcher = l
+        launcherRegistered.set(true)
+        android.util.Log.d("ExternalSigner", "Launcher registered and ready for decryption")
     }
 
     fun unregisterForegroundLauncher(l: (Intent) -> Unit) {
-        if (launcher == l) launcher = null
+        if (launcher == l) {
+            launcher = null
+            launcherRegistered.set(false)
+            android.util.Log.d("ExternalSigner", "Launcher unregistered")
+        }
     }
 
     fun isLauncherRegistered(): Boolean = launcher != null
+
+    /**
+     * Check if launcher is registered without blocking
+     */
+    fun isLauncherReady(): Boolean = launcherRegistered.get()
+
+    /**
+     * Wait for the launcher to be registered (with timeout)
+     * Returns true if launcher became ready, false if timeout
+     */
+    suspend fun waitForLauncherReady(timeoutMs: Long = 10_000): Boolean {
+        val startTime = System.currentTimeMillis()
+        while (!launcherRegistered.get()) {
+            if (System.currentTimeMillis() - startTime > timeoutMs) {
+                android.util.Log.w("ExternalSigner", "Timeout waiting for launcher registration after ${timeoutMs}ms")
+                return false
+            }
+            kotlinx.coroutines.delay(50)
+        }
+        android.util.Log.d("ExternalSigner", "Launcher ready after ${System.currentTimeMillis() - startTime}ms")
+        return true
+    }
 
     fun newResponse(intent: Intent) {
         try {

@@ -67,6 +67,8 @@ class MessagesViewModel @Inject constructor(
         directLoadTimeoutJob?.cancel()
         directLoadTimeoutJob = null
         _isLoading.value = false
+        pendingDecryptRetryQueue.clear()
+        retryJobActive = false
         // Clear direct DM subscription when clearing messages to avoid stale handlers
         directSubscriptionId?.let {
             try {
@@ -77,6 +79,33 @@ class MessagesViewModel @Inject constructor(
             }
         }
     }
+    
+    /**
+     * Retry decryption of messages that failed due to missing launcher.
+     * Called when launcher becomes available.
+     */
+    fun retryPendingDecryptions() {
+        if (pendingDecryptRetryQueue.isEmpty()) return
+        
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                Timber.d("Retrying %d pending decryptions after launcher became available", pendingDecryptRetryQueue.size)
+                val entries = pendingDecryptRetryQueue.toList()
+                for ((eventId, pending) in entries) {
+                    try {
+                        Timber.d("Retrying decrypt for event %s (pending for %dms)", eventId, System.currentTimeMillis() - pending.failureTime)
+                        handleGiftWrap(pending.giftWrap, pending.expectedOtherPubkey)
+                        pendingDecryptRetryQueue.remove(eventId)
+                    } catch (e: Exception) {
+                        Timber.w(e, "Retry decrypt failed for event %s", eventId)
+                    }
+                }
+            } catch (e: Exception) {
+                Timber.e(e, "Error retrying pending decryptions")
+            }
+        }
+    }
+    
     private var userPubkey: String = ""
     private var privateKey: String = ""
     // X25519 private key for NIP-44 encryption (32 bytes hex)
@@ -102,6 +131,18 @@ class MessagesViewModel @Inject constructor(
     private var giftWrapProcessingInProgress = false
     private val giftWrapProcessingMutex = Mutex()
     private val inboxExternalDecryptRequested = AtomicBoolean(false)
+    
+    // Queue of gift-wrapped messages that failed to decrypt due to missing launcher
+    // Retry when launcher becomes available
+    private data class PendingDecryptMessage(
+        val eventId: String,
+        val giftWrap: JSONObject,
+        val expectedOtherPubkey: String?,
+        val failureTime: Long = System.currentTimeMillis()
+    )
+    private val pendingDecryptRetryQueue = ConcurrentHashMap<String, PendingDecryptMessage>()
+    private var retryJobActive = false
+    
     private val _messages = MutableStateFlow<List<Message>>(emptyList())
     val messages: StateFlow<List<Message>> = _messages
     // Buffer plain (kind 14) messages that arrive while initial loading is active
@@ -271,6 +312,19 @@ class MessagesViewModel @Inject constructor(
                 _isLoading.value = false
                 return@launch
             }
+
+            // Wait for external signer launcher to be ready before subscribing
+            // This prevents a race condition where messages arrive before the launcher is registered
+            val authContext = resolveAuthContext(refreshOnce = false)
+            if (authContext.hasExternalSigner && authContext.localPrivateKeyBytes == null) {
+                Timber.d("Using external signer: waiting for launcher registration before subscribing to DMs")
+                val launcherReady = com.hisa.data.nostr.ExternalSignerManager.waitForLauncherReady(timeoutMs = 10_000)
+                if (!launcherReady) {
+                    Timber.w("Timeout waiting for external signer launcher registration")
+                    // Continue anyway - will try with whatever launcher state we have
+                }
+            }
+
             directSubscriptionStarted = true
             directEoseReceived = false
             giftWrapProcessingCount.set(0)
@@ -839,8 +893,11 @@ class MessagesViewModel @Inject constructor(
 
                         if (usingExternalSignerOnly && expectedOtherPubkey.isNullOrBlank()) {
                             if (!com.hisa.data.nostr.ExternalSignerManager.isLauncherRegistered()) {
-                                Timber.d("Skipping single inbox external decrypt: launcher not registered")
-                                addUndecryptablePlaceholder(giftWrap, expectedOtherPubkey)
+                                Timber.d("Inbox: launcher not registered, queueing for retry: %s", eventId)
+                                val eventId = giftWrap.optString("id", "")
+                                if (eventId.isNotBlank()) {
+                                    pendingDecryptRetryQueue[eventId] = PendingDecryptMessage(eventId, giftWrap, expectedOtherPubkey)
+                                }
                                 return@withLock
                             }
                             // Messages tab (inbox) path: trigger signer request at most once.
@@ -859,9 +916,13 @@ class MessagesViewModel @Inject constructor(
                             return@withLock
                         }
 
-                        // When activity/launcher is not attached, skip decrypt requests entirely.
+                        // When launcher is not attached, queue for retry instead of marking undecryptable
                         if (usingExternalSignerOnly && !com.hisa.data.nostr.ExternalSignerManager.isLauncherRegistered()) {
-                            Timber.d("Skipping external signer decrypt: launcher not registered")
+                            Timber.d("Conversation: launcher not registered, queueing for retry: %s", eventId)
+                            val eventId = giftWrap.optString("id", "")
+                            if (eventId.isNotBlank()) {
+                                pendingDecryptRetryQueue[eventId] = PendingDecryptMessage(eventId, giftWrap, expectedOtherPubkey)
+                            }
                             return@withLock
                         }
 
@@ -1197,64 +1258,73 @@ class MessagesViewModel @Inject constructor(
                 return
             }
 
-            // Ensure only one conversation subscription is active to avoid relay REQ limits.
+            // Unsubscribe from previous conversation
             unsubscribeConversation()
             activeConversationPartner = other
 
-            val since = (System.currentTimeMillis() / 1000) - (CONVERSATION_DM_HISTORY_DAYS * 24L * 60L * 60L)
-
-            // Two-way DM filters in one subscription:
-            // - incoming from other to me
-            // - outgoing from me to other
-            val filtersArray = org.json.JSONArray().apply {
-                put(JSONObject().apply {
-                    put("kinds", org.json.JSONArray().put(1059))
-                    put("authors", org.json.JSONArray().put(other))
-                    put("#p", org.json.JSONArray().put(me))
-                    put("since", since)
-                    put("limit", CONVERSATION_DM_LIMIT_PER_FILTER)
-                })
-                put(JSONObject().apply {
-                    put("kinds", org.json.JSONArray().put(1059))
-                    put("authors", org.json.JSONArray().put(me))
-                    put("#p", org.json.JSONArray().put(other))
-                    put("since", since)
-                    put("limit", CONVERSATION_DM_LIMIT_PER_FILTER)
-                })
-            }
-            Timber.i(
-                "Creating conversation subscription filters (since=%d limitPerFilter=%d): %s",
-                since,
-                CONVERSATION_DM_LIMIT_PER_FILTER,
-                filtersArray.toString()
-            )
-
-            val subId = subscriptionManager.subscribe(filtersArray, { event ->
-                try {
-                    val obj = JSONObject().apply {
-                        put("id", event.id)
-                        put("pubkey", event.pubkey)
-                        put("created_at", event.createdAt)
-                        put("kind", event.kind)
-                        put("tags", org.json.JSONArray(event.tags.map { org.json.JSONArray(it) }))
-                        put("content", event.content)
-                        put("sig", event.sig)
-                    }
-                    // Sample conversation subscription logs to avoid spamming
-                    if (subscriptionEventCounter.incrementAndGet() % 200L == 0L) {
-                        Timber.d("Conversation subscription received event (sample) id=%s pubkey=%s tags=%s", event.id, event.pubkey, obj.optJSONArray("tags")?.toString())
-                        Timber.d("Invoking handleGiftWrap for conversation event id=%s", event.id)
-                    }
-                    handleGiftWrap(obj, other)
-                    if (subscriptionEventCounter.get() % 200L == 0L) {
-                        Timber.d("handleGiftWrap completed for event id=%s", event.id)
-                    }
-                } catch (e: Exception) {
-                    Timber.e(e, "Error handling conversation event (multi-filter)")
+            // Wait for external signer launcher before subscribing if using external signer
+            viewModelScope.launch(Dispatchers.IO) {
+                val authContext = resolveAuthContext(refreshOnce = false)
+                if (authContext.hasExternalSigner && authContext.localPrivateKeyBytes == null) {
+                    Timber.d("Conversation subscription: waiting for external signer launcher before subscribing")
+                    com.hisa.data.nostr.ExternalSignerManager.waitForLauncherReady(timeoutMs = 10_000)
                 }
-            })
-            conversationSubscriptionIds.add(subId)
-            Timber.i("Subscribed to conversation with %s sub=%s", other, subId)
+
+                val since = (System.currentTimeMillis() / 1000) - (CONVERSATION_DM_HISTORY_DAYS * 24L * 60L * 60L)
+
+                // Two-way DM filters in one subscription:
+                // - incoming from other to me
+                // - outgoing from me to other
+                val filtersArray = org.json.JSONArray().apply {
+                    put(JSONObject().apply {
+                        put("kinds", org.json.JSONArray().put(1059))
+                        put("authors", org.json.JSONArray().put(other))
+                        put("#p", org.json.JSONArray().put(me))
+                        put("since", since)
+                        put("limit", CONVERSATION_DM_LIMIT_PER_FILTER)
+                    })
+                    put(JSONObject().apply {
+                        put("kinds", org.json.JSONArray().put(1059))
+                        put("authors", org.json.JSONArray().put(me))
+                        put("#p", org.json.JSONArray().put(other))
+                        put("since", since)
+                        put("limit", CONVERSATION_DM_LIMIT_PER_FILTER)
+                    })
+                }
+                Timber.i(
+                    "Creating conversation subscription filters (since=%d limitPerFilter=%d): %s",
+                    since,
+                    CONVERSATION_DM_LIMIT_PER_FILTER,
+                    filtersArray.toString()
+                )
+
+                val subId = subscriptionManager.subscribe(filtersArray, { event ->
+                    try {
+                        val obj = JSONObject().apply {
+                            put("id", event.id)
+                            put("pubkey", event.pubkey)
+                            put("created_at", event.createdAt)
+                            put("kind", event.kind)
+                            put("tags", org.json.JSONArray(event.tags.map { org.json.JSONArray(it) }))
+                            put("content", event.content)
+                            put("sig", event.sig)
+                        }
+                        // Sample conversation subscription logs to avoid spamming
+                        if (subscriptionEventCounter.incrementAndGet() % 200L == 0L) {
+                            Timber.d("Conversation subscription received event (sample) id=%s pubkey=%s tags=%s", event.id, event.pubkey, obj.optJSONArray("tags")?.toString())
+                            Timber.d("Invoking handleGiftWrap for conversation event id=%s", event.id)
+                        }
+                        handleGiftWrap(obj, other)
+                        if (subscriptionEventCounter.get() % 200L == 0L) {
+                            Timber.d("handleGiftWrap completed for event id=%s", event.id)
+                        }
+                    } catch (e: Exception) {
+                        Timber.e(e, "Error handling conversation event (multi-filter)")
+                    }
+                })
+                conversationSubscriptionIds.add(subId)
+                Timber.i("Subscribed to conversation with %s sub=%s", other, subId)
+            }
         } catch (e: Exception) {
             Timber.e(e, "Failed to subscribe to conversation %s", otherPubkey)
         }

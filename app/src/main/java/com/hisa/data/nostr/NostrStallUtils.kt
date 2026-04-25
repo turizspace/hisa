@@ -1,10 +1,10 @@
 package com.hisa.data.nostr
 
+import org.json.JSONArray
 import org.json.JSONObject
+import java.util.UUID
 
 object NostrStallUtils {
-    private val hex64Regex = Regex("^[0-9a-fA-F]{64}$")
-
     suspend fun createStall(
         name: String,
         about: String,
@@ -16,16 +16,21 @@ object NostrStallUtils {
         privateKey: ByteArray?,
         pubkey: String
     ): NostrEvent {
+        val stallId = UUID.randomUUID().toString()
         val metadata = JSONObject().apply {
+            put("id", stallId)
             put("name", name)
-            put("about", about)
-            put("picture", picture)
-            put("relays", org.json.JSONArray(relays))
+            put("description", about)
+            put("currency", "SATS")
+            put("shipping", JSONArray())
+            if (picture.isNotBlank()) put("picture", picture)
+            if (about.isNotBlank()) put("about", about)
+            if (relays.isNotEmpty()) put("relays", JSONArray(relays))
             location?.let { put("location", it) }
             geohash?.let { put("geohash", it) }
         }
 
-        val tags = mutableListOf<List<String>>()
+        val tags = mutableListOf<List<String>>(listOf("d", stallId))
         categories.forEach { tags.add(listOf("t", it)) }
         relays.forEach { tags.add(listOf("relay", it)) }
 
@@ -60,17 +65,21 @@ object NostrStallUtils {
         privateKey: ByteArray?,
         pubkey: String
     ): NostrEvent {
+        val productId = UUID.randomUUID().toString()
         val metadata = JSONObject().apply {
-            put("title", title)
+            put("id", productId)
+            put("stall_id", stallId)
+            put("name", title)
             put("description", description)
-            price?.let { put("price", it) }
-            currency?.let { put("currency", it) }
-            if (images.isNotEmpty()) put("images", org.json.JSONArray(images))
+            put("price", price?.toDoubleOrNull() ?: 0.0)
+            put("currency", currency ?: "SATS")
+            put("quantity", JSONObject.NULL)
+            if (images.isNotEmpty()) put("images", JSONArray(images))
+            if (title.isNotBlank()) put("title", title)
         }
 
         val tags = mutableListOf<List<String>>()
-        // reference the parent stall using an e-tag
-        tags.add(listOf("e", stallId, "", "root"))
+        tags.add(listOf("d", productId))
 
         val eventJson = NostrEventSigner.signEvent(
             kind = 30018,
