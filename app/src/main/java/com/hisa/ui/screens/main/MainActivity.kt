@@ -50,7 +50,8 @@ class MainActivity : ComponentActivity() {
             }
 
             androidx.compose.runtime.CompositionLocalProvider(
-                com.hisa.ui.util.LocalProfileMetaUtil provides app.profileMetaUtil
+                com.hisa.ui.util.LocalProfileMetaUtil provides app.profileMetaUtil,
+                com.hisa.ui.util.LocalProfileRepository provides app.profileRepository
             ) {
                 // Directly read isDarkTheme so Compose will recompose MaterialTheme when it changes.
                 val colors = if (isDarkTheme) darkColorScheme() else lightColorScheme()

@@ -35,7 +35,8 @@ class LoginActivity : ComponentActivity() {
             }
 
             androidx.compose.runtime.CompositionLocalProvider(
-                LocalProfileMetaUtil provides app.profileMetaUtil
+                LocalProfileMetaUtil provides app.profileMetaUtil,
+                com.hisa.ui.util.LocalProfileRepository provides app.profileRepository
             ) {
                 // Apply theme at the root of the composition
                 MaterialTheme(

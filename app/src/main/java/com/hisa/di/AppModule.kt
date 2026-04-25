@@ -100,9 +100,10 @@ object AppModule {
     @Provides
     @Singleton
     fun provideProfileMetaUtil(
-        metadataRepository: MetadataRepository
+        metadataRepository: MetadataRepository,
+        appScope: CoroutineScope
     ): ProfileMetaUtil {
-    return ProfileMetaUtil(metadataRepository, provideApplicationCoroutineScope())
+    return ProfileMetaUtil(metadataRepository, appScope)
     }
 
 }

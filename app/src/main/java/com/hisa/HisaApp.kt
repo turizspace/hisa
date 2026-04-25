@@ -7,6 +7,7 @@ import javax.inject.Inject
 import com.hisa.data.nostr.NostrClient
 import com.hisa.data.nostr.SubscriptionManager
 import com.hisa.data.repository.ConversationRepository
+import com.hisa.data.repository.ProfileRepository
 import com.hisa.ui.util.ProfileMetaUtil
 import com.hisa.util.Constants
 import timber.log.Timber
@@ -21,6 +22,9 @@ class HisaApp : Application() {
     
     @Inject
     lateinit var profileMetaUtil: ProfileMetaUtil
+
+    @Inject
+    lateinit var profileRepository: ProfileRepository
 
     override fun onCreate() {
         super.onCreate()

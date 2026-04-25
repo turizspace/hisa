@@ -20,7 +20,8 @@ class ProfileMetaUtil @Inject constructor(
     private val appScope: CoroutineScope
 ) {
     // Thread-safe cache keyed by pubkey or pubkey_timestamp
-    private val cache: ConcurrentMap<String, Metadata?> = ConcurrentHashMap()
+    private val cache: ConcurrentMap<String, Metadata> = ConcurrentHashMap()
+    private val negativeCache: ConcurrentMap<String, Boolean> = ConcurrentHashMap()
 
     // Tracks in-progress fetches so multiple callers for the same key share the work
     // inProgress keyed by pubkey so we coalesce multiple per-event requests into a single subscription
@@ -39,6 +40,10 @@ class ProfileMetaUtil @Inject constructor(
         // Return cached result fast when available
         cache[cacheKey]?.let {
             onResult(it)
+            return
+        }
+        if (negativeCache.containsKey(cacheKey)) {
+            onResult(null)
             return
         }
 
@@ -75,7 +80,12 @@ class ProfileMetaUtil @Inject constructor(
 
                 val meta = chosen?.second
                 // Cache by cacheKey for quick subsequent lookup
-                cache[cacheKey] = meta
+                if (meta != null) {
+                    cache[cacheKey] = meta
+                    negativeCache.remove(cacheKey)
+                } else {
+                    negativeCache[cacheKey] = true
+                }
                 onResult(meta)
             } catch (e: Exception) {
                 onResult(null)
@@ -83,4 +93,3 @@ class ProfileMetaUtil @Inject constructor(
         }
     }
 }
-

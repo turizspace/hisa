@@ -42,7 +42,7 @@ import androidx.navigation.NavController
 import com.hisa.viewmodel.MessagesViewModel
 import com.hisa.ui.navigation.Routes
 import com.hisa.data.model.Message
-import com.hisa.ui.util.LocalProfileMetaUtil
+import com.hisa.ui.util.LocalProfileRepository
 import com.hisa.ui.components.MessagesSkeletonLoader
 import com.hisa.ui.components.EmptyMessagesState
 
@@ -63,6 +63,16 @@ fun MessagesTab(
     }
 
     val conversations = remember(allMessages) { messagesViewModel.getConversations() }
+    val profileRepository = LocalProfileRepository.current
+    val profiles by profileRepository.profiles.collectAsState()
+
+    LaunchedEffect(conversations.keys) {
+        profileRepository.ensureProfiles(
+            conversations.keys
+                .filter { it != "unknown" }
+                .toSet()
+        )
+    }
 
     if (isLoading) {
         MessagesSkeletonLoader(
@@ -84,15 +94,7 @@ fun MessagesTab(
         items(conversations.entries.toList(), key = { it.key }) { entry ->
             val otherPubkey = entry.key
             val messages = entry.value
-            
-            var metadata by remember(otherPubkey) { mutableStateOf<com.hisa.data.model.Metadata?>(null) }
-            val profileMetaUtil = LocalProfileMetaUtil.current
-            
-            LaunchedEffect(otherPubkey) {
-                profileMetaUtil.fetchProfileMetadata(otherPubkey) { result ->
-                    metadata = result
-                }
-            }
+            val metadata = profiles[otherPubkey]
             
             ListItem(
                 headlineContent = {
@@ -103,7 +105,7 @@ fun MessagesTab(
                     } else {
                         otherPubkey
                     }
-                    Text(metadata?.name ?: fallback)
+                    Text(metadata?.displayName ?: metadata?.name ?: fallback)
                 },
                 supportingContent = { 
                     val previewMessage = messages.firstOrNull { it !is Message.ReactionMessage } ?: messages.firstOrNull()

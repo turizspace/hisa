@@ -46,6 +46,7 @@ import androidx.navigation.compose.rememberNavController
 import androidx.lifecycle.viewmodel.compose.LocalViewModelStoreOwner
 import com.hisa.data.repository.ServiceRepository
 import com.hisa.ui.navigation.Routes
+import com.hisa.ui.util.LocalProfileRepository
 
 @Composable
 fun FeedTab(
@@ -60,6 +61,8 @@ fun FeedTab(
     val privateKeyHex by authViewModel.privateKey.collectAsState()
     val services by feedViewModel.services.collectAsState()
     val isLoading by feedViewModel.isLoading.collectAsState()
+    val profileRepository = LocalProfileRepository.current
+    val profiles by profileRepository.profiles.collectAsState()
     val showLoading = rememberTabLoadingVisibility(isLoading = isLoading)
     val categories by feedViewModel.categories.collectAsState()
     // Persist selected category in the ViewModel so it survives navigation
@@ -72,6 +75,10 @@ fun FeedTab(
         if (searchQuery != searchText) searchText = searchQuery
     }
     val gridState = rememberLazyGridState()
+
+    LaunchedEffect(services) {
+        profileRepository.ensureProfiles(services.map { it.pubkey }.toSet())
+    }
 
     // Notify parent when the grid is at the top (so parent can show tabs / FAB)
     LaunchedEffect(gridState) {
@@ -257,6 +264,7 @@ fun FeedTab(
 
                     ServiceCard(
                         service = service,
+                        publisherMetadata = profiles[service.pubkey],
                         showTags = showTags,
                         onClick = {
                             ServiceRepository.cacheService(service)

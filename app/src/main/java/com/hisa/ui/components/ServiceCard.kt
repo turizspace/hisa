@@ -26,7 +26,6 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.ui.tooling.preview.Preview
-import com.hisa.ui.util.LocalProfileMetaUtil
 import com.hisa.ui.util.formatTimeAgo
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.text.AnnotatedString
@@ -38,30 +37,20 @@ import androidx.compose.foundation.shape.CornerSize
 @Composable
 fun ServiceCard(
     service: ServiceListing,
+    publisherMetadata: Metadata? = null,
     showTags: Boolean = true,
     onClick: ((String) -> Unit)? = null, // Pass eventId
     onMessageClick: ((String, String?) -> Unit)? = null, // Pass pubkey and profile picture
     userPubkey: String? = null // Current user's pubkey to check if service is user's own
 ) {
-    // Keep a stable key per service event
-    val cardKey = "${service.eventId}.${service.pubkey}"
-    val profileMetaUtil = LocalProfileMetaUtil.current
-    var metadata by remember(cardKey) { mutableStateOf<Metadata?>(null) }
-
-    LaunchedEffect(cardKey) {
-        profileMetaUtil.fetchProfileMetadata(service.pubkey, eventId = service.eventId) { result ->
-            metadata = result
-        }
-    }
-
     // Prefer images explicitly listed in the service (tag name 'image'), then fall back to metadata.picture or URLs inside content
-    val imageUrl by remember(service.eventId, metadata?.picture, service.rawTags, service.content) {
+    val imageUrl by remember(service.eventId, publisherMetadata?.picture, service.rawTags, service.content) {
         mutableStateOf(
             (service.rawTags
                 .filter { it.isNotEmpty() && it[0] == "image" }
                 .mapNotNull { it.getOrNull(1) as? String }
                 .firstOrNull())
-                ?: metadata?.picture?.takeIf { it.isNotBlank() }
+                ?: publisherMetadata?.picture?.takeIf { it.isNotBlank() }
                 ?: Regex("(https?:\\/\\/\\S+\\.(?:png|jpe?g|gif|webp))", RegexOption.IGNORE_CASE)
                     .find(service.content ?: "")
                     ?.value
@@ -277,7 +266,7 @@ fun ServiceCard(
                 val isOwnListing = userPubkey?.let { it == service.pubkey } ?: false
                 if (!isOwnListing) {
                     Button(
-                        onClick = { onMessageClick?.invoke(service.pubkey, metadata?.picture) },
+                        onClick = { onMessageClick?.invoke(service.pubkey, publisherMetadata?.picture) },
                         modifier = Modifier
                             .fillMaxWidth()
                             .height(32.dp),
