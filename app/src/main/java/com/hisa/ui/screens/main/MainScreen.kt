@@ -357,7 +357,11 @@ fun MainScreen(
                             userPubkey = userPubkey,
                             searchQuery = searchQuery,
                             feedViewModel = feedViewModel,
-                            onAtTopChange = { atTop -> feedAtTop = atTop }
+                            onAtTopChange = { atTop -> feedAtTop = atTop },
+                            onSeeAllStalls = {
+                                selectedTab = 3
+                                navController.currentBackStackEntry?.savedStateHandle?.set("stalls_searchQuery", "")
+                            }
                         )
                         1 -> MessagesTab(
                             navController = navController,

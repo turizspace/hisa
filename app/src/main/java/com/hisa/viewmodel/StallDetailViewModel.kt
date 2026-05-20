@@ -13,7 +13,6 @@ import javax.inject.Inject
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
-import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 
 @HiltViewModel
@@ -29,13 +28,21 @@ class StallDetailViewModel @Inject constructor(
 
     val stall: StateFlow<Stall?> = combine(
         marketplaceRepository.stalls,
-        profileRepository.profiles
-    ) { stalls, profiles ->
+        profileRepository.profiles,
+        productRepository.productsByAuthor
+    ) { stalls, profiles, productsByAuthor ->
         val matchingStall = stalls.firstOrNull {
             it.ownerPubkey == ownerPubkey && (it.id == stallId || it.eventId == eventId)
         } ?: return@combine null
 
         val ownerMetadata = profiles[ownerPubkey]
+        val previewImage = productsByAuthor[ownerPubkey]
+            .orEmpty()
+            .filter { it.stallId == matchingStall.id || it.stallId == stallId }
+            .sortedByDescending { it.createdAt }
+            .asSequence()
+            .flatMap { it.pictures.asSequence() }
+            .firstOrNull { it.isNotBlank() }
         matchingStall.copy(
             ownerDisplayName = matchingStall.ownerDisplayName.ifBlank {
                 ownerMetadata?.displayName?.ifBlank { null }
@@ -44,6 +51,9 @@ class StallDetailViewModel @Inject constructor(
             },
             ownerProfilePicture = matchingStall.ownerProfilePicture.ifBlank {
                 ownerMetadata?.picture?.ifBlank { null } ?: ""
+            },
+            picture = matchingStall.picture.ifBlank {
+                previewImage.orEmpty()
             }
         )
     }.stateIn(
@@ -52,10 +62,16 @@ class StallDetailViewModel @Inject constructor(
         initialValue = null
     )
 
-    val products: StateFlow<List<Product>> = productRepository.productsByAuthor.map { byAuthor ->
+    val products: StateFlow<List<Product>> = combine(
+        productRepository.productsByAuthor,
+        stall
+    ) { byAuthor, resolvedStall ->
+        val resolvedStallId = resolvedStall?.id
         byAuthor[ownerPubkey]
             .orEmpty()
-            .filter { it.stallId == stallId }
+            .filter { product ->
+                product.stallId == stallId || (resolvedStallId != null && product.stallId == resolvedStallId)
+            }
             .sortedByDescending { it.createdAt }
     }.stateIn(
         scope = viewModelScope,
@@ -65,6 +81,7 @@ class StallDetailViewModel @Inject constructor(
 
     init {
         marketplaceRepository.ensureStarted()
+        productRepository.ensureStarted()
         productRepository.ensureAuthorSubscribed(ownerPubkey)
         profileRepository.ensureProfiles(setOf(ownerPubkey))
     }

@@ -22,7 +22,7 @@ import androidx.navigation.NavController
 import androidx.hilt.navigation.compose.hiltViewModel
 import com.hisa.data.nostr.NostrClient
 import com.hisa.data.nostr.SubscriptionManager
-import com.hisa.ui.components.StallCard
+import com.hisa.ui.components.StallPreviewCard
 import com.hisa.ui.navigation.Routes
 import com.hisa.viewmodel.StallsViewModel
 
@@ -69,14 +69,15 @@ fun StallsTab(
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
         contentPadding = PaddingValues(top = 8.dp, bottom = 96.dp),
-        verticalArrangement = Arrangement.spacedBy(4.dp)
+        verticalArrangement = Arrangement.spacedBy(8.dp)
     ) {
         items(
             items = filteredStalls,
             key = { "${it.ownerPubkey}:${it.id}" }
         ) { stall ->
-            StallCard(
+            StallPreviewCard(
                 stall = stall,
+                modifier = Modifier.padding(horizontal = 8.dp),
                 onClick = {
                     navController.navigate(
                         Routes.stallDetail(
