@@ -6,19 +6,25 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Store
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import coil.compose.AsyncImage
 import com.hisa.data.model.Stall
+import org.json.JSONArray
 
 @Composable
 fun StallCard(stall: Stall, modifier: Modifier = Modifier, onClick: (() -> Unit)? = null) {
-    val ownerName = stall.ownerDisplayName.ifBlank { "Shop by ${stall.ownerPubkey.take(8)}" }
-    val ownerPicture = stall.ownerProfilePicture
+    val ownerHandle = stall.ownerDisplayName
+        .ifBlank { stall.ownerPubkey.take(12) }
+        .removePrefix("@")
+    val ownerPicture = remember(stall.ownerProfilePicture) { normalizeStallImageUrl(stall.ownerProfilePicture) }
+    val stallPicture = remember(stall.picture) { normalizeStallImageUrl(stall.picture) }
 
     ElevatedCard(
         modifier = modifier.padding(8.dp),
@@ -41,7 +47,7 @@ fun StallCard(stall: Stall, modifier: Modifier = Modifier, onClick: (() -> Unit)
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
                     // Owner profile picture or avatar
-                    if (ownerPicture.isNotEmpty()) {
+                    if (!ownerPicture.isNullOrBlank()) {
                         AsyncImage(
                             model = ownerPicture,
                             contentDescription = "Owner profile picture",
@@ -68,7 +74,14 @@ fun StallCard(stall: Stall, modifier: Modifier = Modifier, onClick: (() -> Unit)
                     // Owner name or pubkey display
                     Column {
                         Text(
-                            text = ownerName,
+                            text = "by @$ownerHandle",
+                            style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.SemiBold),
+                            color = MaterialTheme.colorScheme.onSurface,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                        Text(
+                            text = "Seller",
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             maxLines = 1,
@@ -79,9 +92,9 @@ fun StallCard(stall: Stall, modifier: Modifier = Modifier, onClick: (() -> Unit)
             }
 
             // Stall picture
-            if (stall.picture.isNotEmpty()) {
+            if (!stallPicture.isNullOrBlank()) {
                 AsyncImage(
-                    model = stall.picture,
+                    model = stallPicture,
                     contentDescription = "Stall picture",
                     modifier = Modifier
                         .fillMaxWidth()
@@ -128,3 +141,32 @@ fun StallCard(stall: Stall, modifier: Modifier = Modifier, onClick: (() -> Unit)
         }
     }
 }
+
+private fun normalizeStallImageUrl(raw: String?): String? {
+    val trimmed = raw?.trim().orEmpty()
+    if (trimmed.isBlank()) return null
+    if (trimmed.startsWith("[")) {
+        val firstFromArray = runCatching {
+            JSONArray(trimmed).let { arr ->
+                (0 until arr.length())
+                    .mapNotNull { index -> arr.optString(index).trim().takeIf { it.isNotBlank() } }
+                    .firstOrNull()
+            }
+        }.getOrNull()
+        if (!firstFromArray.isNullOrBlank()) return upgradeStallImageUrl(firstFromArray)
+    }
+    val candidate = trimmed
+        .lineSequence()
+        .map(String::trim)
+        .firstOrNull { it.isNotBlank() }
+        ?: return null
+
+    return upgradeStallImageUrl(candidate)
+}
+
+private fun upgradeStallImageUrl(url: String): String =
+    if (url.startsWith("http://", ignoreCase = true)) {
+        "https://${url.substringAfter("://")}"
+    } else {
+        url
+    }

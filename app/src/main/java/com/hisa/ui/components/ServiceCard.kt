@@ -17,8 +17,6 @@ import androidx.compose.foundation.Image
 import androidx.compose.ui.layout.ContentScale
 import coil.compose.rememberAsyncImagePainter
 import com.hisa.data.model.Metadata
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.Message
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
 import androidx.compose.foundation.background
@@ -26,22 +24,16 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.ui.tooling.preview.Preview
-import com.hisa.ui.util.formatTimeAgo
-import androidx.compose.ui.platform.LocalClipboardManager
-import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.animation.animateContentSize
 import androidx.compose.ui.graphics.Color
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.shape.CornerSize
 
 @Composable
 fun ServiceCard(
     service: ServiceListing,
     publisherMetadata: Metadata? = null,
     showTags: Boolean = true,
-    onClick: ((String) -> Unit)? = null, // Pass eventId
-    onMessageClick: ((String, String?) -> Unit)? = null, // Pass pubkey and profile picture
-    userPubkey: String? = null // Current user's pubkey to check if service is user's own
+    onClick: ((String) -> Unit)? = null // Pass eventId
 ) {
     // Prefer images explicitly listed in the service (tag name 'image'), then fall back to metadata.picture or URLs inside content
     val imageUrl by remember(service.eventId, publisherMetadata?.picture, service.rawTags, service.content) {
@@ -56,6 +48,12 @@ fun ServiceCard(
                     ?.value
         )
     }
+    val publisherName = remember(service.pubkey, publisherMetadata?.displayName, publisherMetadata?.name) {
+        (publisherMetadata?.displayName?.ifBlank { null }
+            ?: publisherMetadata?.name?.ifBlank { null }
+            ?: service.pubkey).removePrefix("@")
+    }
+    val publisherInitial = publisherName.firstOrNull()?.uppercase() ?: "@"
 
     Card(
         modifier = Modifier
@@ -246,48 +244,42 @@ fun ServiceCard(
                     Spacer(modifier = Modifier.height(4.dp))
                 }
 
-                // Posted time chip - below location
-                val timeAgo = formatTimeAgo(service.createdAt)
-                Surface(
-                    color = MaterialTheme.colorScheme.tertiary.copy(alpha = 0.15f),
-                    shape = RoundedCornerShape(6.dp)
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    Text(
-                        text = timeAgo,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 3.dp),
-                        style = MaterialTheme.typography.labelSmall
-                    )
-                }
-
-                Spacer(modifier = Modifier.height(6.dp))
-
-                // Message button - full width (hidden if this is the user's own listing)
-                val isOwnListing = userPubkey?.let { it == service.pubkey } ?: false
-                if (!isOwnListing) {
-                    Button(
-                        onClick = { onMessageClick?.invoke(service.pubkey, publisherMetadata?.picture) },
+                    Surface(
                         modifier = Modifier
-                            .fillMaxWidth()
-                            .height(32.dp),
-                        colors = ButtonDefaults.buttonColors(
-                            containerColor = MaterialTheme.colorScheme.primary,
-                            contentColor = MaterialTheme.colorScheme.onPrimary
-                        ),
-                        shape = RoundedCornerShape(8.dp),
-                        contentPadding = androidx.compose.foundation.layout.PaddingValues(4.dp)
+                            .size(26.dp)
+                            .clip(CircleShape),
+                        color = MaterialTheme.colorScheme.surfaceVariant
                     ) {
-                        Icon(
-                            imageVector = Icons.AutoMirrored.Filled.Message,
-                            contentDescription = "Message Icon",
-                            modifier = Modifier.size(14.dp)
-                        )
-                        Spacer(modifier = Modifier.width(4.dp))
-                        Text(
-                            "Message",
-                            style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Medium)
-                        )
+                        Box(contentAlignment = Alignment.Center) {
+                            if (!publisherMetadata?.picture.isNullOrBlank()) {
+                                Image(
+                                    painter = rememberAsyncImagePainter(publisherMetadata?.picture),
+                                    contentDescription = "Publisher avatar",
+                                    modifier = Modifier.fillMaxSize(),
+                                    contentScale = ContentScale.Crop
+                                )
+                            } else {
+                                Text(
+                                    text = publisherInitial,
+                                    style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.SemiBold),
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
                     }
+
+                    Text(
+                        text = "by @$publisherName",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
                 }
             }
         } // Column end
@@ -299,7 +291,6 @@ fun ServiceCard(
 fun ServiceCardPreview() {
     ServiceCard(
         service = com.hisa.data.repository.ServiceRepository.getServiceByEventId("demo")!!,
-        onClick = {},
-        onMessageClick = { _, _ -> }
+        onClick = {}
     )
 }

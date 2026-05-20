@@ -9,6 +9,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ShoppingCart
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -17,6 +18,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import coil.compose.AsyncImage
 import com.hisa.data.model.Product
+import org.json.JSONArray
 
 /**
  * Displays a single product card for a stall.
@@ -24,10 +26,14 @@ import com.hisa.data.model.Product
  */
 @Composable
 fun ProductCard(product: Product, modifier: Modifier = Modifier, onAddToCart: (() -> Unit)? = null) {
+    val normalizedPictures = remember(product.pictures) {
+        product.pictures.mapNotNull(::normalizeProductImageUrl).distinct()
+    }
+
     ElevatedCard(modifier = modifier.padding(8.dp)) {
         Column(modifier = Modifier.padding(12.dp)) {
             // Product images carousel (if available)
-            if (product.pictures.isNotEmpty()) {
+            if (normalizedPictures.isNotEmpty()) {
                 LazyRow(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -35,7 +41,7 @@ fun ProductCard(product: Product, modifier: Modifier = Modifier, onAddToCart: ((
                         .clip(MaterialTheme.shapes.medium),
                     horizontalArrangement = Arrangement.spacedBy(4.dp)
                 ) {
-                    items(product.pictures) { imageUrl ->
+                    items(normalizedPictures) { imageUrl ->
                         AsyncImage(
                             model = imageUrl,
                             contentDescription = "Product image: ${product.name}",
@@ -143,6 +149,35 @@ fun ProductCard(product: Product, modifier: Modifier = Modifier, onAddToCart: ((
         }
     }
 }
+
+private fun normalizeProductImageUrl(raw: String?): String? {
+    val trimmed = raw?.trim().orEmpty()
+    if (trimmed.isBlank()) return null
+    if (trimmed.startsWith("[")) {
+        val firstFromArray = runCatching {
+            JSONArray(trimmed).let { arr ->
+                (0 until arr.length())
+                    .mapNotNull { index -> arr.optString(index).trim().takeIf { it.isNotBlank() } }
+                    .firstOrNull()
+            }
+        }.getOrNull()
+        if (!firstFromArray.isNullOrBlank()) return upgradeProductImageUrl(firstFromArray)
+    }
+    val candidate = trimmed
+        .lineSequence()
+        .map(String::trim)
+        .firstOrNull { it.isNotBlank() }
+        ?: return null
+
+    return upgradeProductImageUrl(candidate)
+}
+
+private fun upgradeProductImageUrl(url: String): String =
+    if (url.startsWith("http://", ignoreCase = true)) {
+        "https://${url.substringAfter("://")}"
+    } else {
+        url
+    }
 
 /**
  * Displays a list of products in a horizontal scrolling row.
