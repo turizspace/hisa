@@ -10,6 +10,7 @@ package com.hisa.data.model
 data class Product(
     val id: String,                          // From d tag
     val stallId: String,                     // From stall_id tag
+    val authorPubkey: String = "",
     val name: String,
     val description: String = "",
     val pictures: List<String> = emptyList(),

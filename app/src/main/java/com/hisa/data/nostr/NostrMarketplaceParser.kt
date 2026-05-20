@@ -29,9 +29,11 @@ object NostrMarketplaceParser {
             ?: event.firstTagValue("description")
             ?: ""
 
-        val picture = content?.optMeaningfulString("picture")
-            ?: content?.optMeaningfulString("image")
-            ?: event.firstTagValue("image")
+        val picture = content?.optFirstImageUrl("picture", "image", "images", "pictures")
+            ?: event.firstTagValue("image")?.let(::upgradeImageUrl)
+            ?: event.tagValues("image").firstOrNull()?.let(::upgradeImageUrl)
+            ?: event.firstTagValue("picture")?.let(::upgradeImageUrl)
+            ?: event.tagValues("picture").firstOrNull()?.let(::upgradeImageUrl)
             ?: ""
 
         val currency = content?.optMeaningfulString("currency") ?: "USD"
@@ -84,11 +86,15 @@ object NostrMarketplaceParser {
         return Product(
             id = productId,
             stallId = stallId,
+            authorPubkey = event.pubkey,
             name = name,
             description = description,
-            pictures = content?.optStringArray("images").orEmpty().ifEmpty {
-                event.tagValues("image")
-            },
+            pictures = content?.optImageUrls("images", "image", "picture", "pictures").orEmpty()
+                .ifEmpty {
+                    (event.tagValues("image") + event.tagValues("picture"))
+                        .map(::upgradeImageUrl)
+                        .distinct()
+                },
             currency = currency,
             price = rawPrice?.toString() ?: "0",
             quantity = content?.optNullableInt("quantity")
@@ -145,6 +151,22 @@ object NostrMarketplaceParser {
         return array.toStringList()
     }
 
+    private fun JSONObject.optFirstImageUrl(vararg keys: String): String? =
+        optImageUrls(*keys)
+            .orEmpty()
+            .firstOrNull()
+
+    private fun JSONObject.optImageUrls(vararg keys: String): List<String>? =
+        keys.asSequence()
+            .mapNotNull { key ->
+                when (val value = opt(key)) {
+                    is String -> normalizeImageValues(value)
+                    is JSONArray -> value.toStringList().map(::upgradeImageUrl).ifEmpty { null }
+                    else -> null
+                }
+            }
+            .firstOrNull()
+
     private fun JSONObject.optNullableInt(key: String): Int? {
         if (!has(key) || isNull(key)) return null
         val value = opt(key)
@@ -170,5 +192,30 @@ object NostrMarketplaceParser {
                 val value = optString(index).trim()
                 if (value.isNotBlank()) add(value)
             }
+        }
+
+    private fun normalizeImageValue(raw: String): String? =
+        normalizeImageValues(raw).firstOrNull()
+
+    private fun normalizeImageValues(raw: String): List<String> {
+        val trimmed = raw.trim()
+        if (trimmed.isBlank()) return emptyList()
+        if (trimmed.startsWith("[")) {
+            val parsed = runCatching { JSONArray(trimmed).toStringList().map(::upgradeImageUrl) }.getOrNull()
+            if (!parsed.isNullOrEmpty()) return parsed
+        }
+        return trimmed
+            .lineSequence()
+            .map(String::trim)
+            .filter { it.isNotBlank() }
+            .map(::upgradeImageUrl)
+            .toList()
+    }
+
+    private fun upgradeImageUrl(url: String): String =
+        if (url.startsWith("http://", ignoreCase = true)) {
+            "https://${url.substringAfter("://")}"
+        } else {
+            url
         }
 }

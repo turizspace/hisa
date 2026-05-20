@@ -13,6 +13,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.flow.updateAndGet
 import kotlinx.coroutines.launch
 
 @Singleton
@@ -31,9 +32,16 @@ class ProductRepository @Inject constructor(
         @Volatile var lastAccessAt: Long
     )
 
+    private val _stallPreviewImages = MutableStateFlow<Map<String, String>>(emptyMap())
+    val stallPreviewImages: StateFlow<Map<String, String>> = _stallPreviewImages
+
     private val authorSubscriptions = ConcurrentHashMap<String, AuthorSubscription>()
     private val _productsByAuthor = MutableStateFlow<Map<String, List<Product>>>(emptyMap())
     val productsByAuthor: StateFlow<Map<String, List<Product>>> = _productsByAuthor
+    private var globalListenerId: String? = null
+
+    @Volatile
+    private var started = false
 
     init {
         appScope.launch(Dispatchers.IO) {
@@ -44,8 +52,23 @@ class ProductRepository @Inject constructor(
         }
     }
 
+    fun ensureStarted() {
+        if (started) return
+        started = true
+
+        nostrClient.connect()
+        globalListenerId = subscriptionManager.subscribe(
+            filter = SubscriptionManager.filterNIP15Products(limit = 400),
+            onEvent = { event ->
+                val product = NostrMarketplaceParser.parseProduct(event) ?: return@subscribe
+                upsertProduct(product)
+            }
+        )
+    }
+
     fun ensureAuthorSubscribed(authorPubkey: String) {
         if (authorPubkey.isBlank()) return
+        ensureStarted()
 
         val now = System.currentTimeMillis()
         authorSubscriptions[authorPubkey]?.let { existing ->
@@ -61,7 +84,7 @@ class ProductRepository @Inject constructor(
             ),
             onEvent = { event ->
                 val product = NostrMarketplaceParser.parseProduct(event) ?: return@subscribe
-                upsertProduct(authorPubkey, product)
+                upsertProduct(product)
             }
         )
 
@@ -81,8 +104,11 @@ class ProductRepository @Inject constructor(
             }
     }
 
-    private fun upsertProduct(authorPubkey: String, product: Product) {
-        _productsByAuthor.update { current ->
+    private fun upsertProduct(product: Product) {
+        val authorPubkey = product.authorPubkey
+        if (authorPubkey.isBlank()) return
+
+        val updatedProductsForAuthor = _productsByAuthor.updateAndGet { current ->
             val next = current.toMutableMap()
             val productsForAuthor = (next[authorPubkey] ?: emptyList()).associateBy { it.id }.toMutableMap()
             val existing = productsForAuthor[product.id]
@@ -90,6 +116,27 @@ class ProductRepository @Inject constructor(
                 productsForAuthor[product.id] = product
             }
             next[authorPubkey] = productsForAuthor.values.sortedByDescending { it.createdAt }
+            next
+        }[authorPubkey].orEmpty()
+
+        _stallPreviewImages.update { current ->
+            val next = current.toMutableMap()
+            val authorPrefix = "${authorPubkey.lowercase()}:"
+            next.keys.filter { it.startsWith(authorPrefix) }.forEach(next::remove)
+
+            updatedProductsForAuthor
+                .groupBy { it.stallId }
+                .forEach { (stallId, products) ->
+                    val preview = products
+                        .sortedByDescending { it.createdAt }
+                        .asSequence()
+                        .flatMap { it.pictures.asSequence() }
+                        .firstOrNull { it.isNotBlank() }
+                    if (!preview.isNullOrBlank()) {
+                        next[NostrMarketplaceParser.stallKey(stallId, authorPubkey)] = preview
+                    }
+                }
+
             next
         }
     }
