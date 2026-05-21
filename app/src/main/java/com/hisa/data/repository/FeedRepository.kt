@@ -3,10 +3,16 @@ package com.hisa.data.repository
 import com.hisa.data.model.ServiceListing
 import com.hisa.data.nostr.NostrClient
 import com.hisa.data.nostr.SubscriptionManager
+import com.hisa.data.nostr.categoryLogString
+import com.hisa.data.nostr.normalizedCategories
+import com.hisa.data.nostr.normalizedCategoryLogString
+import com.hisa.util.CategoryCollector
+import com.hisa.util.normalizeCategory
 import java.util.concurrent.ConcurrentHashMap
 import javax.inject.Inject
 import javax.inject.Singleton
 import kotlinx.coroutines.flow.MutableStateFlow
+import timber.log.Timber
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.update
 
@@ -51,6 +57,19 @@ class FeedRepository @Inject constructor(
         subscriptionListenerId = subscriptionManager.subscribe(
             filter = SubscriptionManager.filterNIP99(limit = 200),
             onEvent = { event ->
+                val categories = event.normalizedCategories()
+                CategoryCollector.collect(categories)
+                Timber.d(
+                    "Feed event received id=%s kind=%d categories=%s normalizedCategories=%s",
+                    event.id,
+                    event.kind,
+                    event.categoryLogString(),
+                    event.normalizedCategoryLogString()
+                )
+                Timber.i(
+                    "Feed event category catalog=%s",
+                    CategoryCollector.allCategories()
+                )
                 val service = ServiceRepository.parseServiceEvent(event.toJson().toString()) ?: return@subscribe
                 upsertService(service)
                 profileRepository.ensureProfiles(setOf(service.pubkey))
@@ -75,6 +94,7 @@ class FeedRepository @Inject constructor(
                 listing.rawTags
                     .filter { it.isNotEmpty() && it[0] == "t" }
                     .mapNotNull { it.getOrNull(1) as? String }
+                    .map(::normalizeCategory)
             }
                 .distinct()
                 .filter { it.toIntOrNull() == null }

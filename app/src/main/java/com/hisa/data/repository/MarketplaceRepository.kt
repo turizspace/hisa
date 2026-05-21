@@ -3,12 +3,19 @@ package com.hisa.data.repository
 import com.hisa.data.model.Stall
 import com.hisa.data.nostr.NostrClient
 import com.hisa.data.nostr.NostrMarketplaceParser
+import com.hisa.data.nostr.NostrEvent
 import com.hisa.data.nostr.SubscriptionManager
+import com.hisa.data.nostr.categoryLogString
+import com.hisa.data.nostr.normalizedCategories
+import com.hisa.data.nostr.normalizedCategoryLogString
+import com.hisa.data.nostr.tagsLogString
+import com.hisa.util.CategoryCollector
 import javax.inject.Inject
 import javax.inject.Singleton
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.update
+import timber.log.Timber
 
 @Singleton
 class MarketplaceRepository @Inject constructor(
@@ -39,6 +46,19 @@ class MarketplaceRepository @Inject constructor(
         subscriptionListenerId = subscriptionManager.subscribe(
             filter = SubscriptionManager.filterNIP15Stalls(limit = 200),
             onEvent = { event ->
+                val categories = event.normalizedCategories()
+                CategoryCollector.collect(categories)
+                Timber.d(
+                    "Marketplace stall event received id=%s kind=%d categories=%s normalizedCategories=%s",
+                    event.id,
+                    event.kind,
+                    event.categoryLogString(),
+                    event.normalizedCategoryLogString()
+                )
+                Timber.i(
+                    "Marketplace stall category catalog=%s",
+                    CategoryCollector.allCategories()
+                )
                 val stall = NostrMarketplaceParser.parseStall(event) ?: return@subscribe
                 upsertStall(stall)
                 profileRepository.ensureProfiles(setOf(stall.ownerPubkey))

@@ -4,6 +4,11 @@ import com.hisa.data.model.Product
 import com.hisa.data.nostr.NostrClient
 import com.hisa.data.nostr.NostrMarketplaceParser
 import com.hisa.data.nostr.SubscriptionManager
+import com.hisa.data.nostr.categoryLogString
+import com.hisa.data.nostr.normalizedCategories
+import com.hisa.data.nostr.normalizedCategoryLogString
+import com.hisa.data.nostr.tagsLogString
+import com.hisa.util.CategoryCollector
 import java.util.concurrent.ConcurrentHashMap
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -15,6 +20,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.flow.updateAndGet
 import kotlinx.coroutines.launch
+import timber.log.Timber
 
 @Singleton
 class ProductRepository @Inject constructor(
@@ -60,6 +66,19 @@ class ProductRepository @Inject constructor(
         globalListenerId = subscriptionManager.subscribe(
             filter = SubscriptionManager.filterNIP15Products(limit = 400),
             onEvent = { event ->
+                val categories = event.normalizedCategories()
+                CategoryCollector.collect(categories)
+                Timber.d(
+                    "Marketplace product event received id=%s kind=%d categories=%s normalizedCategories=%s",
+                    event.id,
+                    event.kind,
+                    event.categoryLogString(),
+                    event.normalizedCategoryLogString()
+                )
+                Timber.i(
+                    "Marketplace product category catalog=%s",
+                    CategoryCollector.allCategories()
+                )
                 val product = NostrMarketplaceParser.parseProduct(event) ?: return@subscribe
                 upsertProduct(product)
             }
@@ -83,6 +102,20 @@ class ProductRepository @Inject constructor(
                 limit = 200
             ),
             onEvent = { event ->
+                val categories = event.normalizedCategories()
+                CategoryCollector.collect(categories)
+                Timber.d(
+                    "Marketplace author product event received id=%s kind=%d author=%s categories=%s normalizedCategories=%s",
+                    event.id,
+                    event.kind,
+                    authorPubkey,
+                    event.categoryLogString(),
+                    event.normalizedCategoryLogString()
+                )
+                Timber.i(
+                    "Marketplace author product category catalog=%s",
+                    CategoryCollector.allCategories()
+                )
                 val product = NostrMarketplaceParser.parseProduct(event) ?: return@subscribe
                 upsertProduct(product)
             }
