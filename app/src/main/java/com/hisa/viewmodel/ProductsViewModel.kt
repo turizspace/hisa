@@ -6,17 +6,11 @@ import com.hisa.data.model.Product
 import com.hisa.data.nostr.NostrClient
 import com.hisa.data.nostr.NostrMarketplaceParser
 import com.hisa.data.nostr.SubscriptionManager
-import com.hisa.data.nostr.categoryLogString
-import com.hisa.data.nostr.normalizedCategories
-import com.hisa.data.nostr.normalizedCategoryLogString
-import com.hisa.data.nostr.tagsLogString
-import com.hisa.util.CategoryCollector
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 import androidx.lifecycle.ViewModelProvider
 import org.json.JSONObject
-import timber.log.Timber
 
 class ProductsViewModel(
     private val nostrClient: NostrClient,
@@ -39,19 +33,6 @@ class ProductsViewModel(
                 subscriptionManager.subscribe(
                     filter = SubscriptionManager.filterNIP15Products(),
                     onEvent = { event ->
-                        val categories = event.normalizedCategories()
-                        CategoryCollector.collect(categories)
-                        Timber.d(
-                            "ProductsViewModel event received id=%s kind=%d categories=%s normalizedCategories=%s",
-                            event.id,
-                            event.kind,
-                            event.categoryLogString(),
-                            event.normalizedCategoryLogString()
-                        )
-                        Timber.i(
-                            "ProductsViewModel category catalog=%s",
-                            CategoryCollector.allCategories()
-                        )
                         try {
                             val product = NostrMarketplaceParser.parseProduct(event) ?: return@subscribe
                             if (product.stallId != stallId) return@subscribe
