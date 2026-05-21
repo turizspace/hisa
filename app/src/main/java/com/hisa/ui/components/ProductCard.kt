@@ -11,6 +11,7 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
+import com.hisa.util.normalizeCategory
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.layout.ContentScale
@@ -118,17 +119,21 @@ fun ProductCard(product: Product, modifier: Modifier = Modifier, onAddToCart: ((
             }
 
             // Categories
-            if (product.categories.isNotEmpty()) {
+            val normalizedCategories = remember(product.categories) {
+                product.categories
+                    .map(::normalizeCategory)
+                    .distinct()
+            }
+            if (normalizedCategories.isNotEmpty()) {
                 LazyRow(
                     modifier = Modifier
                         .fillMaxWidth()
                         .padding(top = 8.dp),
                     horizontalArrangement = Arrangement.spacedBy(4.dp)
                 ) {
-                    items(product.categories) { category ->
-                        AssistChip(
-                            onClick = {},
-                            label = { Text(category) },
+                    items(normalizedCategories) { category ->
+                        CategoryAssistChip(
+                            category = category,
                             modifier = Modifier.heightIn(max = 24.dp)
                         )
                     }

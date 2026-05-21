@@ -12,6 +12,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.hisa.data.model.ServiceListing
+import com.hisa.util.normalizeCategory
 
 import androidx.compose.foundation.Image
 import androidx.compose.ui.layout.ContentScale
@@ -132,28 +133,29 @@ fun ServiceCard(
                 if (showTags) {
                     val topicTags = service.rawTags.filter { it.isNotEmpty() && it[0] == "t" }
                         .mapNotNull { it.getOrNull(1) as? String }
+                        .map(::normalizeCategory)
                         .distinct()
                     if (topicTags.isNotEmpty()) {
                         Row(
                             horizontalArrangement = Arrangement.spacedBy(4.dp),
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .height(24.dp),
+                                .height(28.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             topicTags.take(2).forEach { tag ->
-                                Surface(
-                                    color = MaterialTheme.colorScheme.primary.copy(alpha = 0.12f),
-                                    shape = RoundedCornerShape(12.dp),
-                                    tonalElevation = 0.dp
-                                ) {
-                                    Text(
-                                        text = if (tag.length > 10) tag.take(8) + ".." else tag,
-                                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
-                                        style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Medium),
-                                        color = MaterialTheme.colorScheme.primary
-                                    )
-                                }
+                                val categoryUi = categoryUiFor(tag)
+                                AssistChip(
+                                    onClick = {},
+                                    label = { Text(categoryUi.label) },
+                                    leadingIcon = { Icon(categoryUi.icon, contentDescription = null) },
+                                    colors = AssistChipDefaults.assistChipColors(
+                                        containerColor = categoryUi.color.copy(alpha = 0.14f),
+                                        labelColor = MaterialTheme.colorScheme.onSurface,
+                                        leadingIconContentColor = categoryUi.color
+                                    ),
+                                    modifier = Modifier.heightIn(max = 28.dp)
+                                )
                             }
                             if (topicTags.size > 2) {
                                 Surface(
