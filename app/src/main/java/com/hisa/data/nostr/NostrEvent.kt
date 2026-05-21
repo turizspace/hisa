@@ -1,5 +1,6 @@
 package com.hisa.data.nostr
 
+import com.hisa.util.normalizeCategory
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -40,3 +41,25 @@ fun JSONObject.toNostrEvent(): NostrEvent {
         sig = getString("sig")
     )
 }
+
+fun NostrEvent.tagsLogString(): String = tags.joinToString(prefix = "[", postfix = "]") { tag ->
+    tag.joinToString(prefix = "[", postfix = "]")
+}
+
+fun NostrEvent.tagValues(tagName: String): List<String> =
+    tags.filter { it.firstOrNull() == tagName }
+        .mapNotNull { it.getOrNull(1)?.takeIf(String::isNotBlank) }
+
+fun NostrEvent.categoryLogString(): String =
+    tagValues("t").joinToString(prefix = "[", postfix = "]") { "\"$it\"" }
+
+fun NostrEvent.normalizedCategories(): Set<String> =
+    tagValues("t")
+        .map(::normalizeCategory)
+        .filter { it.isNotBlank() }
+        .toSet()
+
+fun NostrEvent.normalizedCategoryLogString(): String =
+    normalizedCategories()
+        .sorted()
+        .joinToString(prefix = "[", postfix = "]") { "\"$it\"" }
