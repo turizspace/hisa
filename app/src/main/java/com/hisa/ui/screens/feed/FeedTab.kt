@@ -35,12 +35,14 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.navigation.NavController
 import com.hisa.data.model.ServiceListing
 import com.hisa.data.repository.ServiceRepository
+import com.hisa.ui.components.CategoryChipRow
 import com.hisa.ui.components.EmptyFeedState
 import com.hisa.ui.components.FeedSkeletonLoader
 import com.hisa.ui.components.ServicePreviewCard
 import com.hisa.ui.components.SearchEmptyState
 import com.hisa.ui.components.StallPreviewCard
 import com.hisa.ui.components.rememberTabLoadingVisibility
+import com.hisa.util.normalizeCategory
 import com.hisa.ui.navigation.Routes
 import com.hisa.ui.util.LocalProfileRepository
 import com.hisa.viewmodel.FeedViewModel
@@ -49,6 +51,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import timber.log.Timber
 
 private const val PREVIEW_ITEM_COUNT = 6
 
@@ -64,10 +67,29 @@ fun FeedTab(
     val stallsViewModel: StallsViewModel = hiltViewModel()
     val services by feedViewModel.services.collectAsState()
     val stalls by stallsViewModel.stalls.collectAsState()
+    val categories by feedViewModel.categories.collectAsState()
+    val selectedCategory by feedViewModel.selectedCategory.collectAsState()
     val isLoading by feedViewModel.isLoading.collectAsState()
     val profileRepository = LocalProfileRepository.current
     val profiles by profileRepository.profiles.collectAsState()
     val showLoading = rememberTabLoadingVisibility(isLoading = isLoading)
+
+    val stallCategories = stalls
+        .flatMap { it.categories }
+        .map(::normalizeCategory)
+        .filter { it.isNotBlank() }
+        .distinct()
+        .sorted()
+
+    val allCategories = (categories + stallCategories)
+        .distinct()
+        .sorted()
+
+    LaunchedEffect(allCategories) {
+        if (allCategories.isNotEmpty()) {
+            Timber.i("Feed all categories=%s", allCategories)
+        }
+    }
 
     val saved = navController.currentBackStackEntry?.savedStateHandle
     var searchText by rememberSaveable { mutableStateOf(saved?.get<String>("feed_searchQuery") ?: searchQuery) }
@@ -92,28 +114,35 @@ fun FeedTab(
     val sortedStalls = stalls.sortedByDescending { it.createdAt }
     val normalizedQuery = searchText.trim()
     val isSearching = normalizedQuery.isNotEmpty()
+    val activeCategory = selectedCategory?.takeIf { it.isNotBlank() }
     val showingDiscovery = !isSearching && !showAllServices
 
-    val filteredServices = if (isSearching) {
-        sortedServices.filter { service ->
+    val filteredServices = sortedServices
+        .filter { service ->
+            activeCategory?.let { category ->
+                service.tags.map(::normalizeCategory).any { it == category }
+            } ?: true
+        }
+        .filter { service ->
+            if (!isSearching) return@filter true
             service.title.contains(normalizedQuery, ignoreCase = true) ||
                 (service.summary ?: "").contains(normalizedQuery, ignoreCase = true) ||
                 service.tags.any { it.contains(normalizedQuery, ignoreCase = true) }
         }
-    } else {
-        sortedServices
-    }
 
-    val filteredStalls = if (isSearching) {
-        sortedStalls.filter { stall ->
+    val filteredStalls = sortedStalls
+        .filter { stall ->
+            activeCategory?.let { category ->
+                stall.categories.map(::normalizeCategory).any { it == category }
+            } ?: true
+        }
+        .filter { stall ->
+            if (!isSearching) return@filter true
             stall.name.contains(normalizedQuery, ignoreCase = true) ||
                 stall.description.contains(normalizedQuery, ignoreCase = true) ||
                 stall.ownerDisplayName.contains(normalizedQuery, ignoreCase = true) ||
                 stall.categories.any { it.contains(normalizedQuery, ignoreCase = true) }
         }
-    } else {
-        sortedStalls
-    }
 
     LaunchedEffect(listState, gridState, showingDiscovery, isSearching) {
         if (showingDiscovery || isSearching) {
@@ -162,17 +191,27 @@ fun FeedTab(
                 contentPadding = PaddingValues(top = 8.dp, bottom = 96.dp),
                 verticalArrangement = Arrangement.spacedBy(18.dp)
             ) {
+                if (allCategories.isNotEmpty()) {
+                    item {
+                        CategoryChipRow(
+                            categories = allCategories,
+                            selectedCategory = selectedCategory,
+                            onSelect = { feedViewModel.setSelectedCategory(it) }
+                        )
+                    }
+                }
+
                 item {
                     PreviewSectionHeader(
                         title = "Services",
-                        subtitle = "${sortedServices.size} listings",
+                        subtitle = "${filteredServices.size} listings",
                         actionLabel = "See all",
                         onAction = { showAllServices = true }
                     )
                 }
 
                 item {
-                    if (sortedServices.isEmpty()) {
+                    if (filteredServices.isEmpty()) {
                         PreviewSectionEmptyState(
                             text = "No services yet. Pull to refresh or check back soon."
                         )
@@ -182,7 +221,7 @@ fun FeedTab(
                             horizontalArrangement = Arrangement.spacedBy(12.dp)
                         ) {
                             items(
-                                items = sortedServices.take(PREVIEW_ITEM_COUNT),
+                                items = filteredServices.take(PREVIEW_ITEM_COUNT),
                                 key = { "${it.eventId}.${it.pubkey}" }
                             ) { service ->
                                 Box(modifier = Modifier.width(236.dp)) {
@@ -207,14 +246,14 @@ fun FeedTab(
                 item {
                     PreviewSectionHeader(
                         title = "Shops",
-                        subtitle = "${sortedStalls.size} stalls",
+                        subtitle = "${filteredStalls.size} stalls",
                         actionLabel = "See all",
                         onAction = onSeeAllStalls
                     )
                 }
 
                 item {
-                    if (sortedStalls.isEmpty()) {
+                    if (filteredStalls.isEmpty()) {
                         PreviewSectionEmptyState(
                             text = "No stalls yet. New shops will show up here."
                         )
@@ -224,7 +263,7 @@ fun FeedTab(
                             horizontalArrangement = Arrangement.spacedBy(12.dp)
                         ) {
                             items(
-                                items = sortedStalls.take(PREVIEW_ITEM_COUNT),
+                                items = filteredStalls.take(PREVIEW_ITEM_COUNT),
                                 key = { "${it.ownerPubkey}:${it.id}" }
                             ) { stall ->
                                 StallPreviewCard(
@@ -261,6 +300,15 @@ fun FeedTab(
                 contentPadding = PaddingValues(top = 8.dp, bottom = 96.dp),
                 verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
+                if (allCategories.isNotEmpty()) {
+                    item {
+                        CategoryChipRow(
+                            categories = allCategories,
+                            selectedCategory = selectedCategory,
+                            onSelect = { feedViewModel.setSelectedCategory(it) }
+                        )
+                    }
+                }
                 if (filteredServices.isNotEmpty()) {
                     item {
                         PreviewSectionHeader(
@@ -329,6 +377,14 @@ fun FeedTab(
 
         else -> {
             Column(modifier = Modifier.fillMaxSize()) {
+                if (allCategories.isNotEmpty()) {
+                    CategoryChipRow(
+                        categories = allCategories,
+                        selectedCategory = selectedCategory,
+                        onSelect = { feedViewModel.setSelectedCategory(it) },
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp)
+                    )
+                }
                 PreviewSectionHeader(
                     title = "All Services",
                     subtitle = "${filteredServices.size} listings",

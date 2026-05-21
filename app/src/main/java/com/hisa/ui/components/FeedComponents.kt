@@ -16,6 +16,7 @@ import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
+import com.hisa.ui.components.categoryUiForCategoryKey
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -47,10 +48,16 @@ fun CategoryChipRow(
             label = { Text("All") }
         )
         categories.forEach { category ->
+            val categoryUi = categoryUiForCategoryKey(category)
             FilterChip(
                 selected = selectedCategory == category,
                 onClick = { onSelect(category) },
-                label = { Text(category) }
+                label = { Text(categoryUi.label) },
+                leadingIcon = { Icon(categoryUi.icon, contentDescription = null) },
+                colors = FilterChipDefaults.filterChipColors(
+                    selectedLeadingIconColor = categoryUi.color,
+                    selectedContainerColor = categoryUi.color.copy(alpha = 0.16f)
+                )
             )
         }
     }
