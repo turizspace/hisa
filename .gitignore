@@ -7,3 +7,5 @@ hisa_keypair*.txt
 .kotlin/
 build/
 app/build/
+gradle-*
+*.md
