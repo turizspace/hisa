@@ -168,8 +168,20 @@ fun LoginScreen(
                                 // Build an intent that matches the Amber/Quartz GET_PUBLIC_KEY request shape.
                                 val intent = android.content.Intent(android.content.Intent.ACTION_VIEW, "nostrsigner:".toUri())
                                 intent.putExtra("type", "get_public_key")
-                                // Minimal permissions payload; Amber will accept and show the user the request.
-                                intent.putExtra("permissions", "[]")
+                                // Ask once for the DM operations we need later so Amber can
+                                // serve them through NIP-55 content resolvers without reopening.
+                                intent.putExtra(
+                                    "permissions",
+                                    """[
+                                      {"type":"nip44_encrypt"},
+                                      {"type":"nip44_decrypt"},
+                                      {"type":"sign_event","kind":13},
+                                      {"type":"sign_event","kind":30402},
+                                      {"type":"sign_event","kind":30017},
+                                      {"type":"sign_event","kind":30018},
+                                      {"type":"sign_event","kind":5}
+                                    ]""".trimIndent()
+                                )
                                 externalLauncher.launch(intent)
                             } catch (e: Exception) {
                                 Log.e("ExternalSigner", "Error launching signer", e)
