@@ -29,6 +29,31 @@ import androidx.compose.ui.unit.sp
 import coil.compose.rememberAsyncImagePainter
 import com.hisa.data.model.ServiceListing
 import com.hisa.data.repository.ServiceRepository
+
+private fun ServiceListing.imageUrls(): List<String> {
+    val imageTags = rawTags
+        .filter { it.firstOrNull() == "image" }
+        .mapNotNull { it.getOrNull(1) as? String }
+        .filter { it.isNotBlank() }
+
+    val imetaUrls = rawTags
+        .filter { it.firstOrNull() == "imeta" }
+        .flatMap { tag ->
+            tag.drop(1).mapNotNull { part ->
+                when {
+                    part.startsWith("url ") -> part.removePrefix("url ").trim()
+                    part.startsWith("http://") || part.startsWith("https://") -> part.trim()
+                    else -> null
+                }
+            }
+        }
+        .filter { it.isNotBlank() }
+
+    return (imageTags + imetaUrls).distinct()
+}
+
+private fun ServiceListing.primaryImageUrl(): String? = imageUrls().firstOrNull()
+
 @Composable
 fun CategoryChipRow(
     categories: List<String>,
@@ -153,10 +178,7 @@ fun CompactServiceCard(
             .padding(4.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
             
             // Image section - fixed size, almost touches border
-            val imageUrl = service.rawTags
-                .filter { it.isNotEmpty() && it[0] == "image" }
-                .mapNotNull { it.getOrNull(1) as? String }
-                .firstOrNull()
+            val imageUrl = service.primaryImageUrl()
 
             Box(modifier = Modifier
                 .size(85.dp)
@@ -305,10 +327,7 @@ fun CompactServiceCardVariantA(
         elevation = CardDefaults.cardElevation(defaultElevation = 1.dp)
     ) {
         Row(modifier = Modifier.fillMaxHeight().padding(3.dp), verticalAlignment = Alignment.CenterVertically) {
-            val imageUrl = service.rawTags
-                .filter { it.isNotEmpty() && it[0] == "image" }
-                .mapNotNull { it.getOrNull(1) as? String }
-                .firstOrNull()
+            val imageUrl = service.primaryImageUrl()
 
             Box(modifier = Modifier
                 .size(68.dp)
@@ -424,10 +443,7 @@ fun CompactServiceCardVariantB(
         elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
     ) {
         Row(modifier = Modifier.fillMaxHeight().padding(4.dp), verticalAlignment = Alignment.CenterVertically) {
-            val imageUrl = service.rawTags
-                .filter { it.isNotEmpty() && it[0] == "image" }
-                .mapNotNull { it.getOrNull(1) as? String }
-                .firstOrNull()
+            val imageUrl = service.primaryImageUrl()
 
             Box(modifier = Modifier
                 .size(90.dp)

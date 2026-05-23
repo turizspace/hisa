@@ -40,10 +40,14 @@ class CreateServiceViewModel @Inject constructor(
             try {
                 val userPubkey = pubKey
 
-                val serviceTags = listOf(
-                    listOf("title", title),
-                    listOf("summary", summary)
-                ) + tags
+                val mutableTags = tags.toMutableList()
+                if (mutableTags.none { it.firstOrNull() == "title" }) {
+                    mutableTags.add(listOf("title", title))
+                }
+                if (mutableTags.none { it.firstOrNull() == "summary" }) {
+                    mutableTags.add(listOf("summary", summary))
+                }
+                val serviceTags = mutableTags.distinct()
 
                 val event = NostrEvent(
                     id = "", // Will be set during signing

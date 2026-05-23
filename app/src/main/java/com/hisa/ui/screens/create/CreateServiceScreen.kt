@@ -3,9 +3,14 @@ package com.hisa.ui.screens.create
 import android.os.Build
 import androidx.annotation.RequiresApi
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -17,7 +22,9 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.navigation.NavHostController
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.tooling.preview.Preview
@@ -29,6 +36,25 @@ import com.hisa.ui.navigation.prepareUploadResult
 import coil.compose.AsyncImage
 import java.time.Instant
 import java.util.UUID
+
+private fun sanitizeListingTag(value: String): String {
+    return value.trim()
+        .lowercase()
+        .replace(Regex("[^a-z0-9]+"), "-")
+        .trim('-')
+}
+
+private fun buildPriceTag(price: String, currency: String, frequency: String?): List<String>? {
+    val amount = price.trim()
+    if (amount.isBlank()) return null
+    val normalizedAmount = if (amount.equals("free", ignoreCase = true)) "0" else amount
+    return buildList {
+        add("price")
+        add(normalizedAmount)
+        add(currency.trim().uppercase().ifBlank { "USD" })
+        frequency?.trim()?.lowercase()?.takeIf { it.isNotBlank() }?.let { add(it) }
+    }
+}
 
 val predefinedTags = listOf(
     "cleaning",
@@ -62,6 +88,8 @@ fun CreateServiceScreen(
     var selectedTagsList by rememberSaveable { mutableStateOf(listOf<String>()) }
     var selectedImageUrls by rememberSaveable { mutableStateOf(listOf<String>()) }
     var dTag by rememberSaveable { mutableStateOf<String?>(null) }
+    var coverImageUrl by rememberSaveable { mutableStateOf<String?>(null) }
+    val draftDTag = rememberSaveable { UUID.randomUUID().toString() }
     val ctx = LocalContext.current
 
     Scaffold(
@@ -84,35 +112,27 @@ fun CreateServiceScreen(
                 Button(
                     onClick = {
                         // Create NIP-99 compliant event
-                        val dValue = dTag?.takeIf { it.isNotBlank() } ?: UUID.randomUUID().toString()
+                        val dValue = dTag?.takeIf { it.isNotBlank() } ?: draftDTag
+                        val orderedImages = buildList {
+                            val cover = coverImageUrl?.takeIf { it in selectedImageUrls } ?: selectedImageUrls.firstOrNull()
+                            if (!cover.isNullOrBlank()) add(cover)
+                            selectedImageUrls.filter { it != cover }.forEach { add(it) }
+                        }
                         val tags = mutableListOf<List<String>>().apply {
                             add(listOf("d", dValue))
-                            add(listOf("title", title))
-                            add(listOf("summary", summary))
+                            add(listOf("title", title.trim()))
+                            add(listOf("summary", summary.trim()))
                             add(listOf("published_at", Instant.now().epochSecond.toString()))
-                            add(listOf("location", location))
-                            // Build price tag explicitly as a List<String>
-                            val priceTag = ArrayList<String>()
-                            priceTag.add("price")
-                            priceTag.add(price)
-                            priceTag.add(currency)
-                            frequency?.let { priceTag.add(it) }
-                            add(priceTag)
+                            if (location.isNotBlank()) add(listOf("location", location.trim()))
+                            buildPriceTag(price, currency, frequency)?.let { add(it) }
+                            add(listOf("status", "active"))
                             selectedTagsList.forEach { tag ->
-                                add(listOf("t", tag))
+                                sanitizeListingTag(tag).takeIf { it.isNotBlank() }?.let { add(listOf("t", it)) }
                             }
-                            // Add all uploaded image URLs as individual image tags (no dimensions)
-                            if (selectedImageUrls.isNotEmpty()) {
-                                selectedImageUrls.forEach { url ->
+                            if (orderedImages.isNotEmpty()) {
+                                orderedImages.forEach { url ->
                                     add(listOf("image", url))
                                 }
-                            }
-                            // Also add an `imeta` tag that contains all image URLs as additional
-                            // tag elements (so consumers can read multiple image URLs from one tag).
-                            if (selectedImageUrls.isNotEmpty()) {
-                                val imetaTag = mutableListOf<String>("imeta")
-                                imetaTag.addAll(selectedImageUrls)
-                                add(imetaTag)
                             }
                         }
 
@@ -307,6 +327,40 @@ fun CreateServiceScreen(
 
                     Spacer(modifier = Modifier.height(16.dp))
 
+                    var frequencyExpanded by remember { mutableStateOf(false) }
+                    ExposedDropdownMenuBox(
+                        expanded = frequencyExpanded,
+                        onExpandedChange = { frequencyExpanded = !frequencyExpanded },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        OutlinedTextField(
+                            value = frequency ?: "one-time",
+                            onValueChange = {},
+                            readOnly = true,
+                            label = { Text("Billing") },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .menuAnchor(),
+                            trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = frequencyExpanded) }
+                        )
+                        ExposedDropdownMenu(
+                            expanded = frequencyExpanded,
+                            onDismissRequest = { frequencyExpanded = false }
+                        ) {
+                            listOf(null, "hour", "day", "week", "month", "year").forEach { option ->
+                                DropdownMenuItem(
+                                    text = { Text(option ?: "one-time") },
+                                    onClick = {
+                                        frequency = option
+                                        frequencyExpanded = false
+                                    }
+                                )
+                            }
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(16.dp))
+
                     OutlinedTextField(
                         value = location,
                         onValueChange = { location = it },
@@ -383,7 +437,7 @@ fun CreateServiceScreen(
                         )
                         Spacer(modifier = Modifier.width(8.dp))
                         Button(onClick = {
-                            val trimmed = newTag.trim().lowercase()
+                            val trimmed = sanitizeListingTag(newTag)
                             if (trimmed.isNotBlank() && trimmed !in selectedTagsList) {
                                 selectedTagsList = selectedTagsList + trimmed
                                 newTag = ""
@@ -428,18 +482,63 @@ fun CreateServiceScreen(
                         Spacer(modifier = Modifier.height(8.dp))
                         Box(modifier = Modifier.fillMaxWidth().height(200.dp)) {
                             AsyncImage(
-                                model = selectedImageUrls.first(),
+                                model = coverImageUrl?.takeIf { it in selectedImageUrls } ?: selectedImageUrls.first(),
                                 contentDescription = "Selected Image",
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .height(200.dp)
+                                    .clip(RoundedCornerShape(8.dp)),
+                                contentScale = ContentScale.Crop
                             )
                             // Close X to allow user to replace the image(s)
                             IconButton(
-                                onClick = { selectedImageUrls = emptyList() },
+                                onClick = {
+                                    selectedImageUrls = emptyList()
+                                    coverImageUrl = null
+                                },
                                 modifier = Modifier.align(Alignment.TopEnd)
                             ) {
                                 Icon(imageVector = Icons.Default.Close, contentDescription = "Remove image")
+                            }
+                        }
+                        Spacer(modifier = Modifier.height(8.dp))
+                        LazyRow(
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            itemsIndexed(selectedImageUrls) { index, url ->
+                                val isCover = (coverImageUrl ?: selectedImageUrls.firstOrNull()) == url
+                                Box(
+                                    modifier = Modifier
+                                        .size(72.dp)
+                                        .clip(RoundedCornerShape(8.dp))
+                                        .border(
+                                            width = if (isCover) 2.dp else 1.dp,
+                                            color = if (isCover) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outlineVariant,
+                                            shape = RoundedCornerShape(8.dp)
+                                        )
+                                        .clickable { coverImageUrl = url }
+                                ) {
+                                    AsyncImage(
+                                        model = url,
+                                        contentDescription = "Image ${index + 1}",
+                                        modifier = Modifier.fillMaxSize(),
+                                        contentScale = ContentScale.Crop
+                                    )
+                                    IconButton(
+                                        onClick = {
+                                            selectedImageUrls = selectedImageUrls.filter { it != url }
+                                            if (coverImageUrl == url) {
+                                                coverImageUrl = selectedImageUrls.firstOrNull { it != url }
+                                            }
+                                        },
+                                        modifier = Modifier
+                                            .align(Alignment.TopEnd)
+                                            .size(28.dp)
+                                    ) {
+                                        Icon(Icons.Default.Close, contentDescription = "Remove image", modifier = Modifier.size(16.dp))
+                                    }
+                                }
                             }
                         }
                     }
@@ -489,6 +588,7 @@ fun CreateServiceScreen(
                 }
                 if (!eimages.isNullOrBlank()) {
                     selectedImageUrls = eimages.split('\n').map { it.trim() }.filter { it.isNotBlank() }
+                    coverImageUrl = selectedImageUrls.firstOrNull()
                 }
                 // Prefill price/currency/frequency/location if present
                 try { if (!eprice.isNullOrBlank()) price = eprice } catch (_: Exception) {}
@@ -532,6 +632,9 @@ fun CreateServiceScreen(
                 }
             }
             selectedImageUrls = merged
+            if (coverImageUrl.isNullOrBlank()) {
+                coverImageUrl = merged.firstOrNull()
+            }
         }
     }
 }

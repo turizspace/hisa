@@ -89,7 +89,20 @@ fun ShopScreen(
                                                 tagsJson.put(arr)
                                             }
                                             entry?.savedStateHandle?.set("edit_service_tags", tagsJson.toString())
-                                            val images = svc.rawTags.filter { it.isNotEmpty() && it[0] == "image" }.mapNotNull { it.getOrNull(1) as? String }
+                                            val images = svc.rawTags
+                                                .filter { it.isNotEmpty() && it[0] == "image" }
+                                                .mapNotNull { it.getOrNull(1) as? String } +
+                                                svc.rawTags
+                                                    .filter { it.isNotEmpty() && it[0] == "imeta" }
+                                                    .flatMap { tag ->
+                                                        tag.drop(1).mapNotNull { part ->
+                                                            when {
+                                                                part.startsWith("url ") -> part.removePrefix("url ").trim()
+                                                                part.startsWith("http://") || part.startsWith("https://") -> part.trim()
+                                                                else -> null
+                                                            }
+                                                        }
+                                                    }
                                             if (images.isNotEmpty()) entry?.savedStateHandle?.set("edit_service_image_urls", images.joinToString("\n"))
                                             try {
                                                 val priceTag = svc.rawTags.firstOrNull { it.size > 1 && it[0] == "price" }
