@@ -27,7 +27,7 @@ class ProfileRepository @Inject constructor(
     private val appScope: CoroutineScope
 ) {
     companion object {
-        private const val PROFILE_CHUNK_SIZE = 25
+        private const val PROFILE_CHUNK_SIZE = 50
         private const val FLUSH_DELAY_MS = 75L
     }
 
@@ -102,7 +102,8 @@ class ProfileRepository @Inject constructor(
                     filter = filter,
                     onEvent = { event ->
                         handleProfileEvent(event)
-                    }
+                    },
+                    autoCloseOnEose = true
                 )
 
                 metadataSubscriptionIds.add(listenerId)

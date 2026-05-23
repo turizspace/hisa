@@ -367,6 +367,10 @@ object MessageRepository {
                     
                     when (sealedKind) {
                         13 -> {
+                            val sealTagsArray = sealedMessage.optJSONArray("tags")
+                            if (sealTagsArray != null && sealTagsArray.length() != 0) {
+                                throw IllegalArgumentException("Invalid NIP-59 seal: kind 13 tags must be empty")
+                            }
                             val sealVerification = EventVerifier.verifyEvent(sealedMessage.toString())
                             val sealVerified = sealVerification.idMatches && sealVerification.signatureValid
                             if (!sealVerified) {
@@ -419,6 +423,14 @@ object MessageRepository {
                                         innerJson,
                                         "Inner decrypt returned non-JSON payload"
                                     )
+                                    val cleanSealSender = normalizeToXOnlyHex(sealSenderPubkey)
+                                    val cleanInnerSender = normalizeToXOnlyHex(innerObj.optString("pubkey"))
+                                    if (cleanSealSender.isNullOrBlank() || cleanInnerSender.isNullOrBlank() || cleanSealSender != cleanInnerSender) {
+                                        throw IllegalArgumentException("Invalid NIP-17 message: seal pubkey must match inner pubkey")
+                                    }
+                                    if (!innerObj.optString("sig", "").isNullOrBlank()) {
+                                        throw IllegalArgumentException("Invalid NIP-17 message: inner event must be unsigned")
+                                    }
                                     timber.log.Timber.d(
                                         "Successfully decrypted inner seal with candidate=%s innerKind=%d innerPubkey=%s",
                                         innerSender.take(12),

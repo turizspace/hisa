@@ -63,7 +63,8 @@ class MetadataRepository @Inject constructor(
             onEndOfStoredEvents = {
                 // Signal that EOSE arrived
                 if (!finished.isCompleted) finished.complete(Unit)
-            }
+            },
+            autoCloseOnEose = true
         )
 
         try {
