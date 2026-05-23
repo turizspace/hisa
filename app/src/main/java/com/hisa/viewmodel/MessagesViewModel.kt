@@ -34,7 +34,6 @@ import org.bouncycastle.crypto.params.X25519PrivateKeyParameters
 import com.hisa.util.Constants
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ConcurrentLinkedQueue
-import java.util.concurrent.atomic.AtomicBoolean
 
 @HiltViewModel
 @RequiresApi(Build.VERSION_CODES.O)
@@ -59,7 +58,6 @@ class MessagesViewModel @Inject constructor(
     fun clearMessages() {
         _messages.value = emptyList()
         seenGiftWrapEventIds.clear()
-        inboxExternalDecryptRequested.set(false)
         directSubscriptionStarted = false
         directEoseReceived = false
         giftWrapProcessingCount.set(0)
@@ -130,7 +128,6 @@ class MessagesViewModel @Inject constructor(
     @Volatile
     private var giftWrapProcessingInProgress = false
     private val giftWrapProcessingMutex = Mutex()
-    private val inboxExternalDecryptRequested = AtomicBoolean(false)
     
     // Queue of gift-wrapped messages that failed to decrypt due to missing launcher
     // Retry when launcher becomes available
@@ -509,8 +506,10 @@ class MessagesViewModel @Inject constructor(
                     senderPubkeyHints = senderHints
                 )
             } ?: run {
-                if (!com.hisa.data.nostr.ExternalSignerManager.isLauncherRegistered()) {
-                    Timber.d("Skipping external decrypt: launcher not registered")
+                if (!com.hisa.data.nostr.ExternalSignerManager.isLauncherRegistered() &&
+                    !com.hisa.data.nostr.ExternalSignerManager.hasBackgroundResolver()
+                ) {
+                    Timber.d("Skipping external decrypt: no launcher or background resolver registered")
                     return null
                 }
                 val signerPkg = authContext.signerPackage ?: return null
@@ -892,19 +891,14 @@ class MessagesViewModel @Inject constructor(
                         }
 
                         if (usingExternalSignerOnly && expectedOtherPubkey.isNullOrBlank()) {
-                            if (!com.hisa.data.nostr.ExternalSignerManager.isLauncherRegistered()) {
-                                Timber.d("Inbox: launcher not registered, queueing for retry: %s", eventId)
+                            if (!com.hisa.data.nostr.ExternalSignerManager.isLauncherRegistered() &&
+                                !com.hisa.data.nostr.ExternalSignerManager.hasBackgroundResolver()
+                            ) {
+                                Timber.d("Inbox: no signer transport registered, queueing for retry: %s", eventId)
                                 val eventId = giftWrap.optString("id", "")
                                 if (eventId.isNotBlank()) {
                                     pendingDecryptRetryQueue[eventId] = PendingDecryptMessage(eventId, giftWrap, expectedOtherPubkey)
                                 }
-                                return@withLock
-                            }
-                            // Messages tab (inbox) path: trigger signer request at most once.
-                            // This allows one-time approval prompt while avoiding a request storm.
-                            val shouldRequestOnce = inboxExternalDecryptRequested.compareAndSet(false, true)
-                            if (!shouldRequestOnce) {
-                                addUndecryptablePlaceholder(giftWrap, expectedOtherPubkey)
                                 return@withLock
                             }
                             val decryptedMessage = decryptNip17Message(giftWrap, expectedOtherPubkey)
@@ -916,9 +910,12 @@ class MessagesViewModel @Inject constructor(
                             return@withLock
                         }
 
-                        // When launcher is not attached, queue for retry instead of marking undecryptable
-                        if (usingExternalSignerOnly && !com.hisa.data.nostr.ExternalSignerManager.isLauncherRegistered()) {
-                            Timber.d("Conversation: launcher not registered, queueing for retry: %s", eventId)
+                        // When no signer transport is attached, queue for retry instead of marking undecryptable.
+                        if (usingExternalSignerOnly &&
+                            !com.hisa.data.nostr.ExternalSignerManager.isLauncherRegistered() &&
+                            !com.hisa.data.nostr.ExternalSignerManager.hasBackgroundResolver()
+                        ) {
+                            Timber.d("Conversation: no signer transport registered, queueing for retry: %s", eventId)
                             val eventId = giftWrap.optString("id", "")
                             if (eventId.isNotBlank()) {
                                 pendingDecryptRetryQueue[eventId] = PendingDecryptMessage(eventId, giftWrap, expectedOtherPubkey)
@@ -1054,6 +1051,22 @@ class MessagesViewModel @Inject constructor(
         )
     }
 
+    private fun publishGiftWrappedEvent(eventJson: JSONObject) {
+        val nostrEvent = com.hisa.data.nostr.NostrEvent(
+            id = eventJson.getString("id"),
+            pubkey = eventJson.getString("pubkey"),
+            createdAt = eventJson.getLong("created_at"),
+            kind = eventJson.getInt("kind"),
+            tags = (0 until eventJson.getJSONArray("tags").length()).map { i ->
+                val tagArr = eventJson.getJSONArray("tags").getJSONArray(i)
+                (0 until tagArr.length()).map { tagArr.getString(it) }
+            },
+            content = eventJson.getString("content"),
+            sig = eventJson.getString("sig")
+        )
+        nostrClient.publishEvent(nostrEvent)
+    }
+
     private suspend fun sendGiftWrappedMessage(
         innerMessage: JSONObject,
         recipientPubkey: String,
@@ -1083,8 +1096,10 @@ class MessagesViewModel @Inject constructor(
                 tags = innerTags
             )
         } else {
-            if (!com.hisa.data.nostr.ExternalSignerManager.isLauncherRegistered()) {
-                throw IllegalStateException("External signer launcher not registered")
+            if (!com.hisa.data.nostr.ExternalSignerManager.isLauncherRegistered() &&
+                !com.hisa.data.nostr.ExternalSignerManager.hasBackgroundResolver()
+            ) {
+                throw IllegalStateException("External signer is not attached")
             }
             val authCtx = resolveAuthContext(refreshOnce = false)
             messageRepository.prepareGiftWrappedMessageExternal(
@@ -1100,22 +1115,7 @@ class MessagesViewModel @Inject constructor(
                 }
             )
         }
-        // NIP-59: outer gift-wrap (kind 1059) must be signed by the random one-time key.
-        // MessageRepository already returns a fully signed wrapper event; publish it as-is.
-        val eventJson = wrappedEvent
-        val nostrEvent = com.hisa.data.nostr.NostrEvent(
-            id = eventJson.getString("id"),
-            pubkey = eventJson.getString("pubkey"),
-            createdAt = eventJson.getLong("created_at"),
-            kind = eventJson.getInt("kind"),
-            tags = (0 until eventJson.getJSONArray("tags").length()).map { i ->
-                val tagArr = eventJson.getJSONArray("tags").getJSONArray(i)
-                (0 until tagArr.length()).map { tagArr.getString(it) }
-            },
-            content = eventJson.getString("content"),
-            sig = eventJson.getString("sig")
-        )
-        nostrClient.publishEvent(nostrEvent)
+        publishGiftWrappedEvent(wrappedEvent)
     }
 
     private fun resolveSenderSigningPubkey(signingPrivateKeyBytes: ByteArray?): String {
@@ -1193,7 +1193,10 @@ class MessagesViewModel @Inject constructor(
                     _sendError.value = err
                     return@launch
                 }
-                if (signingPrivateKeyBytes == null && !com.hisa.data.nostr.ExternalSignerManager.isLauncherRegistered()) {
+                if (signingPrivateKeyBytes == null &&
+                    !com.hisa.data.nostr.ExternalSignerManager.isLauncherRegistered() &&
+                    !com.hisa.data.nostr.ExternalSignerManager.hasBackgroundResolver()
+                ) {
                     _sendError.value = "External signer is not attached. Re-open DM screen and approve signer requests."
                     return@launch
                 }
@@ -1207,28 +1210,32 @@ class MessagesViewModel @Inject constructor(
                 // Create the inner kind:14 message event
                 val innerMessage = createInnerMessageEvent(cleanRecipientPubkey, content, subject, replyTo)
                 
-                // Add to local state immediately for UI responsiveness (optimistic update)
-                val tempId = "temp-${System.currentTimeMillis()}"
+                // Add to local state immediately for UI responsiveness. Use the
+                // unsigned rumor id so the sender copy can reconcile without a duplicate.
+                val optimisticId = innerMessage.optString("id").ifBlank { "temp-${System.currentTimeMillis()}" }
                 val newMessage = Message.TextMessage(
-                    id = tempId,
+                    id = optimisticId,
                     pubkey = senderSigningPubkey,
                     recipientPubkeys = listOf(cleanRecipientPubkey),
                     content = content,
-                    createdAt = System.currentTimeMillis() / 1000,
+                    createdAt = innerMessage.optLong("created_at", System.currentTimeMillis() / 1000),
                     subject = subject,
                     replyTo = replyTo,
                     relayUrls = null // Will be updated when we receive the relay's copy
                 )
-                Timber.i("Adding optimistic message id=%s to=%s", tempId, cleanRecipientPubkey)
+                Timber.i("Adding optimistic message id=%s to=%s", optimisticId, cleanRecipientPubkey)
                 _messages.value = _messages.value + newMessage
 
-                // Create and send a gift-wrapped version for the recipient (inner message kind should be 14)
-                sendGiftWrappedMessage(
-                    innerMessage = innerMessage,
-                    recipientPubkey = cleanRecipientPubkey,
-                    encryptionPrivateKeyBytes = signingPrivateKeyBytes,
-                    senderSigningPubkey = senderSigningPubkey
-                )
+                // NIP-17: seal and gift-wrap the same unsigned rumor to each
+                // receiver and to the sender individually.
+                listOf(cleanRecipientPubkey, senderSigningPubkey).distinct().forEach { wrapRecipient ->
+                    sendGiftWrappedMessage(
+                        innerMessage = innerMessage,
+                        recipientPubkey = wrapRecipient,
+                        encryptionPrivateKeyBytes = signingPrivateKeyBytes,
+                        senderSigningPubkey = senderSigningPubkey
+                    )
+                }
 
                 // Save conversation mapping
                 val myPub = senderSigningPubkey.ifBlank { userPubkey }
@@ -1245,8 +1252,9 @@ class MessagesViewModel @Inject constructor(
     }
 
     /**
-     * Subscribe to a two-way conversation with [otherPubkey]. Creates two subscriptions
-     * (other->me and me->other) both filtering on kind=1059 and p-tags.
+     * Subscribe to a two-way conversation with [otherPubkey]. NIP-59 gift wraps
+     * are authored by random one-time keys, so relay filters must route by p-tags
+     * and the real sender is checked only after decrypting the seal.
      */
     fun subscribeToConversation(otherPubkey: String) {
         try {
@@ -1272,21 +1280,12 @@ class MessagesViewModel @Inject constructor(
 
                 val since = (System.currentTimeMillis() / 1000) - (CONVERSATION_DM_HISTORY_DAYS * 24L * 60L * 60L)
 
-                // Two-way DM filters in one subscription:
-                // - incoming from other to me
-                // - outgoing from me to other
+                // Fetch wraps addressed to us. Sender identity is inside the
+                // decrypted seal, not in the outer gift-wrap author.
                 val filtersArray = org.json.JSONArray().apply {
                     put(JSONObject().apply {
                         put("kinds", org.json.JSONArray().put(1059))
-                        put("authors", org.json.JSONArray().put(other))
                         put("#p", org.json.JSONArray().put(me))
-                        put("since", since)
-                        put("limit", CONVERSATION_DM_LIMIT_PER_FILTER)
-                    })
-                    put(JSONObject().apply {
-                        put("kinds", org.json.JSONArray().put(1059))
-                        put("authors", org.json.JSONArray().put(me))
-                        put("#p", org.json.JSONArray().put(other))
                         put("since", since)
                         put("limit", CONVERSATION_DM_LIMIT_PER_FILTER)
                     })

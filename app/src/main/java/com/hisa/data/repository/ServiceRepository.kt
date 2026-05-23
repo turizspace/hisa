@@ -76,7 +76,8 @@ object ServiceRepository {
                 if (!finished.isCompleted) {
                     finished.complete(Unit)
                 }
-            }
+            },
+            autoCloseOnEose = true
         )
 
         try {
