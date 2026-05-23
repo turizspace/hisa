@@ -61,18 +61,12 @@ class SubscriptionManager @Inject constructor(
         onEndOfStoredEvents: () -> Unit = {}
     ): String {
         val safeLimit = limitPerDirection?.coerceIn(1, 5000)
-        // Use two filters under one REQ (logical OR):
-        // 1) inbox (messages addressed to us), 2) outbox (messages authored by us).
+        // NIP-59 gift wraps are authored by random one-time keys. Fetch wraps
+        // addressed to us; sender identity is only known after decrypting the seal.
         val filters = JSONArray().apply {
             put(createFilter {
                 put("kinds", JSONArray().put(1059))
                 put("#p", JSONArray().put(userPubkey))
-                sinceTime?.let { put("since", it) }
-                safeLimit?.let { put("limit", it) }
-            })
-            put(createFilter {
-                put("kinds", JSONArray().put(1059))
-                put("authors", JSONArray().put(userPubkey))
                 sinceTime?.let { put("since", it) }
                 safeLimit?.let { put("limit", it) }
             })
@@ -94,14 +88,15 @@ class SubscriptionManager @Inject constructor(
             putKinds(listOf(10002))
             putAuthors(listOf(userPubkey))
         }
-        return subscribe(filter, onEvent, onEndOfStoredEvents)
+        return subscribe(filter, onEvent, onEndOfStoredEvents, autoCloseOnEose = true)
     }
 
     // General purpose subscriptions
     fun subscribe(
         filter: JSONObject,
         onEvent: (NostrEvent) -> Unit,
-        onEndOfStoredEvents: () -> Unit = {}
+        onEndOfStoredEvents: () -> Unit = {},
+        autoCloseOnEose: Boolean = false
     ): String {
         val filterKey = try {
             JSONObject(filter.toString()).toString()
@@ -112,7 +107,8 @@ class SubscriptionManager @Inject constructor(
             filterKey = filterKey,
             requestPayload = filter.toString(),
             onEvent = onEvent,
-            onEndOfStoredEvents = onEndOfStoredEvents
+            onEndOfStoredEvents = onEndOfStoredEvents,
+            autoCloseOnEose = autoCloseOnEose
         )
     }
 
@@ -123,7 +119,8 @@ class SubscriptionManager @Inject constructor(
     fun subscribe(
         filtersArray: org.json.JSONArray,
         onEvent: (NostrEvent) -> Unit,
-        onEndOfStoredEvents: () -> Unit = {}
+        onEndOfStoredEvents: () -> Unit = {},
+        autoCloseOnEose: Boolean = false
     ): String {
         val filterKey = try {
             JSONArray(filtersArray.toString()).toString()
@@ -134,7 +131,8 @@ class SubscriptionManager @Inject constructor(
             filterKey = filterKey,
             requestPayload = filtersArray.toString(),
             onEvent = onEvent,
-            onEndOfStoredEvents = onEndOfStoredEvents
+            onEndOfStoredEvents = onEndOfStoredEvents,
+            autoCloseOnEose = autoCloseOnEose
         )
     }
 
@@ -153,20 +151,33 @@ class SubscriptionManager @Inject constructor(
         }
 
         requestIdToClose?.let { requestId ->
+            closeRelaySubscription(requestId)
+        }
+    }
+
+    private fun closeRelaySubscription(requestId: String) {
+        try {
+            nostrClient.closeSubscription(requestId)
+        } catch (e: Exception) {
+            android.util.Log.e("SubscriptionManager", "Failed to close subscription on client: ${e.localizedMessage}")
             try {
-                nostrClient.closeSubscription(requestId)
-            } catch (e: Exception) {
-                android.util.Log.e("SubscriptionManager", "Failed to close subscription on client: ${e.localizedMessage}")
-                try {
-                    val closeMsg = JSONArray().apply {
-                        put("CLOSE")
-                        put(requestId)
-                    }
-                    nostrClient.sendMessage(closeMsg.toString())
-                } catch (ex: Exception) {
-                    android.util.Log.e("SubscriptionManager", "Fallback close failed: ${ex.localizedMessage}")
+                val closeMsg = JSONArray().apply {
+                    put("CLOSE")
+                    put(requestId)
                 }
+                nostrClient.sendMessage(closeMsg.toString())
+            } catch (ex: Exception) {
+                android.util.Log.e("SubscriptionManager", "Fallback close failed: ${ex.localizedMessage}")
             }
+        }
+    }
+
+    private fun removeRequest(requestId: String): SubscriptionRecord? {
+        return synchronized(subscriptionLock) {
+            val record = activeSubscriptions.remove(requestId) ?: return@synchronized null
+            subscriptionIdByFilter.remove(record.filter)
+            record.listeners.keys.forEach { listenerRecords.remove(it) }
+            record
         }
     }
 
@@ -269,12 +280,18 @@ class SubscriptionManager @Inject constructor(
                     val record = activeSubscriptions[subId]
                     if (record != null) {
                         record.hasReachedEose = true
-                        record.listeners.values.forEach { listener ->
+                        val listeners = record.listeners.values.toList()
+                        listeners.forEach { listener ->
                             try {
                                 listener.onEndOfStoredEvents.invoke()
                             } catch (cbEx: Exception) {
                                 android.util.Log.e("SubscriptionManager", "EOSE callback threw for subId=$subId", cbEx)
                             }
+                        }
+                        if (record.autoCloseOnEose) {
+                            removeRequest(subId)
+                            closeRelaySubscription(subId)
+                            Timber.d("Auto-closed one-shot subscription after EOSE: %s", subId)
                         }
                     }
                 }
@@ -287,6 +304,18 @@ class SubscriptionManager @Inject constructor(
                     val subId = jsonArray.optString(1, "")
                     val reason = jsonArray.optString(2, "")
                     android.util.Log.w("SubscriptionManager", "[WS CLOSED] subId=$subId reason=$reason")
+                    if (reason.contains("maximum concurrent subscription", ignoreCase = true) ||
+                        reason.contains("too many subscriptions", ignoreCase = true)
+                    ) {
+                        activeSubscriptions[subId]?.let { record ->
+                            Timber.w(
+                                "Relay rejected subscription due to limit: subId=%s autoClose=%s filter=%s",
+                                subId,
+                                record.autoCloseOnEose,
+                                record.filter
+                            )
+                        }
+                    }
                 }
                 "OK" -> {
                     // ["OK", <event-id>, <accepted>, <message>]
@@ -348,7 +377,8 @@ class SubscriptionManager @Inject constructor(
         filterKey: String,
         requestPayload: String,
         onEvent: (NostrEvent) -> Unit,
-        onEndOfStoredEvents: () -> Unit
+        onEndOfStoredEvents: () -> Unit,
+        autoCloseOnEose: Boolean
     ): String {
         val listenerId = generateSubscriptionId()
         var requestIdToSend: String? = null
@@ -372,6 +402,7 @@ class SubscriptionManager @Inject constructor(
                 val record = SubscriptionRecord(
                     filter = filterKey,
                     requestPayload = requestPayload,
+                    autoCloseOnEose = autoCloseOnEose,
                     listeners = ConcurrentHashMap<String, ListenerCallbacks>().apply {
                         put(listenerId, ListenerCallbacks(onEvent, onEndOfStoredEvents))
                     }
@@ -393,6 +424,7 @@ class SubscriptionManager @Inject constructor(
     private data class SubscriptionRecord(
         val filter: String,
         val requestPayload: String,
+        val autoCloseOnEose: Boolean,
         val listeners: ConcurrentHashMap<String, ListenerCallbacks>,
         @Volatile var hasReachedEose: Boolean = false
     )

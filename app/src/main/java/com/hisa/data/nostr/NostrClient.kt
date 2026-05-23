@@ -1,12 +1,6 @@
 package com.hisa.data.nostr
 
 import android.content.Context
-import androidx.work.ExistingWorkPolicy
-import androidx.work.OneTimeWorkRequestBuilder
-import androidx.work.WorkManager
-import androidx.work.Worker
-import androidx.work.WorkerParameters
-import androidx.work.workDataOf
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -50,9 +44,6 @@ class NostrClient @Inject constructor(
 
         Timber.i("Updating relays -> %s", cleaned)
 
-        // Store current subscriptions before disconnecting
-        val currentSubscriptions = subscriptions.toMap()
-
         // Disconnect from current relays
         disconnect()
 
@@ -62,10 +53,8 @@ class NostrClient @Inject constructor(
         // Connect to new relays
         connect()
 
-        // Resubscribe to all previous subscriptions
-        currentSubscriptions.forEach { (id, filterJson) ->
-            sendSubscription(id, filterJson)
-        }
+        // Active subscriptions stay in-memory and are replayed by each socket's onOpen,
+        // where they can be prioritized instead of being queued in arbitrary map order.
     }
 
     /**
@@ -112,7 +101,7 @@ class NostrClient @Inject constructor(
     private val pendingMessages = Collections.synchronizedList(mutableListOf<String>())
     // Throttle map to avoid sending too many REQ messages to the same relay in a short time
     private val lastSubscriptionSent = ConcurrentHashMap<String, Long>()
-    private val SUBSCRIPTION_MIN_INTERVAL_MS = 250L
+    private val SUBSCRIPTION_MIN_INTERVAL_MS = 80L
 
     private val _connectionState = MutableStateFlow(ConnectionState.DISCONNECTED)
     val connectionState: StateFlow<ConnectionState> = _connectionState
@@ -126,8 +115,16 @@ class NostrClient @Inject constructor(
 
     // New: expose an incoming messages SharedFlow so consumers can collect parsed/raw messages
     // in a lifecycle-aware coroutine instead of registering raw handlers.
-    private val _incomingMessages = MutableSharedFlow<String>(extraBufferCapacity = 64)
+    private val _incomingMessages = MutableSharedFlow<String>(extraBufferCapacity = 1024)
     val incomingMessages: SharedFlow<String> = _incomingMessages
+
+    private enum class SubscriptionPriority(val rank: Int) {
+        DIRECT_MESSAGES(0),
+        MARKETPLACE(1),
+        USER_RELAYS(2),
+        METADATA(3),
+        OTHER(4)
+    }
 
     private fun sendMessageInternal(message: String, shouldQueue: Boolean = true) {
         if (webSockets.isNotEmpty() && _connectionState.value == ConnectionState.CONNECTED) {
@@ -204,48 +201,7 @@ class NostrClient @Inject constructor(
                             iterator.remove()
                         }
 
-                        // Resubscribe to all active subscriptions on this relay (broadcast behavior).
-                        // Skip relays marked as requiring auth when sending.
-                        subscriptions.forEach { (id, filters) ->
-                            try {
-                                if (relayRequiresAuth[relayUrl] == true) return@forEach
-                                val reqArray = org.json.JSONArray().apply {
-                                    put("REQ")
-                                    put(id)
-                                    try {
-                                        val filtersArray = org.json.JSONArray(filters)
-                                        for (i in 0 until filtersArray.length()) {
-                                            put(filtersArray.get(i))
-                                        }
-                                    } catch (e: Exception) {
-                                        put(org.json.JSONObject(filters))
-                                    }
-                                }
-                                val reqString = reqArray.toString()
-                                // Respect per-relay throttling
-                                val now = System.currentTimeMillis()
-                                val last = lastSubscriptionSent[relayUrl] ?: 0L
-                                if (now - last >= SUBSCRIPTION_MIN_INTERVAL_MS) {
-                                    webSocket.send(reqString)
-                                    lastSubscriptionSent[relayUrl] = System.currentTimeMillis()
-                                    Timber.d("Sent resubscribe REQ to %s: %s", relayUrl, reqString)
-                                } else {
-                                    val wait = (SUBSCRIPTION_MIN_INTERVAL_MS - (now - last)).coerceAtLeast(0L)
-                                    scope.launch {
-                                        kotlinx.coroutines.delay(wait)
-                                        try {
-                                            webSocket.send(reqString)
-                                            lastSubscriptionSent[relayUrl] = System.currentTimeMillis()
-                                            Timber.d("Delayed resubscribe REQ to %s after %dms: %s", relayUrl, wait, reqString)
-                                        } catch (ex: Exception) {
-                                            Timber.w(ex, "Delayed resubscribe failed for %s", relayUrl)
-                                        }
-                                    }
-                                }
-                            } catch (e: Exception) {
-                                Timber.e(e, "Failed to resubscribe on open for %s", relayUrl)
-                            }
-                        }
+                        resubscribeRelay(relayUrl, webSocket)
                     }
 
                     override fun onMessage(webSocket: WebSocket, text: String) {
@@ -388,10 +344,73 @@ class NostrClient @Inject constructor(
 
     fun sendSubscription(id: String, filterJson: String) {
     subscriptions[id] = filterJson
-    Timber.d("sendSubscription called: id=%s filter=%s", id, filterJson)
+    Timber.d(
+        "sendSubscription called: id=%s priority=%s filter=%s",
+        id,
+        subscriptionPriority(filterJson),
+        filterJson
+    )
 
         try {
-            val reqArray = JSONArray().apply {
+            val reqString = buildReqString(id, filterJson) ?: return
+            Timber.d("Prepared REQ for subscription id=%s: %s", id, reqString)
+
+            if (webSockets.isNotEmpty() && _connectionState.value == ConnectionState.CONNECTED) {
+                val priority = subscriptionPriority(filterJson)
+                webSockets.entries
+                    .filter { (relayUrl, _) -> relayRequiresAuth[relayUrl] != true }
+                    .let { entries -> relayTargetsFor(priority, id, entries) }
+                    .forEachIndexed { relayIndex, (relayUrl, ws) ->
+                        val delayMs = initialSendDelay(priority, relayIndex)
+                        sendReqToRelay(
+                            relayUrl = relayUrl,
+                            webSocket = ws,
+                            reqString = reqString,
+                            source = "subscription",
+                            minDelayMs = delayMs,
+                            priority = priority
+                        )
+                }
+            } else {
+                Timber.w("No active WebSockets, attempting to connect...")
+                pendingMessages.add(reqString)
+                connect()
+            }
+        } catch (e: Exception) {
+            Timber.e(e, "Failed to sendSubscription")
+        }
+    }
+
+    private fun resubscribeRelay(relayUrl: String, webSocket: WebSocket) {
+        if (relayRequiresAuth[relayUrl] == true) return
+
+        subscriptions.entries
+            .sortedWith(
+                compareBy<Map.Entry<String, String>> { subscriptionPriority(it.value).rank }
+                    .thenBy { it.key }
+            )
+            .forEachIndexed { index, (id, filters) ->
+                try {
+                    val priority = subscriptionPriority(filters)
+                    if (!shouldReplayOnRelay(priority, id, relayUrl)) return@forEachIndexed
+                    val reqString = buildReqString(id, filters) ?: return@forEachIndexed
+                    sendReqToRelay(
+                        relayUrl = relayUrl,
+                        webSocket = webSocket,
+                        reqString = reqString,
+                        source = "resubscribe",
+                        minDelayMs = resubscribeDelay(priority, index),
+                        priority = priority
+                    )
+                } catch (e: Exception) {
+                    Timber.e(e, "Failed to resubscribe on open for %s", relayUrl)
+                }
+            }
+    }
+
+    private fun buildReqString(id: String, filterJson: String): String? {
+        return try {
+            JSONArray().apply {
                 put("REQ")
                 put(id)
                 when {
@@ -401,72 +420,137 @@ class NostrClient @Inject constructor(
                             put(filtersArray.get(i))
                         }
                     }
-                    filterJson.startsWith("{") -> {
-                        put(JSONObject(filterJson))
-                    }
+                    filterJson.startsWith("{") -> put(JSONObject(filterJson))
                     else -> {
-                        Timber.e("Invalid filter JSON format")
-                        return
+                        Timber.e("Invalid filter JSON format for subscription %s", id)
+                        return null
                     }
                 }
-            }
-
-            val reqString = reqArray.toString()
-            Timber.d("Prepared REQ for subscription id=%s: %s", id, reqString)
-
-            if (webSockets.isNotEmpty() && _connectionState.value == ConnectionState.CONNECTED) {
-                webSockets.forEach { (relayUrl, ws) ->
-                    if (relayRequiresAuth[relayUrl] == true) return@forEach
-                    // Throttle per-relay to avoid flooding and triggering relay rate limits
-                    val now = System.currentTimeMillis()
-                    val last = lastSubscriptionSent[relayUrl] ?: 0L
-                    val elapsed = now - last
-                    val jitter = kotlin.random.Random.nextLong(0, 200)
-
-                    if (elapsed >= SUBSCRIPTION_MIN_INTERVAL_MS) {
-                        try {
-                            ws.send(reqString)
-                            lastSubscriptionSent[relayUrl] = System.currentTimeMillis()
-                            Timber.d("Sent subscription to %s: %s", relayUrl, reqString)
-                            scheduleResubscribeWorker(context, relayUrl, id, filterJson)
-                        } catch (e: Exception) {
-                            Timber.w(e, "Failed to send subscription immediately to %s", relayUrl)
-                            // Fallback: schedule a delayed send
-                            scope.launch {
-                                kotlinx.coroutines.delay(SUBSCRIPTION_MIN_INTERVAL_MS + jitter)
-                                try {
-                                    ws.send(reqString)
-                                    lastSubscriptionSent[relayUrl] = System.currentTimeMillis()
-                                    Timber.d("Delayed sent subscription to %s: %s", relayUrl, reqString)
-                                    scheduleResubscribeWorker(context, relayUrl, id, filterJson)
-                                } catch (ex: Exception) {
-                                    Timber.e(ex, "Delayed send failed for %s", relayUrl)
-                                }
-                            }
-                        }
-                    } else {
-                        // Too soon since last send — schedule a delayed send with small jitter
-                        val wait = (SUBSCRIPTION_MIN_INTERVAL_MS - elapsed).coerceAtLeast(0L) + jitter
-                        scope.launch {
-                            kotlinx.coroutines.delay(wait)
-                            try {
-                                ws.send(reqString)
-                                lastSubscriptionSent[relayUrl] = System.currentTimeMillis()
-                                Timber.d("Scheduled sent subscription to %s after %dms: %s", relayUrl, wait, reqString)
-                                scheduleResubscribeWorker(context, relayUrl, id, filterJson)
-                            } catch (ex: Exception) {
-                                Timber.e(ex, "Scheduled send failed for %s", relayUrl)
-                            }
-                        }
-                    }
-                }
-            } else {
-                Timber.w("No active WebSockets, attempting to connect...")
-                pendingMessages.add(reqString)
-                connect()
-            }
+            }.toString()
         } catch (e: Exception) {
-            Timber.e(e, "Failed to sendSubscription")
+            Timber.e(e, "Failed to build REQ for subscription %s", id)
+            null
+        }
+    }
+
+    private fun sendReqToRelay(
+        relayUrl: String,
+        webSocket: WebSocket,
+        reqString: String,
+        source: String,
+        minDelayMs: Long,
+        priority: SubscriptionPriority
+    ) {
+        val sendNow = {
+            try {
+                webSocket.send(reqString)
+                lastSubscriptionSent[relayUrl] = System.currentTimeMillis()
+                Timber.d("Sent %s REQ to %s priority=%s: %s", source, relayUrl, priority, reqString)
+            } catch (e: Exception) {
+                Timber.w(e, "Failed to send %s REQ to %s", source, relayUrl)
+            }
+        }
+
+        val now = System.currentTimeMillis()
+        val last = lastSubscriptionSent[relayUrl] ?: 0L
+        val throttleDelay = if (priority == SubscriptionPriority.DIRECT_MESSAGES) {
+            0L
+        } else {
+            (SUBSCRIPTION_MIN_INTERVAL_MS - (now - last)).coerceAtLeast(0L)
+        }
+        val wait = maxOf(minDelayMs, throttleDelay)
+        if (wait <= 0L) {
+            sendNow()
+        } else {
+            scope.launch {
+                kotlinx.coroutines.delay(wait)
+                sendNow()
+            }
+        }
+    }
+
+    private fun initialSendDelay(priority: SubscriptionPriority, relayIndex: Int): Long {
+        return when (priority) {
+            SubscriptionPriority.DIRECT_MESSAGES -> relayIndex * 15L
+            SubscriptionPriority.MARKETPLACE -> 40L + relayIndex * 25L
+            SubscriptionPriority.USER_RELAYS -> 80L + relayIndex * 25L
+            SubscriptionPriority.METADATA -> 160L + relayIndex * 35L
+            SubscriptionPriority.OTHER -> 120L + relayIndex * 30L
+        }
+    }
+
+    private fun relayTargetsFor(
+        priority: SubscriptionPriority,
+        subscriptionId: String,
+        entries: List<Map.Entry<String, WebSocket>>
+    ): List<Map.Entry<String, WebSocket>> {
+        if (entries.isEmpty()) return entries
+        val sorted = entries.sortedBy { it.key }
+        return when (priority) {
+            SubscriptionPriority.METADATA -> listOf(sorted[Math.floorMod(subscriptionId.hashCode(), sorted.size)])
+            SubscriptionPriority.USER_RELAYS -> sorted.take(minOf(2, sorted.size))
+            else -> entries
+        }
+    }
+
+    private fun shouldReplayOnRelay(
+        priority: SubscriptionPriority,
+        subscriptionId: String,
+        relayUrl: String
+    ): Boolean {
+        val openRelayUrls = webSockets.keys.sorted()
+        if (openRelayUrls.isEmpty()) return true
+        return when (priority) {
+            SubscriptionPriority.METADATA -> {
+                val selected = openRelayUrls[Math.floorMod(subscriptionId.hashCode(), openRelayUrls.size)]
+                relayUrl == selected
+            }
+            SubscriptionPriority.USER_RELAYS -> relayUrl in openRelayUrls.take(minOf(2, openRelayUrls.size))
+            else -> true
+        }
+    }
+
+    private fun resubscribeDelay(priority: SubscriptionPriority, index: Int): Long {
+        return when (priority) {
+            SubscriptionPriority.DIRECT_MESSAGES -> index * 15L
+            SubscriptionPriority.MARKETPLACE -> 60L + index * 25L
+            SubscriptionPriority.USER_RELAYS -> 100L + index * 30L
+            SubscriptionPriority.METADATA -> 220L + index * 45L
+            SubscriptionPriority.OTHER -> 160L + index * 40L
+        }
+    }
+
+    private fun subscriptionPriority(filterJson: String): SubscriptionPriority {
+        val kinds = mutableSetOf<Int>()
+
+        fun collectKinds(obj: JSONObject) {
+            val arr = obj.optJSONArray("kinds") ?: return
+            for (i in 0 until arr.length()) {
+                val kind = arr.optInt(i, Int.MIN_VALUE)
+                if (kind != Int.MIN_VALUE) kinds.add(kind)
+            }
+        }
+
+        try {
+            val trimmed = filterJson.trim()
+            if (trimmed.startsWith("[")) {
+                val filters = JSONArray(trimmed)
+                for (i in 0 until filters.length()) {
+                    filters.optJSONObject(i)?.let(::collectKinds)
+                }
+            } else if (trimmed.startsWith("{")) {
+                collectKinds(JSONObject(trimmed))
+            }
+        } catch (_: Exception) {
+            return SubscriptionPriority.OTHER
+        }
+
+        return when {
+            1059 in kinds || 14 in kinds -> SubscriptionPriority.DIRECT_MESSAGES
+            kinds.any { it == 30402 || it == 30017 || it == 30018 } -> SubscriptionPriority.MARKETPLACE
+            10002 in kinds -> SubscriptionPriority.USER_RELAYS
+            0 in kinds -> SubscriptionPriority.METADATA
+            else -> SubscriptionPriority.OTHER
         }
     }
 
@@ -591,56 +675,4 @@ class NostrClient @Inject constructor(
         }
     }
 
-    private fun scheduleResubscribeWorker(context: Context, relayUrl: String, id: String, filters: String) {
-        // Consolidate: enqueue a single coarse fallback job to resubscribe later if needed.
-        val workRequest = OneTimeWorkRequestBuilder<NostrResubscribeWorker>()
-            .setInitialDelay(15, TimeUnit.MINUTES)
-            .build()
-        WorkManager.getInstance(context).enqueueUniqueWork(
-            "nostr_resubscribe_fallback",
-            ExistingWorkPolicy.KEEP,
-            workRequest
-        )
-    }
-
-    class NostrResubscribeWorker(appContext: Context, params: WorkerParameters) : Worker(appContext, params) {
-        override fun doWork(): Result {
-            val relayUrl = inputData.getString("relayUrl") ?: return Result.failure()
-            val id = inputData.getString("id") ?: return Result.failure()
-            val filters = inputData.getString("filters") ?: return Result.failure()
-            try {
-                val client = OkHttpClient()
-                val request = Request.Builder().url(relayUrl).build()
-                val ws = client.newWebSocket(request, object : WebSocketListener() {
-                    override fun onOpen(webSocket: WebSocket, response: Response) {
-                        val reqArray = JSONArray()
-                        reqArray.put("REQ")
-                        reqArray.put(id)
-                        try {
-                            val filtersArray = JSONArray(filters)
-                            for (i in 0 until filtersArray.length()) {
-                                reqArray.put(filtersArray.getJSONObject(i))
-                            }
-                        } catch (e: Exception) {
-                            try {
-                                val filterObj = JSONObject(filters)
-                                reqArray.put(filterObj)
-                            } catch (e2: Exception) {
-                                Timber.e(e2, "Invalid filter JSON")
-                                webSocket.close(1000, null)
-                                return
-                            }
-                        }
-                        val req = reqArray.toString()
-                        webSocket.send(req)
-                        webSocket.close(1000, null)
-                    }
-                })
-                return Result.success()
-            } catch (e: Exception) {
-                Timber.e(e, "Failed to resubscribe")
-                return Result.retry()
-            }
-        }
-    }
 }
