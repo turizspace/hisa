@@ -80,9 +80,15 @@ import androidx.compose.material.icons.filled.Person
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.sp
+import android.widget.Toast
 import androidx.navigation.compose.rememberNavController
 import coil.compose.rememberAsyncImagePainter
+import com.hisa.data.model.OrderItem
+import com.hisa.ui.components.OrderComposerDialog
 import com.hisa.ui.navigation.Routes
+import com.hisa.viewmodel.AuthViewModel
+import com.hisa.viewmodel.OrderCreateViewModel
+import com.hisa.viewmodel.OrderCreationState
 import androidx.hilt.navigation.compose.hiltViewModel
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class,
@@ -97,12 +103,36 @@ fun ServiceDetailScreen(
     viewModel: ServiceDetailViewModel = hiltViewModel()
 ) {
     val context = LocalContext.current
+    val authViewModel: AuthViewModel = hiltViewModel()
+    val orderCreateViewModel: OrderCreateViewModel = hiltViewModel()
+
     val service by viewModel.service.collectAsState()
     val isLoading by viewModel.isLoading.collectAsState()
     val error by viewModel.error.collectAsState()
-    var showRawEvent by remember { mutableStateOf(false) }
+    val buyerPubkey by authViewModel.pubKey.collectAsState()
+    val privateKeyHex by authViewModel.privateKey.collectAsState()
+    val orderState by orderCreateViewModel.state.collectAsState()
+    val currentOrderState = orderState
+    var showOrderDialog by remember { mutableStateOf(false) }
+    var orderError by remember { mutableStateOf<String?>(null) }
     val rawEvent by viewModel.rawEvent.collectAsState()
+    var showRawEvent by remember { mutableStateOf(false) }
     val padding = PaddingValues(16.dp)
+
+    LaunchedEffect(currentOrderState) {
+        when (currentOrderState) {
+            is OrderCreationState.Success -> {
+                orderError = null
+                showOrderDialog = false
+                Toast.makeText(context, "Order sent successfully", Toast.LENGTH_SHORT).show()
+                orderCreateViewModel.resetState()
+            }
+            is OrderCreationState.Error -> {
+                orderError = currentOrderState.message
+            }
+            else -> Unit
+        }
+    }
 
     LaunchedEffect(eventId) {
         viewModel.loadService(eventId, pubkey)
@@ -545,11 +575,73 @@ fun ServiceDetailScreen(
                         Text("Contact $displayName")
                     }
 
-                            Spacer(modifier = Modifier.height(16.dp)) // Bottom padding
+                    Spacer(modifier = Modifier.height(8.dp))
+
+                    Button(
+                        onClick = { showOrderDialog = true },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp, vertical = 8.dp),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = MaterialTheme.colorScheme.secondary
+                        ),
+                        shape = RoundedCornerShape(12.dp)
+                    ) {
+                        Text("Order this service")
+                    }
+
+                    Spacer(modifier = Modifier.height(16.dp)) // Bottom padding
                     } // End of Column with padding 16.dp
                 } // End of Column with verticalScroll
             } // End of Column with fillMaxSize (service != null case)
             } // End of when block
+
+            if (service != null && showOrderDialog) {
+                val priceTag = service!!.rawTags.find { it.size > 1 && it[0] == "price" }
+                val priceValue = priceTag?.getOrNull(1) ?: service!!.price
+                val priceCurrency = priceTag?.getOrNull(2)?.uppercase() ?: "SATS"
+                OrderComposerDialog(
+                    open = true,
+                    sellerDisplayName = pubkey.take(8) + "...",
+                    sellerPubkey = pubkey,
+                    itemReference = "30402:${pubkey}:${service!!.rawTags.firstOrNull { it.firstOrNull() == "d" }?.getOrNull(1) ?: service!!.eventId}",
+                    itemName = service!!.title,
+                    unitPriceLabel = if (priceCurrency.equals("SATS", ignoreCase = true)) "$priceValue sats" else "$priceValue $priceCurrency",
+                    unitPriceSats = if (priceCurrency.equals("SATS", ignoreCase = true)) priceValue.filter { it.isDigit() }.toLongOrNull() else null,
+                    isSending = orderState is OrderCreationState.Sending,
+                    errorMessage = (orderState as? OrderCreationState.Error)?.message ?: orderError,
+                    onCancel = {
+                        showOrderDialog = false
+                        orderCreateViewModel.resetState()
+                    },
+                    onSubmit = { quantity, notes, shippingOption, shippingAddress, buyerEmail, buyerPhone ->
+                        val unitAmount = priceValue.filter { it.isDigit() }.toLongOrNull() ?: 0L
+                        val orderAmount = unitAmount * quantity
+                        val orderProductPrice = if (priceCurrency.equals("SATS", ignoreCase = true)) "${priceValue} sats" else "$priceValue $priceCurrency"
+                        orderCreateViewModel.submitOrder(
+                            buyerPubkey = buyerPubkey.orEmpty(),
+                            buyerPrivateKeyHex = privateKeyHex,
+                            sellerPubkey = pubkey,
+                            subject = "Order for ${service!!.title}",
+                            items = listOf(
+                                OrderItem(
+                                    productReference = "30402:${pubkey}:${service!!.rawTags.firstOrNull { it.firstOrNull() == "d" }?.getOrNull(1) ?: service!!.eventId}",
+                                    productName = service!!.title,
+                                    quantity = quantity,
+                                    productPrice = orderProductPrice
+                                )
+                            ),
+                            amount = orderAmount,
+                            currency = priceCurrency,
+                            notes = notes,
+                            shippingOption = shippingOption,
+                            shippingAddress = shippingAddress,
+                            buyerEmail = buyerEmail,
+                            buyerPhone = buyerPhone
+                        )
+                    }
+                )
+            }
         } // End of Box with fillMaxSize
     } // End of Scaffold content
 } // End of ServiceDetailScreen

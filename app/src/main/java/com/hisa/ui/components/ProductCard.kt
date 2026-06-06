@@ -26,7 +26,12 @@ import org.json.JSONArray
  * Shows: product image(s), name, description, price, categories.
  */
 @Composable
-fun ProductCard(product: Product, modifier: Modifier = Modifier, onAddToCart: (() -> Unit)? = null) {
+fun ProductCard(
+    product: Product,
+    modifier: Modifier = Modifier,
+    onAddToCart: (() -> Unit)? = null,
+    onOrder: (() -> Unit)? = null
+) {
     val normalizedPictures = remember(product.pictures) {
         product.pictures.mapNotNull(::normalizeProductImageUrl).distinct()
     }
@@ -140,15 +145,27 @@ fun ProductCard(product: Product, modifier: Modifier = Modifier, onAddToCart: ((
                 }
             }
 
-            // Add to cart button (optional)
-            if (onAddToCart != null) {
-                Button(
-                    onClick = onAddToCart,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(top = 12.dp)
-                ) {
-                    Text("Add to Cart")
+            // Order or add to cart button (optional)
+            when {
+                onOrder != null -> {
+                    Button(
+                        onClick = onOrder,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(top = 12.dp)
+                    ) {
+                        Text("Order now")
+                    }
+                }
+                onAddToCart != null -> {
+                    Button(
+                        onClick = onAddToCart,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(top = 12.dp)
+                    ) {
+                        Text("Add to Cart")
+                    }
                 }
             }
         }
