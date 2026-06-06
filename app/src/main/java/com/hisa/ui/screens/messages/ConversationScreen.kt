@@ -2,6 +2,8 @@ package com.hisa.ui.screens.conversation
 
 import com.hisa.util.cleanPubkeyFormat
 import com.hisa.data.model.ChatroomKey
+import com.hisa.data.model.Order
+import com.hisa.viewmodel.OrderNotificationsViewModel
 
 import android.os.Build
 import androidx.annotation.RequiresApi
@@ -12,6 +14,7 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
+import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -43,10 +46,74 @@ import com.hisa.ui.util.LocalProfileMetaUtil
 import com.hisa.viewmodel.MessagesViewModel
 import timber.log.Timber
 
+@Composable
+fun OrderSummaryCard(order: Order) {
+    val amountLabel = when {
+        order.currency.equals("USD", ignoreCase = true) -> "\$${order.amount}"
+        order.currency.equals("SATS", ignoreCase = true) -> "${order.amount} sats"
+        else -> "${order.amount} ${order.currency.uppercase()}"
+    }
+    Card(
+        modifier = Modifier
+            .fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+    ) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Text(
+                text = "Order details",
+                style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold)
+            )
+            Spacer(modifier = Modifier.height(8.dp))
+            Text(
+                text = order.subject.ifBlank { "Order #${order.orderId.take(8)}" },
+                style = MaterialTheme.typography.bodyLarge
+            )
+            Spacer(modifier = Modifier.height(6.dp))
+            Text(
+                text = "Total: $amountLabel",
+                style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.SemiBold)
+            )
+            Spacer(modifier = Modifier.height(8.dp))
+            if (order.items.isNotEmpty()) {
+                order.items.forEach { item ->
+                    Text(
+                        text = "• ${item.quantity}x ${item.productName.takeIf { it.isNotBlank() } ?: item.productReference}${item.productPrice?.let { " — $it" } ?: ""}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+            if (order.notes.isNotBlank()) {
+                Spacer(modifier = Modifier.height(8.dp))
+                Text(
+                    text = "Notes: ${order.notes}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            if (!order.shippingOption.isNullOrBlank() || !order.shippingAddress.isNullOrBlank()) {
+                Spacer(modifier = Modifier.height(8.dp))
+                Text(
+                    text = buildString {
+                        order.shippingOption?.takeIf { it.isNotBlank() }?.let { append("Shipping: $it") }
+                        if (!order.shippingAddress.isNullOrBlank()) {
+                            if (this.isNotEmpty()) append(" • ")
+                            append("Address: ${order.shippingAddress}")
+                        }
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        }
+    }
+}
+
 @RequiresApi(Build.VERSION_CODES.O)
 @Composable
 fun ConversationScreen(
     conversationId: String,
+    selectedOrderId: String? = null,
     userPubkey: String,
     contactName: String? = null,
     contactProfilePicture: String? = null,
@@ -68,7 +135,13 @@ fun ConversationScreen(
     }
     val allMessages by messagesViewModel.messages.collectAsState()
     val sendError by messagesViewModel.sendError.collectAsState()
+    val orderNotificationsViewModel: OrderNotificationsViewModel = hiltViewModel()
+    val orders by orderNotificationsViewModel.orders.collectAsState()
+    val selectedOrder = selectedOrderId?.let { id -> orders.firstOrNull { it.orderId == id } }
 
+    LaunchedEffect(selectedOrderId) {
+        selectedOrder?.let { orderNotificationsViewModel.markOrderAsRead(it.orderId) }
+    }
 
     val normalizedConversationId = cleanPubkeyFormat(conversationId)
     val normalizedUserPubkey = cleanPubkeyFormat(userPubkey)
@@ -244,6 +317,10 @@ fun ConversationScreen(
                 }
             }
             Spacer(modifier = Modifier.height(8.dp))
+            if (selectedOrder != null) {
+                OrderSummaryCard(order = selectedOrder)
+                Spacer(modifier = Modifier.height(12.dp))
+            }
             LazyColumn(modifier = Modifier.weight(1f)) {
                 items(visibleMessages) { message ->
                     val normalizedSender = cleanPubkeyFormat(message.pubkey)
