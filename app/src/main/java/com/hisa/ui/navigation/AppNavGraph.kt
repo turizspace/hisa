@@ -52,6 +52,7 @@ object Routes {
     const val SETTINGS = "settings"
     const val CONVERSATION = "conversation/{conversationId}"
     const val DM = "dm/{pubkey}"
+    const val DM_ORDER = "dm/{pubkey}/{orderId}"
     const val SERVICE_DETAIL = "serviceDetail/{eventId}/{pubkey}"
     const val CREATE_SERVICE = "createService"
     const val CREATE_CHANNEL = "createChannel"
@@ -364,6 +365,24 @@ fun AppNavGraph(
                 conversationId = pubkey,
                 userPubkey = pubKey,
                 privateKey = privateKey,  // Using the non-null privateKey from top level
+                messagesViewModel = messagesViewModel,
+                navController = navController
+            )
+        }
+        composable(
+            route = Routes.DM_ORDER,
+            arguments = listOf(
+                androidx.navigation.navArgument("pubkey") { type = androidx.navigation.NavType.StringType },
+                androidx.navigation.navArgument("orderId") { type = androidx.navigation.NavType.StringType }
+            )
+        ) { backStackEntry ->
+            val pubkey = backStackEntry.arguments?.getString("pubkey") ?: ""
+            val orderId = backStackEntry.arguments?.getString("orderId")
+            ConversationScreen(
+                conversationId = pubkey,
+                selectedOrderId = orderId,
+                userPubkey = pubKey,
+                privateKey = privateKey,
                 messagesViewModel = messagesViewModel,
                 navController = navController
             )
