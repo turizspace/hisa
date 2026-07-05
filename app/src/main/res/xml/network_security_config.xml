@@ -5,4 +5,25 @@
             <certificates src="system" />
         </trust-anchors>
     </base-config>
+
+    <!-- Allow cleartext to specific local relay hosts for development/testing -->
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="false">192.168.100.5</domain>
+    </domain-config>
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="false">localhost</domain>
+    </domain-config>
+    <!-- Android emulator host forwarding -->
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="false">10.0.2.2</domain>
+    </domain-config>
+
+    <!-- Optional: allow cleartext while debugging by enabling debug-overrides when app is debuggable -->
+    <debug-overrides>
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+        <base-config cleartextTrafficPermitted="true" />
+    </debug-overrides>
+
 </network-security-config>

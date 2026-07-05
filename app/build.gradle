@@ -191,6 +191,7 @@ dependencies {
 
     // Unit testing
     testImplementation 'junit:junit:4.13.2'
+    testImplementation 'androidx.test:core:1.5.0'
     // Add test dependency to provide org.json on the JVM test classpath
     testImplementation 'org.json:json:20230227'
 }
