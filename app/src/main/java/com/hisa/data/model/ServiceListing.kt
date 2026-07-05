@@ -1,5 +1,8 @@
 package com.hisa.data.model
 
+import kotlinx.serialization.Serializable
+
+@Serializable
 data class ServiceListing(
     val eventId: String,
     val title: String,

@@ -162,8 +162,11 @@ private val categoryRegistry = mapOf(
  */
 fun categoryUiFor(tag: String): CategoryUi {
     val normalized = normalizeCategory(tag)
-    return categoryRegistry[normalized]?.copy(label = categoryRegistry[normalized]?.label ?: humanizeCategoryLabel(normalized))
-        ?: defaultCategoryUi.copy(label = humanizeCategoryLabel(normalized.ifBlank { tag }))
+    val sanitizedTag = tag.trim().replace(Regex("[^a-z0-9]+"), " ").trim()
+    val fallbackLabel = humanizeCategoryLabel(sanitizedTag.ifBlank { normalized.ifBlank { tag } })
+
+    return categoryRegistry[normalized]?.copy(label = categoryRegistry[normalized]?.label ?: fallbackLabel)
+        ?: defaultCategoryUi.copy(label = fallbackLabel)
 }
 
 /**

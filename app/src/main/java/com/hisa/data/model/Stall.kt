@@ -1,5 +1,8 @@
 package com.hisa.data.model
 
+import kotlinx.serialization.Serializable
+
+@Serializable
 data class Stall(
     val id: String,
     val eventId: String = id,
@@ -16,6 +19,7 @@ data class Stall(
     val ownerProfilePicture: String = ""
 )
 
+@Serializable
 data class ShippingZone(
     val id: String,
     val name: String,

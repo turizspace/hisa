@@ -102,6 +102,7 @@ private val categoryAliases = mapOf(
     "shipping" to "delivery",
     "logistics" to "delivery",
     "transport" to "delivery",
+    "transportation" to "transport",
     "car" to "delivery",
     "taxi" to "delivery",
     "ride" to "delivery",
@@ -258,10 +259,15 @@ fun normalizeCategory(tag: String): String {
         .replace(Regex("[^a-z0-9]+"), " ")
         .trim()
 
-    val firstToken = normalizedKey.split(Regex("\\s+")).firstOrNull().orEmpty()
+    if (normalizedKey.isBlank()) return ""
+
+    val tokens = normalizedKey.split(Regex("\\s+")).filter { it.isNotBlank() }
     return categoryAliases[normalizedKey]
-        ?: categoryAliases[firstToken]
-        ?: firstToken
+        ?: tokens.firstOrNull()?.let { firstToken ->
+            categoryAliases[firstToken]
+                ?: firstToken
+        }
+        ?: normalizedKey
 }
 
 /**

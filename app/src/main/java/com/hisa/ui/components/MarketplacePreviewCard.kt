@@ -35,6 +35,7 @@ import com.hisa.data.model.Metadata
 import com.hisa.data.model.ServiceListing
 import com.hisa.data.model.Stall
 import org.json.JSONArray
+import com.hisa.util.formatServicePrice
 
 @Composable
 fun ServicePreviewCard(
@@ -262,32 +263,7 @@ private fun AttributionRow(
     }
 }
 
-private fun formatServicePrice(service: ServiceListing): String? {
-    val priceTag = service.rawTags.firstOrNull { it.size > 1 && it[0] == "price" }
-    val priceValue = priceTag?.getOrNull(1) as? String ?: service.price
-    val priceCurrency = (priceTag?.getOrNull(2) as? String)?.uppercase() ?: "SATS"
 
-    return when {
-        priceValue.isBlank() || priceValue.equals("N/A", true) -> null
-        priceValue == "0" || priceValue.equals("free", true) || priceValue.equals("open", true) -> "Free"
-        priceValue.lowercase().contains("sat") -> priceValue
-        priceCurrency == "USD" -> "$$priceValue"
-        priceCurrency == "SATS" || priceCurrency.isBlank() -> {
-            if (priceValue.all { it.isDigit() }) {
-                val amount = priceValue.toLongOrNull()
-                when {
-                    amount == null -> priceValue
-                    amount < 1000 -> "${amount} sats"
-                    amount < 1000000 -> String.format("%.1fK sats", amount / 1000.0)
-                    else -> String.format("%.1fM sats", amount / 1000000.0)
-                }
-            } else {
-                priceValue
-            }
-        }
-        else -> "$priceValue $priceCurrency"
-    }
-}
 
 private fun normalizeImageUrl(raw: String?): String? {
     val trimmed = raw?.trim().orEmpty()
