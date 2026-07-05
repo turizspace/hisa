@@ -3,20 +3,20 @@ package com.hisa.ui.screens.create
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.hisa.data.nostr.NostrClient
-import com.hisa.data.nostr.NostrEvent
-import com.hisa.data.nostr.NostrEventSigner
-import com.hisa.data.nostr.NostrStallUtils
-import com.hisa.data.nostr.toNostrEvent
-import com.hisa.util.hexToByteArrayOrNull
+import com.hisa.data.nostr.NostrSigningService
 import dagger.hilt.android.lifecycle.HiltViewModel
+import java.util.UUID
 import javax.inject.Inject
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
+import org.json.JSONArray
+import org.json.JSONObject
 
 @HiltViewModel
 class CreateServiceViewModel @Inject constructor(
-    private val nostrClient: NostrClient
+    private val nostrClient: NostrClient,
+    private val signingService: NostrSigningService
 ) : ViewModel() {
     private val _isLoading = MutableStateFlow(false)
     val isLoading: StateFlow<Boolean> = _isLoading
@@ -49,30 +49,14 @@ class CreateServiceViewModel @Inject constructor(
                 }
                 val serviceTags = mutableTags.distinct()
 
-                val event = NostrEvent(
-                    id = "", // Will be set during signing
-                    pubkey = userPubkey,
-                    createdAt = System.currentTimeMillis() / 1000,
+                signingService.signAndPublish(
+                    nostrClient = nostrClient,
                     kind = 30402, // NIP-99 Classified Listings
                     content = description,
                     tags = serviceTags,
-                    sig = "" // Will be set during signing
+                    pubkeyHint = userPubkey,
+                    privateKeyHexHint = privateKeyHex
                 )
-
-                // If privateKeyHex is null or blank, treat this as an external-signer login
-                // and pass null so NostrEventSigner will delegate to ExternalSignerManager.
-                val privKeyBytes = hexToByteArrayOrNull(privateKeyHex, 32)
-
-                val eventJson = NostrEventSigner.signEvent(
-                    kind = event.kind,
-                    content = event.content,
-                    tags = event.tags,
-                    pubkey = event.pubkey,
-                    privKey = privKeyBytes,
-                    createdAt = event.createdAt
-                )
-
-                nostrClient.publishEvent(eventJson.toNostrEvent())
 
                 onSuccess()
             } catch (e: Exception) {
@@ -95,25 +79,33 @@ class CreateServiceViewModel @Inject constructor(
         viewModelScope.launch {
             _isLoading.value = true
             try {
-                val privKeyBytes = hexToByteArrayOrNull(privateKeyHex, 32)
                 // extract categories from tags (t tags)
                 val categories = tags.mapNotNull { t ->
                     if (t.isNotEmpty() && t[0] == "t" && t.size > 1) t[1] else null
                 }
 
-                val stallEvent = NostrStallUtils.createStall(
-                    name = title,
-                    about = summary.ifBlank { description },
-                    picture = "",
-                    relays = emptyList<String>(),
-                    categories = categories,
-                    location = null,
-                    geohash = null,
-                    privateKey = privKeyBytes,
-                    pubkey = pubKey
-                )
+                val stallId = UUID.randomUUID().toString()
+                val metadata = JSONObject().apply {
+                    put("id", stallId)
+                    put("name", title)
+                    put("description", summary.ifBlank { description })
+                    put("currency", "SATS")
+                    put("shipping", JSONArray())
+                    if (summary.isNotBlank() || description.isNotBlank()) {
+                        put("about", summary.ifBlank { description })
+                    }
+                }
+                val stallTags = mutableListOf<List<String>>(listOf("d", stallId))
+                categories.forEach { stallTags.add(listOf("t", it)) }
 
-                nostrClient.publishEvent(stallEvent)
+                signingService.signAndPublish(
+                    nostrClient = nostrClient,
+                    kind = 30017,
+                    content = metadata.toString(),
+                    tags = stallTags,
+                    pubkeyHint = pubKey,
+                    privateKeyHexHint = privateKeyHex
+                )
 
                 onSuccess()
             } catch (e: Exception) {
