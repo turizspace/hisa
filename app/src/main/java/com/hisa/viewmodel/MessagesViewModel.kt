@@ -1,6 +1,7 @@
 package com.hisa.viewmodel
 
 import com.hisa.util.cleanPubkeyFormat
+import com.hisa.util.resolveAccountSession
 
 import android.os.Build
 import androidx.annotation.RequiresApi
@@ -8,9 +9,11 @@ import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
+import com.hisa.data.cache.MessageCacheStore
 import com.hisa.data.model.Message
 import com.hisa.data.model.ChatroomKey
 import com.hisa.data.nostr.NostrClient
+import com.hisa.data.nostr.NostrSigningService
 import com.hisa.data.repository.ConversationRepository
 import com.hisa.data.repository.MetadataRepository
 import com.hisa.data.repository.MessageRepository
@@ -23,7 +26,6 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.update
 import org.json.JSONArray
 import org.json.JSONObject
 import javax.inject.Inject
@@ -42,21 +44,19 @@ class MessagesViewModel @Inject constructor(
     private val messageRepository: MessageRepository,
     private val metadataRepository: MetadataRepository,
     private val secureStorage: com.hisa.data.storage.SecureStorage,
-    private val subscriptionManager: com.hisa.data.nostr.SubscriptionManager
+    private val subscriptionManager: com.hisa.data.nostr.SubscriptionManager,
+    private val signingService: NostrSigningService,
+    private val messageCacheStore: MessageCacheStore
 ) : ViewModel() {
-    private data class AuthContext(
-        val localPrivateKeyBytes: ByteArray?,
-        val localPrivateKeyHex: String?,
-        val signerPubkey: String?,
-        val signerPackage: String?,
-        val hasExternalSigner: Boolean
-    )
-
     /**
      * Clears all messages from memory. Call this on logout or when switching accounts.
      */
     fun clearMessages() {
         _messages.value = emptyList()
+        _conversations.value = emptyMap()
+        messagesById.clear()
+        messageEmitJob?.cancel()
+        messageEmitJob = null
         seenGiftWrapEventIds.clear()
         directSubscriptionStarted = false
         directEoseReceived = false
@@ -67,6 +67,7 @@ class MessagesViewModel @Inject constructor(
         _isLoading.value = false
         pendingDecryptRetryQueue.clear()
         retryJobActive = false
+        messageCacheStore.clear()
         // Clear direct DM subscription when clearing messages to avoid stale handlers
         directSubscriptionId?.let {
             try {
@@ -142,6 +143,14 @@ class MessagesViewModel @Inject constructor(
     
     private val _messages = MutableStateFlow<List<Message>>(emptyList())
     val messages: StateFlow<List<Message>> = _messages
+    private val _conversations = MutableStateFlow<Map<String, List<Message>>>(emptyMap())
+    val conversations: StateFlow<Map<String, List<Message>>> = _conversations
+    private val messagesById = ConcurrentHashMap<String, Message>()
+    private val messageEmitLock = Any()
+
+    @Volatile
+    private var messageEmitJob: Job? = null
+
     // Buffer plain (kind 14) messages that arrive while initial loading is active
     private val pendingPlainMessages = ConcurrentLinkedQueue<org.json.JSONObject>()
     // Sampling counters to throttle high-frequency logs
@@ -156,6 +165,52 @@ class MessagesViewModel @Inject constructor(
     fun clearSendError() {
         _sendError.value = null
     }
+
+    private fun upsertMessage(message: Message, emitImmediately: Boolean = false): Boolean {
+        if (message.id.isBlank()) return false
+
+        val existing = messagesById[message.id]
+        if (existing != null && existing.createdAt >= message.createdAt) {
+            return false
+        }
+
+        messagesById[message.id] = message
+        if (emitImmediately) {
+            emitMessagesSnapshotNow()
+        } else {
+            scheduleMessagesSnapshot()
+        }
+        return true
+    }
+
+    private fun scheduleMessagesSnapshot() {
+        synchronized(messageEmitLock) {
+            if (messageEmitJob?.isActive == true) return
+            messageEmitJob = viewModelScope.launch(Dispatchers.Default) {
+                delay(MESSAGE_EMIT_DEBOUNCE_MS)
+                emitMessagesSnapshot()
+            }
+        }
+    }
+
+    private fun emitMessagesSnapshotNow() {
+        synchronized(messageEmitLock) {
+            messageEmitJob?.cancel()
+            messageEmitJob = null
+        }
+        _messages.value = messagesById.values.sortedBy { it.createdAt }
+        _conversations.value = getConversations()
+        messageCacheStore.writeMessages(_messages.value)
+    }
+
+    private fun emitMessagesSnapshot() {
+        synchronized(messageEmitLock) {
+            messageEmitJob = null
+        }
+        _messages.value = messagesById.values.sortedBy { it.createdAt }
+        _conversations.value = getConversations()
+        messageCacheStore.writeMessages(_messages.value)
+    }
     
 
     /**
@@ -168,14 +223,24 @@ class MessagesViewModel @Inject constructor(
                 if (arr.length() > 2 && arr.getString(0) == "EVENT") {
                     val eventObj = arr.getJSONObject(2)
                     val kind = eventObj.optInt("kind")
-                    // Only process DM-related kinds
-                    if (kind == 12 || kind == 14 || kind == 1059) {
+                    // Only process DM-related kinds: 4 (NIP-04), 14 (plain), 1059 (gift wrap)
+                    if (kind == 4 || kind == 14 || kind == 1059) {
                         val eventJson = eventObj.toString()
                         if (dmEventCounter.incrementAndGet() % 500L == 0L) {
                             Timber.d("Received DM event (sample): %s", eventJson)
                         }
                         when (kind) {
-                            12 -> handleGiftWrap(eventObj) // NIP-59 Gift Wrap
+                            4 -> { // NIP-04 Encrypted DM (deprecated, AES-256-CBC)
+                                // NIP-04 messages: decrypt and process
+                                if (_isLoading.value) {
+                                    pendingPlainMessages.add(eventObj)
+                                    if (bufferLogCounter.incrementAndGet() % 200L == 0L) {
+                                        Timber.d("Buffered NIP-04 DM during loading (sample): %s", eventObj.optString("id"))
+                                    }
+                                } else {
+                                    handleNip04Message(eventObj)
+                                }
+                            }
                             14 -> { // NIP-17 Direct Message (legacy, if any)
                                 // Plain NIP-17 (kind 14) messages: buffer during initial load to avoid incremental UI
                                 if (_isLoading.value) {
@@ -189,7 +254,7 @@ class MessagesViewModel @Inject constructor(
                                         Timber.d("Parsed direct message (sample): %s", msg)
                                     }
                                     if (msg != null && msg.recipientPubkeys.contains(userPubkey)) {
-                                        _messages.value = _messages.value + msg
+                                        upsertMessage(msg)
                                         if (dmEventCounter.get() % 200L == 0L) {
                                             Timber.d("Added direct message to state (sample): %s", msg.id)
                                         }
@@ -223,17 +288,8 @@ class MessagesViewModel @Inject constructor(
     }
 
     private suspend fun tryRestoreExternalSignerFromStorage(): Boolean {
-        val configuredPkg = com.hisa.data.nostr.ExternalSignerManager.getConfiguredPackage()
-        val configuredPub = com.hisa.data.nostr.ExternalSignerManager.getConfiguredPubkey()
-        if (!configuredPkg.isNullOrBlank() && !configuredPub.isNullOrBlank()) return true
-
-        val storedPkg = secureStorage.getExternalSignerPackage()
-        val storedPub = normalizeSigningPubkey(secureStorage.getExternalSignerPubkey())
-        if (storedPkg.isNullOrBlank() || !storedPub.matches(Regex("[0-9a-f]{64}"))) return false
-
         return try {
-            com.hisa.data.nostr.ExternalSignerManager.ensureConfigured(storedPub, storedPkg, null)
-            true
+            signingService.ensureExternalSignerConfigured()
         } catch (e: Exception) {
             Timber.w(e, "Failed to restore external signer from storage")
             false
@@ -241,60 +297,50 @@ class MessagesViewModel @Inject constructor(
     }
 
     private fun resolveLocalPrivateKeyFromStorageOrSession(): Pair<ByteArray?, String?> {
-        val fromNsec = secureStorage.getNsec()?.let { nsec ->
-            kotlin.runCatching { com.hisa.util.KeyGenerator.nsecToPrivateKey(nsec) }.getOrNull()
-        }?.takeIf { it.size == 32 }
-        if (fromNsec != null) {
-            val hex = fromNsec.joinToString("") { "%02x".format(it) }
-            return Pair(fromNsec, hex)
-        }
-
-        val fromHex = if (privateKey.matches(Regex("[0-9a-fA-F]{64}"))) {
-            kotlin.runCatching { hexStringToBytes(privateKey) }.getOrNull()
-        } else null
-        return Pair(fromHex, privateKey.takeIf { it.matches(Regex("[0-9a-fA-F]{64}")) })
+        val session = resolveAccountSession(
+            pubkeyHint = userPubkey,
+            privateKeyHexHint = privateKey,
+            nsec = secureStorage.getNsec()
+        )
+        return Pair(session.privateKeyBytes, session.privateKeyHex)
     }
 
-    private suspend fun resolveAuthContext(refreshOnce: Boolean = true): AuthContext {
-        var (localBytes, localHex) = resolveLocalPrivateKeyFromStorageOrSession()
-        if (localBytes == null && refreshOnce) {
-            kotlin.runCatching { initialize() }
-            val refreshed = resolveLocalPrivateKeyFromStorageOrSession()
-            localBytes = refreshed.first
-            localHex = refreshed.second
-        }
-
-        var signerPackage = com.hisa.data.nostr.ExternalSignerManager.getConfiguredPackage()
-        var signerPubkey = normalizeSigningPubkey(com.hisa.data.nostr.ExternalSignerManager.getConfiguredPubkey())
-        if (signerPackage.isNullOrBlank() || !signerPubkey.matches(Regex("[0-9a-f]{64}"))) {
-            if (tryRestoreExternalSignerFromStorage()) {
-                signerPackage = com.hisa.data.nostr.ExternalSignerManager.getConfiguredPackage()
-                signerPubkey = normalizeSigningPubkey(com.hisa.data.nostr.ExternalSignerManager.getConfiguredPubkey())
-            } else {
-                signerPackage = secureStorage.getExternalSignerPackage()
-                signerPubkey = normalizeSigningPubkey(secureStorage.getExternalSignerPubkey())
-            }
-        }
-
-        val hasExternalSigner = !signerPackage.isNullOrBlank() && signerPubkey.matches(Regex("[0-9a-f]{64}"))
-        return AuthContext(
-            localPrivateKeyBytes = localBytes,
-            localPrivateKeyHex = localHex,
-            signerPubkey = signerPubkey.takeIf { it.matches(Regex("[0-9a-f]{64}")) },
-            signerPackage = signerPackage,
-            hasExternalSigner = hasExternalSigner
+    private suspend fun resolveAuthContext(refreshOnce: Boolean = true): NostrSigningService.SigningContext {
+        var authContext = signingService.resolveSigningContext(
+            pubkeyHint = userPubkey,
+            privateKeyHexHint = privateKey
         )
+        if (authContext.localPrivateKeyBytes == null && refreshOnce) {
+            kotlin.runCatching { initialize() }
+            authContext = signingService.resolveSigningContext(
+                pubkeyHint = userPubkey,
+                privateKeyHexHint = privateKey
+            )
+        }
+
+        return authContext
     }
 
     init {
-        // Kick off initialization: derive user pubkey from stored nsec and ensure
-        // an X25519 private key exists for NIP-44 encryption.
+        restoreCachedMessages()
         viewModelScope.launch(Dispatchers.IO) {
             try {
                 initialize()
             } catch (e: Exception) {
                 Timber.e(e, "Error during MessagesViewModel initialization")
             }
+        }
+    }
+
+    private fun restoreCachedMessages() {
+        val cached = messageCacheStore.readMessages()
+        if (cached.isNotEmpty()) {
+            messagesById.clear()
+            cached.forEach { message ->
+                messagesById[message.id] = message
+            }
+            _messages.value = cached.sortedBy { it.createdAt }
+            _conversations.value = getConversations()
         }
     }
 
@@ -341,10 +387,6 @@ class MessagesViewModel @Inject constructor(
                     limitPerDirection = DIRECT_DM_LIMIT_PER_FILTER,
                     onEvent = { nostrEvent ->
                         try {
-                            // Increment counter: a new message is incoming
-                            giftWrapProcessingCount.incrementAndGet()
-                            giftWrapProcessingInProgress = true
-                            
                             val obj = JSONObject().apply {
                                 put("id", nostrEvent.id)
                                 put("pubkey", nostrEvent.pubkey)
@@ -358,7 +400,6 @@ class MessagesViewModel @Inject constructor(
                             handleGiftWrap(obj, null)
                         } catch (e: Exception) {
                             Timber.e(e, "Error handling subscribed direct message event")
-                            giftWrapProcessingCount.decrementAndGet()
                             checkIfAllMessagesProcessed()
                         }
                     },
@@ -421,27 +462,42 @@ class MessagesViewModel @Inject constructor(
         directLoadTimeoutJob?.cancel()
         directLoadTimeoutJob = null
         _isLoading.value = false
-        Timber.d("Direct messages loading finalized via: %s (totalMessages=%d conversations=%d)", reason, _messages.value.size, getConversations().size)
-        // Drain any plain NIP-17 messages that arrived while we were loading
+        // Drain any plain NIP-17 (kind 14) and NIP-04 (kind 4) messages that arrived while we were loading
         try {
             while (true) {
                 val ev = pendingPlainMessages.poll() ?: break
                 try {
-                    val evJson = ev.toString()
-                    val msg = MessageRepository.parseMessage(evJson)
-                    if (msg != null && msg.recipientPubkeys.contains(userPubkey)) {
-                        _messages.update { current ->
-                            if (current.any { it.id == msg.id }) current else (current + msg).sortedBy { it.createdAt }
+                    val kind = ev.optInt("kind")
+                    when (kind) {
+                        4 -> {
+                            // NIP-04 message - decrypt it
+                            viewModelScope.launch(Dispatchers.IO) {
+                                val msg = decryptNip04Message(ev)
+                                if (msg != null && msg.recipientPubkeys.contains(userPubkey)) {
+                                    upsertMessage(msg)
+                                    Timber.d("Drained buffered NIP-04 DM: %s", msg.id)
+                                }
+                            }
                         }
-                        Timber.d("Drained buffered plain DM: %s", msg.id)
+                        14 -> {
+                            // Plain NIP-17 message
+                            val evJson = ev.toString()
+                            val msg = MessageRepository.parseMessage(evJson)
+                            if (msg != null && msg.recipientPubkeys.contains(userPubkey)) {
+                                upsertMessage(msg)
+                                Timber.d("Drained buffered plain DM: %s", msg.id)
+                            }
+                        }
                     }
                 } catch (e: Exception) {
-                    Timber.w(e, "Failed to process buffered plain DM")
+                    Timber.w(e, "Failed to process buffered DM")
                 }
             }
         } catch (e: Exception) {
             Timber.w(e, "Error draining pending plain messages")
         }
+        emitMessagesSnapshotNow()
+        Timber.d("Direct messages loading finalized via: %s (totalMessages=%d conversations=%d)", reason, _messages.value.size, getConversations().size)
     }
 
     fun stopDirectMessagesSubscription() {
@@ -473,6 +529,7 @@ class MessagesViewModel @Inject constructor(
         private const val DIRECT_DM_LIMIT_PER_FILTER = 1000
         private const val CONVERSATION_DM_HISTORY_DAYS = 180L
         private const val CONVERSATION_DM_LIMIT_PER_FILTER = 1000
+        private const val MESSAGE_EMIT_DEBOUNCE_MS = 120L
         // Stable timestamp across VM instances in one process, helps filter dedupe in SubscriptionManager.
         val DIRECT_DM_SINCE: Long =
             (System.currentTimeMillis() / 1000) - (DIRECT_DM_HISTORY_DAYS * 24L * 60L * 60L)
@@ -487,7 +544,7 @@ class MessagesViewModel @Inject constructor(
             val senderHints = buildList {
                 val expected = cleanPubkeyFormat(expectedOtherPubkey ?: "")
                 if (expected.matches(Regex("[0-9a-f]{64}", RegexOption.IGNORE_CASE))) add(expected.lowercase())
-                _messages.value.forEach { msg ->
+                messagesById.values.forEach { msg ->
                     val sender = cleanPubkeyFormat(msg.pubkey).lowercase()
                     if (sender.matches(Regex("[0-9a-f]{64}")) && !sender.equals(cleanedUserPubkey, true)) {
                         add(sender)
@@ -672,14 +729,8 @@ class MessagesViewModel @Inject constructor(
             return
         }
 
-        _messages.update { current ->
-            if (current.any { it.id == message.id }) {
-                current // Skip duplicates
-            } else {
-                (current + message).sortedBy { it.createdAt }.also {
-                    Timber.i("Added message to state. Total: ${it.size}")
-                }
-            }
+        if (upsertMessage(message) && messagesById.size % 100 == 0) {
+            Timber.d("Messages cached: %d", messagesById.size)
         }
     }
 
@@ -723,10 +774,7 @@ class MessagesViewModel @Inject constructor(
                 placeholder.recipientPubkeys.map { cleanPubkeyFormat(it) }
             )
             
-            _messages.update { current ->
-                if (current.any { it.id == placeholder.id }) current 
-                else (current + placeholder).sortedBy { it.createdAt }
-            }
+            upsertMessage(placeholder)
         } catch (e: Exception) {
             Timber.e(e, "Failed to create placeholder")
         }
@@ -858,9 +906,134 @@ class MessagesViewModel @Inject constructor(
         x25519PrivateKey = hex.lowercase()
     }
 
+    /**
+     * Decrypt a NIP-04 (deprecated, AES-256-CBC) encrypted message
+     */
+    @RequiresApi(Build.VERSION_CODES.O)
+    private suspend fun decryptNip04Message(event: JSONObject): Message? {
+        return try {
+            val senderPubkey = cleanPubkeyFormat(event.optString("pubkey", ""))
+            val content = event.optString("content", "")
+            
+            if (senderPubkey.isBlank() || content.isBlank()) {
+                Timber.w("NIP-04 event missing pubkey or content")
+                return null
+            }
+
+            // Get our signing key for decryption
+            val authContext = resolveAuthContext(refreshOnce = true)
+            val ourPrivateKeyBytes = authContext.localPrivateKeyBytes
+            val signerAvailable = signingService.hasExternalSignerTransport() ||
+                com.hisa.data.nostr.ExternalSignerManager.hasBackgroundResolver() ||
+                com.hisa.data.nostr.ExternalSignerManager.isLauncherRegistered()
+
+            // Decrypt using local key first, then external signer if needed.
+            val plaintext = try {
+                if (ourPrivateKeyBytes != null) {
+                    messageRepository.nip04Decrypt(content, ourPrivateKeyBytes, senderPubkey)
+                } else if (signerAvailable) {
+                    com.hisa.data.nostr.ExternalSignerManager.nip04Decrypt(content, senderPubkey)
+                } else {
+                    Timber.w("Cannot decrypt NIP-04: no local private key or external signer available")
+                    return null
+                }
+            } catch (localError: Exception) {
+                if (signerAvailable && ourPrivateKeyBytes != null) {
+                    Timber.d(localError, "Local NIP-04 decrypt failed, trying external signer for event %s", event.optString("id"))
+                    try {
+                        com.hisa.data.nostr.ExternalSignerManager.nip04Decrypt(content, senderPubkey)
+                    } catch (externalError: Exception) {
+                        Timber.w(externalError, "External signer NIP-04 decrypt failed for event %s", event.optString("id"))
+                        return null
+                    }
+                } else {
+                    Timber.w(localError, "NIP-04 decryption failed for event %s", event.optString("id"))
+                    return null
+                }
+            }
+
+            // Extract recipient pubkeys from p-tags
+            val recipients = mutableListOf<String>()
+            val tags = event.optJSONArray("tags") ?: JSONArray()
+            for (i in 0 until tags.length()) {
+                val tag = tags.optJSONArray(i) ?: continue
+                if (tag.optString(0) == "p") {
+                    recipients.add(cleanPubkeyFormat(tag.optString(1)))
+                }
+            }
+
+            // Create Message object
+            Message.TextMessage(
+                id = event.optString("id"),
+                pubkey = senderPubkey,
+                recipientPubkeys = recipients,
+                content = plaintext,
+                createdAt = event.optLong("created_at"),
+                subject = null,
+                replyTo = null,
+                relayUrls = null
+            )
+        } catch (e: Exception) {
+            Timber.e(e, "Failed to decrypt NIP-04 message")
+            null
+        }
+    }
+
+    /**
+     * Handle an incoming NIP-04 encrypted message
+     */
+    @RequiresApi(Build.VERSION_CODES.O)
+    private fun handleNip04Message(event: JSONObject) {
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val eventId = event.optString("id", "unknown")
+                Timber.d("Processing NIP-04 message: %s", eventId)
+                
+                // Check if for current user
+                if (!isMessageForCurrentUser(event)) {
+                    Timber.d("NIP-04 message not for current user, skipping")
+                    return@launch
+                }
+
+                // Decrypt the message
+                val decryptedMessage = decryptNip04Message(event) ?: run {
+                    Timber.w("Failed to decrypt NIP-04 message %s", eventId)
+                    return@launch
+                }
+
+                // Verify message relates to current user
+                val recipients = decryptedMessage.recipientPubkeys.map { cleanPubkeyFormat(it) }
+                val sender = cleanPubkeyFormat(decryptedMessage.pubkey)
+                val relatesToCurrentUser = sender.equals(cleanedUserPubkey, true) ||
+                    recipients.any { it.equals(cleanedUserPubkey, true) }
+                
+                if (!relatesToCurrentUser) {
+                    Timber.d("Skipping NIP-04 message not addressed to current user")
+                    return@launch
+                }
+
+                // Add to message state
+                upsertMessage(decryptedMessage)
+                if (messagesById.size % 100 == 0) {
+                    Timber.d("Messages cached: %d", messagesById.size)
+                }
+                
+                Timber.d("Added NIP-04 message: %s from %s", eventId, sender)
+            } catch (e: Exception) {
+                Timber.e(e, "Error processing NIP-04 message")
+            }
+        }
+    }
+
    
     @RequiresApi(Build.VERSION_CODES.O)
     private fun handleGiftWrap(giftWrap: JSONObject, expectedOtherPubkey: String? = null) {
+        val queued = giftWrapProcessingCount.incrementAndGet()
+        giftWrapProcessingInProgress = true
+        if (queued % 100 == 0) {
+            Timber.d("Queued gift wraps pending: %d", queued)
+        }
+
         viewModelScope.launch(Dispatchers.IO) {
             try {
                 giftWrapProcessingMutex.withLock {
@@ -873,8 +1046,6 @@ class MessagesViewModel @Inject constructor(
                                 return@withLock
                             }
                         }
-                        Timber.i("Processing gift wrap event: $eventId")
-
                         // 1. Verify message is for current user
                         if (!isMessageForCurrentUser(giftWrap)) {
                             Timber.d("Message not for current user, skipping")
@@ -940,8 +1111,7 @@ class MessagesViewModel @Inject constructor(
             } finally {
                 // Decrement counter: this message has finished processing
                 val count = giftWrapProcessingCount.decrementAndGet()
-                Timber.d("Gift wrap processing complete. Remaining: %d", count)
-                giftWrapProcessingInProgress = false
+                giftWrapProcessingInProgress = count > 0
                 // Check if all messages are now complete
                 checkIfAllMessagesProcessed()
             }
@@ -969,22 +1139,6 @@ class MessagesViewModel @Inject constructor(
 
     fun getConversations(): Map<String, List<Message>> {
         val messages = _messages.value
-        Timber.d("Total messages in state: %d", messages.size)
-        // Sample up to 5 messages for tracing to avoid noisy logs
-        if (messages.isNotEmpty()) {
-            messages.take(5).forEach { msg ->
-                Timber.d(
-                    "Conversation source sample: msgId=%s sender=%s recipients=%s placeholder=%s",
-                    msg.id,
-                    cleanPubkeyFormat(msg.pubkey),
-                    msg.recipientPubkeys.map { cleanPubkeyFormat(it) },
-                    (msg is Message.TextMessage && msg.content == "Unable to decrypt message")
-                )
-            }
-            if (messages.size > 5) {
-                Timber.d("...and %d more messages not logged for brevity", messages.size - 5)
-            }
-        }
 
         fun buildChatroomKey(message: Message): ChatroomKey {
             val participants = buildSet {
@@ -1020,12 +1174,7 @@ class MessagesViewModel @Inject constructor(
         val sortedGrouped = grouped.toList()
             .sortedByDescending { (_, msgs) -> msgs.maxOfOrNull { it.createdAt } ?: 0L }
             .toMap()
-        
-        Timber.i("Grouped %d messages into %d conversations (sorted by recency): %s", 
-            messages.size,
-            sortedGrouped.size,
-            sortedGrouped.map { (key, msgs) -> "$key: ${msgs.size} msgs, latest=${msgs.firstOrNull()?.createdAt}" })
-            
+
         return sortedGrouped
     }
 
@@ -1096,20 +1245,17 @@ class MessagesViewModel @Inject constructor(
                 tags = innerTags
             )
         } else {
-            if (!com.hisa.data.nostr.ExternalSignerManager.isLauncherRegistered() &&
-                !com.hisa.data.nostr.ExternalSignerManager.hasBackgroundResolver()
-            ) {
+            if (!signingService.hasExternalSignerTransport()) {
                 throw IllegalStateException("External signer is not attached")
             }
             val authCtx = resolveAuthContext(refreshOnce = false)
             messageRepository.prepareGiftWrappedMessageExternal(
-                senderSigningPubkey = senderSigningPubkey,
+                signingService = signingService,
+                signingContext = authCtx,
                 recipientPubkey = recipientPubkey,
                 content = innerContent,
                 kind = innerKind,
                 tags = innerTags,
-                externalSignerPubkey = authCtx.signerPubkey,
-                externalSignerPackage = authCtx.signerPackage,
                 externalEncryptor = { plaintext, peerPubkey ->
                     com.hisa.data.nostr.ExternalSignerManager.nip44Encrypt(plaintext, peerPubkey)
                 }
@@ -1194,8 +1340,7 @@ class MessagesViewModel @Inject constructor(
                     return@launch
                 }
                 if (signingPrivateKeyBytes == null &&
-                    !com.hisa.data.nostr.ExternalSignerManager.isLauncherRegistered() &&
-                    !com.hisa.data.nostr.ExternalSignerManager.hasBackgroundResolver()
+                    !signingService.hasExternalSignerTransport()
                 ) {
                     _sendError.value = "External signer is not attached. Re-open DM screen and approve signer requests."
                     return@launch
@@ -1224,18 +1369,15 @@ class MessagesViewModel @Inject constructor(
                     relayUrls = null // Will be updated when we receive the relay's copy
                 )
                 Timber.i("Adding optimistic message id=%s to=%s", optimisticId, cleanRecipientPubkey)
-                _messages.value = _messages.value + newMessage
+                upsertMessage(newMessage, emitImmediately = true)
 
-                // NIP-17: seal and gift-wrap the same unsigned rumor to each
-                // receiver and to the sender individually.
-                listOf(cleanRecipientPubkey, senderSigningPubkey).distinct().forEach { wrapRecipient ->
-                    sendGiftWrappedMessage(
-                        innerMessage = innerMessage,
-                        recipientPubkey = wrapRecipient,
-                        encryptionPrivateKeyBytes = signingPrivateKeyBytes,
-                        senderSigningPubkey = senderSigningPubkey
-                    )
-                }
+                // NIP-17: seal and gift-wrap the unsigned rumor only to the recipient.
+                sendGiftWrappedMessage(
+                    innerMessage = innerMessage,
+                    recipientPubkey = cleanRecipientPubkey,
+                    encryptionPrivateKeyBytes = signingPrivateKeyBytes,
+                    senderSigningPubkey = senderSigningPubkey
+                )
 
                 // Save conversation mapping
                 val myPub = senderSigningPubkey.ifBlank { userPubkey }

@@ -2,12 +2,11 @@ package com.hisa.viewmodel
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
-import com.hisa.data.nostr.NostrEventSigner
 import com.hisa.data.nostr.NostrClient
+import com.hisa.data.nostr.NostrSigningService
 import com.hisa.data.nostr.toNostrEvent
 import com.hisa.data.repository.FeedRepository
 import com.hisa.util.cleanPubkeyFormat
-import com.hisa.util.hexToByteArrayOrNull
 import com.hisa.util.normalizeNostrPubkey
 import dagger.hilt.android.lifecycle.HiltViewModel
 import javax.inject.Inject
@@ -22,7 +21,8 @@ import timber.log.Timber
 @HiltViewModel
 class ShopViewModel @Inject constructor(
     private val nostrClient: NostrClient,
-    private val feedRepository: FeedRepository
+    private val feedRepository: FeedRepository,
+    private val signingService: NostrSigningService
 ) : ViewModel() {
 
     private val ownerPubkey = MutableStateFlow<String?>(null)
@@ -68,14 +68,21 @@ class ShopViewModel @Inject constructor(
                 }
                 tags.add(listOf("k", "30402"))
 
-                val privBytes = hexToByteArrayOrNull(privateKeyHex, 32)
+                val signingContext = signingService.resolveSigningContext(
+                    pubkeyHint = service.pubkey,
+                    privateKeyHexHint = privateKeyHex
+                )
+                val signerPubkey = signingContext.requirePubkey()
+                val serviceAuthorPubkey = normalizeNostrPubkey(service.pubkey) ?: cleanPubkeyFormat(service.pubkey).lowercase()
+                if (serviceAuthorPubkey != signerPubkey) {
+                    throw IllegalStateException("Active signer cannot delete a listing from another account")
+                }
 
-                val signed = NostrEventSigner.signEvent(
+                val signed = signingService.signEvent(
+                    signingContext = signingContext,
                     kind = 5,
                     content = "",
-                    tags = tags,
-                    pubkey = service.pubkey,
-                    privKey = privBytes
+                    tags = tags
                 )
 
                 nostrClient.publishEvent(signed.toNostrEvent())

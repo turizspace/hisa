@@ -1,7 +1,5 @@
 package com.hisa.viewmodel
 
-import android.os.Build
-import androidx.annotation.RequiresApi
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.hisa.data.model.Order
@@ -15,7 +13,6 @@ import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import timber.log.Timber
 
-@RequiresApi(Build.VERSION_CODES.O)
 @HiltViewModel
 class OrderNotificationsViewModel @Inject constructor(
     private val orderRepository: OrderRepository

@@ -6,8 +6,9 @@ import androidx.lifecycle.viewModelScope
 import com.hisa.data.cache.ProfileCache
 import com.hisa.data.model.Metadata
 import com.hisa.data.nostr.NostrClient
+import com.hisa.data.nostr.NostrSigningService
 import com.hisa.data.nostr.toNostrEvent
-import com.hisa.util.hexToByteArrayOrNull
+import com.hisa.util.normalizeNostrPubkey
 import dagger.hilt.android.lifecycle.HiltViewModel
 import javax.inject.Inject
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -23,6 +24,7 @@ class ProfileViewModel @Inject constructor(
     private val nostrClient: NostrClient,
     private val subscriptionManager: com.hisa.data.nostr.SubscriptionManager,
     private val profileCache: ProfileCache,
+    private val signingService: NostrSigningService,
     savedStateHandle: SavedStateHandle
 ) : ViewModel() {
     private val pubkey: String = requireNotNull(savedStateHandle.get<String>("pubkey")) {
@@ -135,14 +137,20 @@ class ProfileViewModel @Inject constructor(
         viewModelScope.launch {
             try {
                 val content = Json.encodeToString(meta)
-                val privateKey = hexToByteArrayOrNull(privateKeyHex, 32)
-                    ?: error("Private key is missing!")
-                val eventJson = com.hisa.data.nostr.NostrEventSigner.signEvent(
+                val signingContext = signingService.resolveSigningContext(
+                    pubkeyHint = pubkey,
+                    privateKeyHexHint = privateKeyHex
+                )
+                val signerPubkey = signingContext.requirePubkey()
+                val targetPubkey = normalizeNostrPubkey(pubkey)
+                if (!targetPubkey.isNullOrBlank() && targetPubkey != signerPubkey) {
+                    error("Active signer does not match this profile")
+                }
+                val eventJson = signingService.signEvent(
+                    signingContext = signingContext,
                     kind = 0,
                     content = content,
-                    tags = emptyList(),
-                    pubkey = pubkey,
-                    privKey = privateKey
+                    tags = emptyList()
                 )
                 nostrClient.connect()
                 nostrClient.publishEvent(eventJson.toNostrEvent())

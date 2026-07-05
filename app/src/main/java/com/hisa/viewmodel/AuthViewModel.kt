@@ -8,25 +8,26 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import dagger.hilt.android.lifecycle.HiltViewModel
 import javax.inject.Inject
-import androidx.security.crypto.EncryptedSharedPreferences
-import androidx.security.crypto.MasterKey
 import com.hisa.data.nostr.NostrClient
+import com.hisa.data.nostr.NostrSigningService
 import com.hisa.data.nostr.SubscriptionManager
 import com.hisa.data.nostr.toNostrEvent
+import com.hisa.util.AuthPreferenceStore
 import com.hisa.util.KeyGenerator
-import com.hisa.util.hexToByteArrayOrNull
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 import org.bitcoinj.core.ECKey
 import com.hisa.util.Constants
+import com.hisa.util.RelayHealth
 import java.util.*
 
 @HiltViewModel
 class AuthViewModel @Inject constructor(
     application: Application,
     val nostrClient: NostrClient,
-    private val subscriptionManager: SubscriptionManager
+    private val subscriptionManager: SubscriptionManager,
+    private val signingService: NostrSigningService
 ) : AndroidViewModel(application) {
     
     // Relay management
@@ -40,54 +41,22 @@ class AuthViewModel @Inject constructor(
     }
 
     private fun getStoredRelays(): List<String> {
-        val prefs = sharedPrefs
-        if (prefs == null) {
-            // If sharedPrefs isn't available, try the fallback file before returning default
-            return try {
-                val fallback = getApplication<Application>().applicationContext.getSharedPreferences("secure_prefs_fallback", android.content.Context.MODE_PRIVATE)
-                val fallbackString = fallback.getString(RELAYS_KEY, null)
-                fallbackString?.split("\n")?.filter { it.isNotBlank() } ?: Constants.ONBOARDING_RELAYS
-            } catch (e: Exception) {
-                Constants.ONBOARDING_RELAYS
-            }
-        }
-        val relaysString = try {
-            prefs.getString(RELAYS_KEY, null)
-        } catch (e: Exception) {
-            null
-        }
+        val context = getApplication<Application>().applicationContext
+        val relaysString = AuthPreferenceStore.readRelays(context)
         if (!relaysString.isNullOrBlank()) {
             return relaysString.split("\n").filter { it.isNotBlank() }
         }
-        // If primary prefs didn't have relays (or read failed), try fallback
-        return try {
-            val fallback = getApplication<Application>().applicationContext.getSharedPreferences("secure_prefs_fallback", android.content.Context.MODE_PRIVATE)
-            val fallbackString = fallback.getString(RELAYS_KEY, null)
-            fallbackString?.split("\n")?.filter { it.isNotBlank() } ?: Constants.ONBOARDING_RELAYS
-        } catch (e: Exception) {
-            Constants.ONBOARDING_RELAYS
-        }
+        return Constants.ONBOARDING_RELAYS
     }
 
     fun addRelay(relay: String) {
         val current = getStoredRelays().toMutableList()
         if (!current.contains(relay)) {
             current.add(relay)
-            // Persist and update in-memory state immediately so UI reflects
-            // the change without waiting for SharedPreferences apply() to be visible.
-            // Write to the primary (possibly encrypted) prefs
             try {
-                sharedPrefs.edit().putString(RELAYS_KEY, current.joinToString("\n")).apply()
+                AuthPreferenceStore.writeRelays(getApplication<Application>().applicationContext, current)
             } catch (e: Exception) {
-                android.util.Log.w("AuthViewModel", "Failed to write relays to primary prefs: ${e.localizedMessage}")
-            }
-            // Also write to a consistent fallback prefs file to survive cases where
-            // EncryptedSharedPreferences can't be created on subsequent launches.
-            try {
-                val fallback = getApplication<Application>().applicationContext.getSharedPreferences("secure_prefs_fallback", android.content.Context.MODE_PRIVATE)
-                fallback.edit().putString(RELAYS_KEY, current.joinToString("\n")).apply()
-            } catch (e: Exception) {
-                android.util.Log.w("AuthViewModel", "Failed to write relays to fallback prefs: ${e.localizedMessage}")
+                android.util.Log.w("AuthViewModel", "Failed to persist relays: ${e.localizedMessage}")
             }
             _relays.value = current.toList()
             // Update NostrClient with new relay list
@@ -99,15 +68,9 @@ class AuthViewModel @Inject constructor(
         val current = getStoredRelays().toMutableList()
         if (current.remove(relay)) {
             try {
-                sharedPrefs.edit().putString(RELAYS_KEY, current.joinToString("\n")).apply()
+                AuthPreferenceStore.writeRelays(getApplication<Application>().applicationContext, current)
             } catch (e: Exception) {
-                android.util.Log.w("AuthViewModel", "Failed to write relays to primary prefs: ${e.localizedMessage}")
-            }
-            try {
-                val fallback = getApplication<Application>().applicationContext.getSharedPreferences("secure_prefs_fallback", android.content.Context.MODE_PRIVATE)
-                fallback.edit().putString(RELAYS_KEY, current.joinToString("\n")).apply()
-            } catch (e: Exception) {
-                android.util.Log.w("AuthViewModel", "Failed to write relays to fallback prefs: ${e.localizedMessage}")
+                android.util.Log.w("AuthViewModel", "Failed to persist relays: ${e.localizedMessage}")
             }
             _relays.value = current.toList()
             // Update NostrClient with new relay list
@@ -142,7 +105,7 @@ class AuthViewModel @Inject constructor(
                 // so navigation driven by loginSuccess does not dismiss the signup dialog.
                 loginWithNsecSilently(nsec)
                 if (_pubKey.value != null && _privateKey.value != null) {
-                    sharedPrefs.edit().putString("nsec", nsec).apply()
+                    AuthPreferenceStore.writeNsec(getApplication<Application>().applicationContext, nsec)
                         // Ensure the shared/injected NostrClient is configured with onboarding relays
                         // if the current configured relays are empty. This seeds a usable set of
                         // relays for new users while allowing advanced users to change relays later.
@@ -152,7 +115,7 @@ class AuthViewModel @Inject constructor(
                                 nostrClient.updateRelays(Constants.ONBOARDING_RELAYS)
                                 // Persist the seeded relays so they become the configured relays
                                 try {
-                                    sharedPrefs?.edit()?.putString("relays", Constants.ONBOARDING_RELAYS.joinToString("\n"))?.apply()
+                                    AuthPreferenceStore.writeRelays(getApplication<Application>().applicationContext, Constants.ONBOARDING_RELAYS)
                                 } catch (e: Exception) {
                                     android.util.Log.w("AuthViewModel", "Failed to persist seeded relays: ${e.localizedMessage}")
                                 }
@@ -173,14 +136,12 @@ class AuthViewModel @Inject constructor(
                     if (privateKeyHex.isNullOrBlank() || pubkeyHex.isNullOrBlank()) {
                         throw Exception("Missing privateKey or pubkey")
                     }
-                    val privateKeyBytes = hexToByteArrayOrNull(privateKeyHex, 32)
-                        ?: throw IllegalArgumentException("Invalid private key format")
-                    val event = com.hisa.data.nostr.NostrEventSigner.signEvent(
+                    val event = signingService.signEvent(
                         kind = 0,
                         content = metadataJson,
                         tags = emptyList(),
-                        pubkey = pubkeyHex,
-                        privKey = privateKeyBytes
+                        pubkeyHint = pubkeyHex,
+                        privateKeyHexHint = privateKeyHex
                     )
                     nostrClient.publishEvent(event.toNostrEvent())
                     // Set signup success only once to avoid races with background tasks
@@ -213,7 +174,7 @@ class AuthViewModel @Inject constructor(
      */
     fun isDarkThemePersisted(): Boolean {
         return try {
-            sharedPrefs?.getBoolean("dark_theme", false) ?: false
+            AuthPreferenceStore.readDarkTheme(getApplication<Application>().applicationContext)
         } catch (e: Exception) {
             android.util.Log.w("AuthViewModel", "Unable to read dark_theme from prefs: ${e.localizedMessage}")
             false
@@ -227,7 +188,7 @@ class AuthViewModel @Inject constructor(
 
     fun setDarkThemePersisted(value: Boolean) {
         try {
-            sharedPrefs?.edit()?.putBoolean("dark_theme", value)?.apply()
+            AuthPreferenceStore.writeDarkTheme(getApplication<Application>().applicationContext, value)
         } catch (e: Exception) {
             android.util.Log.w("AuthViewModel", "Unable to persist dark_theme: ${e.localizedMessage}")
         }
@@ -270,32 +231,13 @@ class AuthViewModel @Inject constructor(
 
     // Don't expose raw nsec directly; provide a safe accessor that callers must opt into
     fun getStoredNsec(): String? = try {
-        sharedPrefs?.getString("nsec", null)
+        AuthPreferenceStore.readNsec(getApplication<Application>().applicationContext)
     } catch (e: Exception) {
         android.util.Log.w("AuthViewModel", "Unable to read nsec from prefs: ${e.localizedMessage}")
         null
     }
 
-    // Secure storage (may fall back to regular prefs if encrypted prefs are unavailable)
-    private val sharedPrefs = run {
-        val context = getApplication<Application>().applicationContext
-        try {
-            val masterKey = MasterKey.Builder(context)
-                .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
-                .build()
-            EncryptedSharedPreferences.create(
-                context,
-                "secure_prefs",
-                masterKey,
-                EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
-                EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
-            )
-        } catch (e: Exception) {
-            // If EncryptedSharedPreferences fails, fallback to regular shared prefs but log the event.
-            android.util.Log.w("AuthViewModel", "EncryptedSharedPreferences unavailable, falling back: ${e.localizedMessage}")
-            context.getSharedPreferences("secure_prefs_fallback", android.content.Context.MODE_PRIVATE)
-        }
-    }
+    private val sharedPrefs = AuthPreferenceStore.prefs(getApplication<Application>().applicationContext)
 
     sealed class InitState {
         object Loading : InitState()
@@ -414,22 +356,23 @@ class AuthViewModel @Inject constructor(
                             // Note: we shadow the earlier val `relays` by creating a new list to use below
                             val finalRelays = merged
                             android.util.Log.i("AuthViewModel", "Final preferred relays for $pubkeyHex: $finalRelays")
+                            val filteredRelays = RelayHealth.normalizeRelayUrls(finalRelays)
                             // Persist and apply below using finalRelays
                             // Persist to secure prefs and fallback
                             try {
-                                sharedPrefs?.edit()?.putString(RELAYS_KEY, finalRelays.joinToString("\n"))?.apply()
+                                sharedPrefs?.edit()?.putString(RELAYS_KEY, filteredRelays.joinToString("\n"))?.apply()
                             } catch (e: Exception) {
                                 android.util.Log.w("AuthViewModel", "Failed to persist relays from NIP-65 (tags): ${e.localizedMessage}")
                             }
                             try {
                                 val fallback = getApplication<Application>().applicationContext.getSharedPreferences("secure_prefs_fallback", android.content.Context.MODE_PRIVATE)
-                                fallback.edit().putString(RELAYS_KEY, finalRelays.joinToString("\n"))?.apply()
+                                fallback.edit().putString(RELAYS_KEY, filteredRelays.joinToString("\n"))?.apply()
                             } catch (e: Exception) {
                                 android.util.Log.w("AuthViewModel", "Failed to persist relays to fallback prefs (tags): ${e.localizedMessage}")
                             }
-                            _relays.value = finalRelays
+                            _relays.value = filteredRelays
                             try {
-                                nostrClient.updateRelays(finalRelays)
+                                nostrClient.updateRelays(filteredRelays)
                             } catch (e: Exception) {
                                 android.util.Log.w("AuthViewModel", "Failed to update NostrClient relays from NIP-65 tags: ${e.localizedMessage}")
                             }
@@ -441,22 +384,23 @@ class AuthViewModel @Inject constructor(
                     }
                 }
                 if (relays.isNotEmpty()) {
+                    val filteredRelays = RelayHealth.normalizeRelayUrls(relays)
                     // Persist to secure prefs and fallback
                     try {
-                        sharedPrefs?.edit()?.putString(RELAYS_KEY, relays.joinToString("\n"))?.apply()
+                        sharedPrefs?.edit()?.putString(RELAYS_KEY, filteredRelays.joinToString("\n"))?.apply()
                     } catch (e: Exception) {
                         android.util.Log.w("AuthViewModel", "Failed to persist relays from NIP-65: ${e.localizedMessage}")
                     }
                     try {
                         val fallback = getApplication<Application>().applicationContext.getSharedPreferences("secure_prefs_fallback", android.content.Context.MODE_PRIVATE)
-                        fallback.edit().putString(RELAYS_KEY, relays.joinToString("\n"))?.apply()
+                        fallback.edit().putString(RELAYS_KEY, filteredRelays.joinToString("\n"))?.apply()
                     } catch (e: Exception) {
                         android.util.Log.w("AuthViewModel", "Failed to persist relays to fallback prefs: ${e.localizedMessage}")
                     }
                     // Update in-memory state and NostrClient
-                    _relays.value = relays
+                    _relays.value = filteredRelays
                     try {
-                        nostrClient.updateRelays(relays)
+                        nostrClient.updateRelays(filteredRelays)
                     } catch (e: Exception) {
                         android.util.Log.w("AuthViewModel", "Failed to update NostrClient relays from NIP-65: ${e.localizedMessage}")
                     }
@@ -502,7 +446,12 @@ class AuthViewModel @Inject constructor(
             _pubKey.value = pubkeyHex
             _privateKey.value = privKeyHex
             try {
-                sharedPrefs?.edit()?.putString("nsec", nsec)?.apply()
+                sharedPrefs?.edit()
+                    ?.putString("nsec", nsec)
+                    ?.remove("external_signer_pubkey")
+                    ?.remove("external_signer_package")
+                    ?.apply()
+                com.hisa.data.nostr.ExternalSignerManager.clearConfiguration()
             } catch (e: Exception) {
                 android.util.Log.w("AuthViewModel", "Failed to persist nsec to prefs: ${e.localizedMessage}")
             }
@@ -555,7 +504,12 @@ class AuthViewModel @Inject constructor(
             _pubKey.value = pubkeyHex
             _privateKey.value = privKeyHex
             try {
-                sharedPrefs?.edit()?.putString("nsec", nsec)?.apply()
+                sharedPrefs?.edit()
+                    ?.putString("nsec", nsec)
+                    ?.remove("external_signer_pubkey")
+                    ?.remove("external_signer_package")
+                    ?.apply()
+                com.hisa.data.nostr.ExternalSignerManager.clearConfiguration()
             } catch (e: Exception) {
                 android.util.Log.w("AuthViewModel", "Failed to persist nsec to prefs: ${e.localizedMessage}")
             }
@@ -620,7 +574,11 @@ class AuthViewModel @Inject constructor(
             try {
                 // Persist the signer package so it can be used later when delegating signing
                 try {
-                    sharedPrefs?.edit()?.putString("external_signer_package", packageName)?.apply()
+                    sharedPrefs?.edit()
+                        ?.remove("nsec")
+                        ?.putString("external_signer_package", packageName)
+                        ?.apply()
+                    _privateKey.value = null
                 } catch (e: Exception) {
                     android.util.Log.w("AuthViewModel", "Failed to persist external signer package: ${e.localizedMessage}")
                 }
@@ -728,6 +686,7 @@ class AuthViewModel @Inject constructor(
             try {
                 // Clear shared preferences first
                 sharedPrefs.edit().clear().apply()
+                com.hisa.data.nostr.ExternalSignerManager.clearConfiguration()
                 clearAllUserData(messagesViewModel)
                 
                 // Reset all state
