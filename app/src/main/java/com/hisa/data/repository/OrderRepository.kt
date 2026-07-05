@@ -4,18 +4,23 @@ import com.hisa.data.model.Order
 import com.hisa.data.model.OrderItem
 import com.hisa.data.nostr.NostrClient
 import com.hisa.data.nostr.NostrEvent
-import com.hisa.data.nostr.NostrEventSigner
+import com.hisa.data.nostr.NostrSigningService
 import com.hisa.data.nostr.SubscriptionManager
 import com.hisa.data.nostr.toNostrEvent
-import com.hisa.util.hexToByteArrayOrNull
+import com.hisa.util.normalizeNostrPubkey
 import org.json.JSONArray
 import org.json.JSONObject
 import java.util.UUID
 import javax.inject.Inject
 import javax.inject.Singleton
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.launch
 import java.util.concurrent.ConcurrentHashMap
 
 @Singleton
@@ -23,8 +28,33 @@ class OrderRepository @Inject constructor(
     private val nostrClient: NostrClient,
     private val subscriptionManager: SubscriptionManager,
     private val metadataRepository: MetadataRepository,
-    private val profileRepository: ProfileRepository
+    private val profileRepository: ProfileRepository,
+    private val signingService: NostrSigningService,
+    private val appScope: CoroutineScope
 ) {
+    companion object {
+        private const val EMIT_DEBOUNCE_MS = 120L
+
+        /**
+         * Create a Nostr filters array for Kind 16 order messages relevant to the current user.
+         * Includes events addressed to the user as a seller and events authored by the user as a buyer.
+         */
+        fun createOrderFilters(currentUserPubkey: String): JSONArray {
+            return JSONArray().apply {
+                put(JSONObject().apply {
+                    put("kinds", JSONArray().put(16))
+                    put("#p", JSONArray().put(currentUserPubkey))
+                    put("limit", 100)
+                })
+                put(JSONObject().apply {
+                    put("kinds", JSONArray().put(16))
+                    put("authors", JSONArray().put(currentUserPubkey))
+                    put("limit", 100)
+                })
+            }
+        }
+    }
+
     private val _orders = MutableStateFlow<List<Order>>(emptyList())
     val orders: StateFlow<List<Order>> = _orders
 
@@ -33,6 +63,11 @@ class OrderRepository @Inject constructor(
 
     private var subscriptionListenerId: String? = null
     private val ordersByEventId = ConcurrentHashMap<String, Order>()
+    private val pendingProfilePubkeys = ConcurrentHashMap.newKeySet<String>()
+    private val emitLock = Any()
+
+    @Volatile
+    private var emitJob: Job? = null
 
     @Volatile
     private var started = false
@@ -57,7 +92,7 @@ class OrderRepository @Inject constructor(
                     val order = parseOrder(event) ?: return@subscribe
                     val partyPubkeys = setOf(order.buyerPubkey, order.sellerPubkey).filter { it.isNotBlank() }.toSet()
                     if (partyPubkeys.isNotEmpty()) {
-                        profileRepository.ensureProfiles(partyPubkeys)
+                        pendingProfilePubkeys.addAll(partyPubkeys)
                     }
                     upsertOrder(order)
                 } catch (e: Exception) {
@@ -65,7 +100,7 @@ class OrderRepository @Inject constructor(
                 }
             },
             onEndOfStoredEvents = {
-                updateUnreadCount()
+                emitSnapshot()
             }
         )
     }
@@ -89,6 +124,9 @@ class OrderRepository @Inject constructor(
     }
 
     fun markAsRead(orderId: String) {
+        ordersByEventId.replaceAll { _, order ->
+            if (order.orderId == orderId) order.copy(isRead = true) else order
+        }
         _orders.update { orders ->
             orders.map { order ->
                 if (order.orderId == orderId) order.copy(isRead = true) else order
@@ -99,6 +137,9 @@ class OrderRepository @Inject constructor(
 
     fun markMultipleAsRead(orderIds: List<String>) {
         val ids = orderIds.toSet()
+        ordersByEventId.replaceAll { _, order ->
+            if (order.orderId in ids) order.copy(isRead = true) else order
+        }
         _orders.update { orders ->
             orders.map { order ->
                 if (order.orderId in ids) order.copy(isRead = true) else order
@@ -110,6 +151,7 @@ class OrderRepository @Inject constructor(
     fun clearAllOrders() {
         _orders.value = emptyList()
         ordersByEventId.clear()
+        pendingProfilePubkeys.clear()
         _unreadCount.value = 0
     }
 
@@ -127,11 +169,19 @@ class OrderRepository @Inject constructor(
         buyerEmail: String?,
         buyerPhone: String?
     ): String {
-        if (buyerPubkey.isBlank()) {
+        val signingContext = signingService.resolveSigningContext(
+            pubkeyHint = buyerPubkey,
+            privateKeyHexHint = buyerPrivateKeyHex
+        )
+        val signingPubkey = signingContext.requirePubkey()
+        val requestedBuyerPubkey = normalizeNostrPubkey(buyerPubkey)
+        if (!requestedBuyerPubkey.isNullOrBlank() && requestedBuyerPubkey != signingPubkey) {
+            throw IllegalArgumentException("Active signer does not match the buyer account")
+        }
+        if (signingPubkey.isBlank()) {
             throw IllegalArgumentException("Buyer pubkey is required to create an order")
         }
 
-        val privateKeyBytes = hexToByteArrayOrNull(buyerPrivateKeyHex, 32)
         nostrClient.connect()
 
         val orderId = UUID.randomUUID().toString()
@@ -156,12 +206,11 @@ class OrderRepository @Inject constructor(
         }
 
         val content = notes.ifBlank { "Order for $subject" }
-        val eventJson = NostrEventSigner.signEvent(
+        val eventJson = signingService.signEvent(
+            signingContext = signingContext,
             kind = 16,
             content = content,
-            tags = tags,
-            pubkey = buyerPubkey,
-            privKey = privateKeyBytes
+            tags = tags
         )
         val event = eventJson.toNostrEvent()
         nostrClient.publishEvent(event)
@@ -171,17 +220,42 @@ class OrderRepository @Inject constructor(
     private fun upsertOrder(order: Order) {
         val existing = ordersByEventId[order.eventId]
         if (existing == null || order.createdAt >= existing.createdAt) {
-            ordersByEventId[order.eventId] = order
-            _orders.update { current ->
-                val map = current.associateBy { it.eventId }.toMutableMap()
-                map[order.eventId] = order
-                map.values.sortedByDescending { it.createdAt }
+            ordersByEventId[order.eventId] = order.copy(isRead = existing?.isRead ?: order.isRead)
+            scheduleEmit()
+        }
+    }
+
+    private fun scheduleEmit() {
+        synchronized(emitLock) {
+            if (emitJob?.isActive == true) return
+            emitJob = appScope.launch(Dispatchers.Default) {
+                delay(EMIT_DEBOUNCE_MS)
+                emitSnapshot()
             }
         }
     }
 
-    private fun updateUnreadCount() {
-        _unreadCount.value = _orders.value.count { !it.isRead }
+    private fun emitSnapshot() {
+        synchronized(emitLock) {
+            emitJob = null
+        }
+
+        val sorted = ordersByEventId.values.sortedByDescending { it.createdAt }
+        _orders.value = sorted
+        updateUnreadCount(sorted)
+
+        val profilePubkeys = pendingProfilePubkeys.toSet()
+        if (profilePubkeys.isNotEmpty()) {
+            pendingProfilePubkeys.removeAll(profilePubkeys)
+            profileRepository.ensureProfiles(profilePubkeys)
+        }
+    }
+
+    private fun updateUnreadCount(orders: List<Order> = _orders.value) {
+        val userPubkey = currentUserPubkey
+        _unreadCount.value = orders.count { order ->
+            !order.isRead && (userPubkey.isNullOrBlank() || !order.isBuyer(userPubkey))
+        }
     }
 
     private fun parseOrder(event: NostrEvent): Order? {
@@ -253,26 +327,6 @@ class OrderRepository @Inject constructor(
         )
     }
 
-    companion object {
-        /**
-         * Create a Nostr filters array for Kind 16 order messages relevant to the current user.
-         * Includes events addressed to the user as a seller and events authored by the user as a buyer.
-         */
-        fun createOrderFilters(currentUserPubkey: String): JSONArray {
-            return JSONArray().apply {
-                put(JSONObject().apply {
-                    put("kinds", JSONArray().put(16))
-                    put("#p", JSONArray().put(currentUserPubkey))
-                    put("limit", 100)
-                })
-                put(JSONObject().apply {
-                    put("kinds", JSONArray().put(16))
-                    put("authors", JSONArray().put(currentUserPubkey))
-                    put("limit", 100)
-                })
-            }
-        }
-    }
 }
 
 /**

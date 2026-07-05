@@ -1,9 +1,8 @@
 package com.hisa.data.cache
 
 import android.content.Context
-import androidx.security.crypto.EncryptedSharedPreferences
-import androidx.security.crypto.MasterKey
 import com.hisa.data.model.Metadata
+import com.hisa.util.SecurePreferencesHelper
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import javax.inject.Singleton
@@ -12,16 +11,10 @@ import javax.inject.Singleton
 class ProfileCache(
     context: Context
 ) {
-    private val masterKey = MasterKey.Builder(context)
-        .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
-        .build()
-
-    private val sharedPreferences = EncryptedSharedPreferences.create(
-        context,
-        "profile_cache",
-        masterKey,
-        EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
-        EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
+    private val sharedPreferences = SecurePreferencesHelper.create(
+        context = context,
+        prefsName = "profile_cache",
+        fallbackPrefsName = "profile_cache_fallback"
     )
 
     companion object {

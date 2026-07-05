@@ -1,21 +1,33 @@
 package com.hisa.data.repository
 
+import com.hisa.data.cache.FeedCacheStore
 import com.hisa.data.model.ServiceListing
 import com.hisa.data.nostr.NostrClient
 import com.hisa.data.nostr.SubscriptionManager
 import com.hisa.util.normalizeCategory
+import java.util.concurrent.ConcurrentHashMap
 import javax.inject.Inject
 import javax.inject.Singleton
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.launch
 
 @Singleton
 class FeedRepository @Inject constructor(
     private val nostrClient: NostrClient,
     private val subscriptionManager: SubscriptionManager,
-    private val profileRepository: ProfileRepository
+    private val profileRepository: ProfileRepository,
+    private val feedCacheStore: FeedCacheStore,
+    private val appScope: CoroutineScope
 ) {
+    companion object {
+        private const val EMIT_DEBOUNCE_MS = 120L
+    }
+
     private val _services = MutableStateFlow<List<ServiceListing>>(emptyList())
     val services: StateFlow<List<ServiceListing>> = _services
 
@@ -26,9 +38,30 @@ class FeedRepository @Inject constructor(
     val isLoading: StateFlow<Boolean> = _isLoading
 
     private var subscriptionListenerId: String? = null
+    private val servicesByEventId = ConcurrentHashMap<String, ServiceListing>()
+    private val pendingProfilePubkeys = ConcurrentHashMap.newKeySet<String>()
+    private val emitLock = Any()
+
+    @Volatile
+    private var emitJob: Job? = null
 
     @Volatile
     private var started = false
+
+    init {
+        restoreCachedServices()
+    }
+
+    private fun restoreCachedServices() {
+        val cachedServices = feedCacheStore.readServices()
+        if (cachedServices.isNotEmpty()) {
+            servicesByEventId.clear()
+            cachedServices.forEach { service ->
+                servicesByEventId[service.eventId] = service
+            }
+            emitSnapshot()
+        }
+    }
 
     fun ensureStarted() {
         if (started) return
@@ -40,8 +73,11 @@ class FeedRepository @Inject constructor(
         subscriptionListenerId?.let(subscriptionManager::unsubscribe)
         subscriptionListenerId = null
         started = false
+        servicesByEventId.clear()
+        pendingProfilePubkeys.clear()
         _services.value = emptyList()
         _categories.value = emptyList()
+        feedCacheStore.clear()
         ensureStarted()
     }
 
@@ -53,9 +89,9 @@ class FeedRepository @Inject constructor(
             onEvent = { event ->
                 val service = ServiceRepository.parseServiceEvent(event.toJson().toString()) ?: return@subscribe
                 upsertService(service)
-                profileRepository.ensureProfiles(setOf(service.pubkey))
             },
             onEndOfStoredEvents = {
+                emitSnapshot()
                 _isLoading.value = false
             }
         )
@@ -64,23 +100,50 @@ class FeedRepository @Inject constructor(
     private fun upsertService(service: ServiceListing) {
         ServiceRepository.cacheService(service)
 
-        _services.update { current ->
-            val next = current.associateBy { it.eventId }.toMutableMap()
-            val existing = next[service.eventId]
-            if (existing == null || service.createdAt >= existing.createdAt) {
-                next[service.eventId] = service
+        val existing = servicesByEventId[service.eventId]
+        if (existing != null && service.createdAt < existing.createdAt) {
+            return
+        }
+
+        servicesByEventId[service.eventId] = service
+        if (service.pubkey.isNotBlank()) {
+            pendingProfilePubkeys.add(service.pubkey)
+        }
+        scheduleEmit()
+    }
+
+    private fun scheduleEmit() {
+        synchronized(emitLock) {
+            if (emitJob?.isActive == true) return
+            emitJob = appScope.launch(Dispatchers.Default) {
+                delay(EMIT_DEBOUNCE_MS)
+                emitSnapshot()
             }
-            val updated = next.values.sortedByDescending { it.createdAt }
-            _categories.value = updated.flatMap { listing ->
-                listing.rawTags
-                    .filter { it.isNotEmpty() && it[0] == "t" }
-                    .mapNotNull { it.getOrNull(1) as? String }
-                    .map(::normalizeCategory)
-            }
-                .distinct()
-                .filter { it.toIntOrNull() == null }
-                .sorted()
-            updated
+        }
+    }
+
+    private fun emitSnapshot() {
+        synchronized(emitLock) {
+            emitJob = null
+        }
+
+        val updated = servicesByEventId.values.sortedByDescending { it.createdAt }
+        _services.value = updated
+        feedCacheStore.writeServices(updated)
+        _categories.value = updated.flatMap { listing ->
+            listing.rawTags
+                .filter { it.isNotEmpty() && it[0] == "t" }
+                .mapNotNull { it.getOrNull(1) as? String }
+                .map(::normalizeCategory)
+        }
+            .distinct()
+            .filter { it.toIntOrNull() == null }
+            .sorted()
+
+        val profilePubkeys = pendingProfilePubkeys.toSet()
+        if (profilePubkeys.isNotEmpty()) {
+            pendingProfilePubkeys.removeAll(profilePubkeys)
+            profileRepository.ensureProfiles(profilePubkeys)
         }
     }
 }

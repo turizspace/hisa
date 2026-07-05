@@ -2,8 +2,7 @@ package com.hisa.data.repository
 
 import android.content.Context
 import android.content.SharedPreferences
-import androidx.security.crypto.EncryptedSharedPreferences
-import androidx.security.crypto.MasterKey
+import com.hisa.util.SecurePreferencesHelper
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -16,15 +15,10 @@ object ConversationRepository {
     
     fun initStorage(context: Context) {
         if (sharedPrefs == null) {
-            val masterKey = MasterKey.Builder(context)
-                .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
-                .build()
-            sharedPrefs = EncryptedSharedPreferences.create(
-                context,
-                "conversations_prefs",
-                masterKey,
-                EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
-                EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
+            sharedPrefs = SecurePreferencesHelper.create(
+                context = context,
+                prefsName = SecurePreferencesHelper.CONVERSATIONS_PREFS_NAME,
+                fallbackPrefsName = "${SecurePreferencesHelper.CONVERSATIONS_PREFS_NAME}_fallback"
             )
         }
     }

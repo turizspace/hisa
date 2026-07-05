@@ -25,6 +25,7 @@ import org.bouncycastle.math.ec.ECPoint
 import com.hisa.crypto.Schnorr
 import java.math.BigInteger
 import com.hisa.data.nostr.NostrEventSigner
+import com.hisa.data.nostr.NostrSigningService
 import com.hisa.data.nostr.EventVerifier
 import com.hisa.data.nostr.crypto.getNip44
 
@@ -111,6 +112,44 @@ object MessageRepository {
             } catch (_: Exception) {}
             throw e
         }
+    }
+
+    /**
+     * Implements NIP-04 message decryption (deprecated, uses AES-256-CBC)
+     * Format: "base64(encryptedText)?iv=base64(initVector)"
+     */
+    @RequiresApi(Build.VERSION_CODES.O)
+    fun nip04Decrypt(
+        encryptedContent: String,
+        recipientPrivateKey: ByteArray,
+        senderPubkey: String
+    ): String {
+        // Parse the NIP-04 content format: "base64(ciphertext)?iv=base64(iv)"
+        val parts = encryptedContent.split("?iv=")
+        if (parts.size != 2) {
+            throw IllegalArgumentException("Invalid NIP-04 content format: expected 'ciphertext?iv=iv'")
+        }
+
+        val ciphertext = Base64.getDecoder().decode(parts[0])
+        val iv = Base64.getDecoder().decode(parts[1])
+
+        if (iv.size != 16) {
+            throw IllegalArgumentException("NIP-04 IV must be 16 bytes, got ${iv.size}")
+        }
+
+        // Compute shared secret using ECDH (x-coordinate only, no hashing)
+        val sharedSecret = calculateSharedSecret(recipientPrivateKey, senderPubkey)
+
+        // Use shared secret as AES key (first 32 bytes)
+        val key = SecretKeySpec(sharedSecret, 0, 32, "AES")
+        val ivSpec = IvParameterSpec(iv)
+
+        // Decrypt using AES-256-CBC
+        val cipher = Cipher.getInstance("AES/CBC/PKCS5Padding")
+        cipher.init(Cipher.DECRYPT_MODE, key, ivSpec)
+        val plaintext = cipher.doFinal(ciphertext)
+
+        return String(plaintext, Charsets.UTF_8)
     }
 
     private fun padNip44Plaintext(plaintext: ByteArray): ByteArray {
@@ -369,7 +408,11 @@ object MessageRepository {
                         13 -> {
                             val sealTagsArray = sealedMessage.optJSONArray("tags")
                             if (sealTagsArray != null && sealTagsArray.length() != 0) {
-                                throw IllegalArgumentException("Invalid NIP-59 seal: kind 13 tags must be empty")
+                                timber.log.Timber.w(
+                                    "Compatibility: NIP-59 seal has unexpected tags, continuing anyway eventId=%s tagCount=%d",
+                                    event.optString("id", ""),
+                                    sealTagsArray.length()
+                                )
                             }
                             val sealVerification = EventVerifier.verifyEvent(sealedMessage.toString())
                             val sealVerified = sealVerification.idMatches && sealVerification.signatureValid
@@ -652,21 +695,19 @@ object MessageRepository {
      */
     @RequiresApi(Build.VERSION_CODES.O)
     suspend fun prepareGiftWrappedMessageExternal(
-        senderSigningPubkey: String,
+        signingService: NostrSigningService,
+        signingContext: NostrSigningService.SigningContext,
         recipientPubkey: String,
         content: String,
         kind: Int,
         tags: List<List<String>>,
-        externalSignerPubkey: String? = null,
-        externalSignerPackage: String? = null,
         externalEncryptor: suspend (plaintext: String, recipientPubkey: String) -> String
     ): JSONObject {
         require(recipientPubkey.matches(Regex("[0-9a-fA-F]{64}"))) { "Invalid recipient pubkey" }
-        require(senderSigningPubkey.matches(Regex("[0-9a-fA-F]{64}"))) { "Invalid sender pubkey" }
 
+        val senderPubkey = signingContext.requirePubkey().lowercase()
         val twoDaysInSeconds = 2 * 24 * 60 * 60
         val rumorCreatedAt = generateRandomTimestamp(twoDaysInSeconds)
-        val senderPubkey = senderSigningPubkey.lowercase()
         val recipient = recipientPubkey.lowercase()
 
         val rumor = createMessageEvent(kind, content, tags, rumorCreatedAt).apply {
@@ -678,14 +719,15 @@ object MessageRepository {
         val sealCreatedAt = generateRandomTimestamp(twoDaysInSeconds)
         // NIP-59: seal (kind 13) MUST have empty tags.
         val sealTags = emptyList<List<String>>()
-        val sealEvent = NostrEventSigner.signEvent(
+        android.util.Log.d(
+            "MessageRepository",
+            "prepareGiftWrappedMessageExternal: recipient=${recipient.take(12)} sender=${senderPubkey.take(12)} sealKind=13 createdAt=$sealCreatedAt tags=$sealTags contentLen=${sealContent.length}"
+        )
+        val sealEvent = signingService.signEvent(
+            signingContext = signingContext,
             kind = 13,
             content = sealContent,
             tags = sealTags,
-            pubkey = senderPubkey,
-            privKey = null,
-            externalSignerPubkey = externalSignerPubkey,
-            externalSignerPackage = externalSignerPackage,
             createdAt = sealCreatedAt
         )
 
