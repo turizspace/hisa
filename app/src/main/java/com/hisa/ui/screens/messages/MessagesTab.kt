@@ -54,16 +54,18 @@ fun MessagesTab(
     privateKey: String,
     messagesViewModel: MessagesViewModel
 ) {
-    // Force recomposition when message list changes.
-    val allMessages by messagesViewModel.messages.collectAsState()
+    // Keep the conversation list derived in the ViewModel so the UI doesn't rebuild it on each recomposition.
+    val conversations by messagesViewModel.conversations.collectAsState()
     val isLoading by messagesViewModel.isLoading.collectAsState()
     val orderNotificationsViewModel: OrderNotificationsViewModel = hiltViewModel()
     val orders by orderNotificationsViewModel.orders.collectAsState()
     val unreadCount by orderNotificationsViewModel.unreadCount.collectAsState()
     var selectedTab by rememberSaveable { mutableStateOf(0) }
 
-    LaunchedEffect(Unit) {
-        messagesViewModel.ensureSubscribed()
+    LaunchedEffect(userPubkey) {
+        if (userPubkey.isNotBlank()) {
+            messagesViewModel.ensureSubscribed()
+        }
     }
 
     LaunchedEffect(userPubkey) {
@@ -72,7 +74,6 @@ fun MessagesTab(
         }
     }
 
-    val conversations = remember(allMessages) { messagesViewModel.getConversations() }
     val profileRepository = LocalProfileRepository.current
     val profiles by profileRepository.profiles.collectAsState()
 
@@ -194,7 +195,7 @@ fun MessagesTab(
                         val counterpartyTitle = order.counterpartyDisplayName(userPubkey)
                         val counterpartyPicture = order.counterpartyPicture(userPubkey)
                         val isBuyer = order.isBuyer(userPubkey)
-                        val orderStatusLabel = if (isBuyer) "You ordered from" else "Order received from"
+                        val orderStatusLabel = if (isBuyer) "You ordered from" else "Order from"
                         ListItem(
                             headlineContent = { Text("$orderStatusLabel $counterpartyTitle") },
                             supportingContent = {

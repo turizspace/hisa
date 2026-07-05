@@ -146,40 +146,29 @@ fun ConversationScreen(
     val normalizedConversationId = cleanPubkeyFormat(conversationId)
     val normalizedUserPubkey = cleanPubkeyFormat(userPubkey)
 
-    val conversationMessages = allMessages.filter { message ->
-        if (message is com.hisa.data.model.Message.TextMessage && message.content == "Unable to decrypt message") {
-            return@filter false
+    val conversationMessages = remember(allMessages, normalizedConversationId, normalizedUserPubkey) {
+        allMessages.filter { message ->
+            if (message is com.hisa.data.model.Message.TextMessage && message.content == "Unable to decrypt message") {
+                false
+            } else {
+                val msgPub = cleanPubkeyFormat(message.pubkey)
+                val recipients = message.recipientPubkeys.map { cleanPubkeyFormat(it) }.filter { it.isNotBlank() }
+                val participants = buildSet {
+                    if (msgPub.isNotBlank()) add(msgPub)
+                    recipients.forEach { add(it) }
+                }
+                val others = participants.filter { !it.equals(normalizedUserPubkey, true) }.toSet()
+                val roomKey = if (others.isNotEmpty()) ChatroomKey(others) else ChatroomKey(setOf(msgPub))
+                roomKey.users.contains(normalizedConversationId)
+            }
         }
-        val msgPub = cleanPubkeyFormat(message.pubkey)
-        val recipients = message.recipientPubkeys.map { cleanPubkeyFormat(it) }.filter { it.isNotBlank() }
-        val participants = buildSet {
-            if (msgPub.isNotBlank()) add(msgPub)
-            recipients.forEach { add(it) }
-        }
-        val others = participants.filter { !it.equals(normalizedUserPubkey, true) }.toSet()
-        val roomKey = if (others.isNotEmpty()) ChatroomKey(others) else ChatroomKey(setOf(msgPub))
-        // Debug: log normalized values for every message so we can trace filtering
-        Timber.d(
-            "Conversation debug: msgId=%s msgPub=%s recipients=%s roomKey=%s normalizedConversationId=%s normalizedUser=%s",
-            message.id, msgPub, recipients, roomKey.toString(), normalizedConversationId, normalizedUserPubkey
-        )
-
-        val match = roomKey.users.contains(normalizedConversationId)
-        if (match) {
-            Timber.d(
-                "Message matched for conversation: pubkey=%s createdAt=%d normalizedPub=%s recipients=%s room=%s",
-                message.pubkey, message.createdAt, msgPub, recipients, roomKey.toString()
-            )
-        } else {
-            Timber.d(
-                "Message NOT matched for conversation: pubkey=%s createdAt=%d normalizedPub=%s recipients=%s room=%s",
-                message.pubkey, message.createdAt, msgPub, recipients, roomKey.toString()
-            )
-        }
-        match
     }
-    val reactionMessages = conversationMessages.filterIsInstance<com.hisa.data.model.Message.ReactionMessage>()
-    val visibleMessages = conversationMessages.filterNot { it is com.hisa.data.model.Message.ReactionMessage }
+    val reactionMessages = remember(conversationMessages) {
+        conversationMessages.filterIsInstance<com.hisa.data.model.Message.ReactionMessage>()
+    }
+    val visibleMessages = remember(conversationMessages) {
+        conversationMessages.filterNot { it is com.hisa.data.model.Message.ReactionMessage }
+    }
     val reactionsByTarget = remember(reactionMessages) {
         reactionMessages
             .groupBy { it.targetEventId }
@@ -322,7 +311,7 @@ fun ConversationScreen(
                 Spacer(modifier = Modifier.height(12.dp))
             }
             LazyColumn(modifier = Modifier.weight(1f)) {
-                items(visibleMessages) { message ->
+                items(visibleMessages, key = { it.id }) { message ->
                     val normalizedSender = cleanPubkeyFormat(message.pubkey)
                     val isOwnMessage = normalizedSender == normalizedUserPubkey
                     val incomingDisplayName = if (normalizedSender.equals(normalizedConversationId, true)) {

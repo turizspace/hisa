@@ -32,6 +32,7 @@ import com.hisa.ui.screens.profile.ProfileScreen
 import com.hisa.ui.screens.settings.SettingsScreen
 import com.hisa.ui.screens.conversation.ConversationScreen
 import com.hisa.ui.screens.create.CreateServiceScreen
+import com.hisa.ui.screens.create.CreateUnifiedScreen
 import com.hisa.ui.screens.signup.SignupScreen
 import com.hisa.viewmodel.AuthViewModel
 import com.hisa.viewmodel.MessagesViewModel
@@ -55,7 +56,6 @@ object Routes {
     const val DM_ORDER = "dm/{pubkey}/{orderId}"
     const val SERVICE_DETAIL = "serviceDetail/{eventId}/{pubkey}"
     const val CREATE_SERVICE = "createService"
-    const val CREATE_CHANNEL = "createChannel"
     const val SHOP = "shop"
     const val FAQ = "faq"
     const val DONATE = "donate"
@@ -86,6 +86,7 @@ private fun SettingsScreenWrapper(
     }
     SettingsScreen(
         authViewModel = authViewModel,
+        navController = navController,
         onLogout = {
             messagesViewModel.clearMessages()
             authViewModel.logout()
@@ -281,11 +282,11 @@ fun AppNavGraph(
         }
         
         composable(Routes.FAQ) {
-            FAQScreen()
+            FAQScreen(navController = navController)
         }
 
         composable(Routes.DONATE) {
-            DonateScreen()
+            DonateScreen(navController = navController)
         }
         composable(Routes.UPLOAD) { backStackEntry ->
             // Hilt-injected view models
@@ -319,24 +320,14 @@ fun AppNavGraph(
         }
         composable(Routes.CREATE_SERVICE) {
             val vm: com.hisa.ui.screens.create.CreateServiceViewModel = androidx.hilt.navigation.compose.hiltViewModel()
-            CreateServiceScreen(
+            com.hisa.ui.screens.create.CreateUnifiedScreen(
                 onCreateService = { title, summary, description, tags, onSuccess ->
                     // If there is no local private key (external signer login), pass null so
                     // CreateServiceViewModel delegates to the external signer path.
                     vm.createService(title, summary, description, tags, if (privateKey.isBlank()) null else privateKey, pubKey, onSuccess)
                 },
-                onNavigateBack = { navController.popBackStack() },
-                navController = navController
-            )
-        }
-        composable(Routes.CREATE_CHANNEL) {
-            // Reuse create channel route to create stalls (shops) using CreateServiceScreen -> createStall
-            val vm: com.hisa.ui.screens.create.CreateServiceViewModel = androidx.hilt.navigation.compose.hiltViewModel()
-            com.hisa.ui.screens.create.CreateServiceScreen(
-                onCreateService = { title, summary, description, tags, onSuccess ->
-                    vm.createStall(title, summary, description, tags, if (privateKey.isBlank()) null else privateKey, pubKey) {
-                        onSuccess()
-                    }
+                onCreateStall = { title, summary, description, tags, onSuccess ->
+                    vm.createStall(title, summary, description, tags, if (privateKey.isBlank()) null else privateKey, pubKey, onSuccess)
                 },
                 onNavigateBack = { navController.popBackStack() },
                 navController = navController

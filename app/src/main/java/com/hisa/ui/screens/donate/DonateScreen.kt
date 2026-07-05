@@ -29,6 +29,8 @@ import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
+import androidx.navigation.NavHostController
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import com.hisa.util.Constants
 import androidx.compose.ui.graphics.asImageBitmap
 import com.google.zxing.BarcodeFormat
@@ -89,20 +91,33 @@ class DonateViewModel @Inject constructor() : ViewModel() {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun DonateScreen() {
+fun DonateScreen(navController: NavHostController? = null) {
     val context = LocalContext.current
     var amount by remember { mutableStateOf(Constants.DEFAULT_DONATION_AMOUNT_SATS.toString()) }
     val viewModel: DonateViewModel = viewModel()
     val invoice by viewModel.invoice.collectAsState()
     var showQr by remember { mutableStateOf(false) }
 
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .verticalScroll(rememberScrollState())
-            .padding(16.dp),
-        horizontalAlignment = Alignment.CenterHorizontally
-    ) {
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = { Text("Donate") },
+                navigationIcon = {
+                    IconButton(onClick = { navController?.navigateUp() }) {
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+                    }
+                }
+            )
+        }
+    ) { paddingValues ->
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .verticalScroll(rememberScrollState())
+                .padding(paddingValues)
+                .padding(16.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
         Text(
             "Support Hisa Development",
             style = MaterialTheme.typography.headlineMedium,
@@ -424,4 +439,5 @@ fun DonateScreen() {
             }
         }
     }
+}
 }

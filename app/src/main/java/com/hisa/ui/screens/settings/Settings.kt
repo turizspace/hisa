@@ -18,11 +18,14 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import com.hisa.viewmodel.AuthViewModel
 import com.hisa.util.Constants
 import androidx.compose.ui.unit.dp
-import androidx.navigation.compose.rememberNavController
+import androidx.navigation.NavHostController
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SettingsScreen(
     authViewModel: AuthViewModel = hiltViewModel(),
+    navController: NavHostController? = null,
     onLogout: () -> Unit,
     onLoggedOut: () -> Unit = {},
     onExportKey: () -> Unit = {},
@@ -48,13 +51,28 @@ fun SettingsScreen(
 
     val scrollState = rememberScrollState()
 
-    Surface(color = MaterialTheme.colorScheme.background, modifier = Modifier.fillMaxSize()) {
-        Box(modifier = Modifier.fillMaxSize()) {
-            Column(
-                modifier = Modifier
-                    .padding(16.dp)
-                    .verticalScroll(scrollState)
-            ) {
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = { Text("Settings") },
+                navigationIcon = {
+                    IconButton(onClick = { navController?.navigateUp() }) {
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+                    }
+                }
+            )
+        }
+    ) { paddingValues ->
+        Surface(
+            color = MaterialTheme.colorScheme.background,
+            modifier = Modifier.fillMaxSize().padding(paddingValues)
+        ) {
+            Box(modifier = Modifier.fillMaxSize()) {
+                Column(
+                    modifier = Modifier
+                        .padding(16.dp)
+                        .verticalScroll(scrollState)
+                ) {
                 Text("Settings", style = MaterialTheme.typography.headlineMedium)
                 Spacer(modifier = Modifier.height(16.dp))
 
@@ -209,18 +227,19 @@ fun SettingsScreen(
                 }
             }
 
-            // Snackbar should be placed inside Box's content to use Modifier.align
-            if (showCopiedSnackbar) {
-                LaunchedEffect(Unit) {
-                    snackbarHostState.showSnackbar("Private key copied to clipboard")
-                    showCopiedSnackbar = false
+                // Snackbar should be placed inside Box's content to use Modifier.align
+                if (showCopiedSnackbar) {
+                    LaunchedEffect(Unit) {
+                        snackbarHostState.showSnackbar("Private key copied to clipboard")
+                        showCopiedSnackbar = false
+                    }
                 }
-            }
 
-            SnackbarHost(
+                SnackbarHost(
                 hostState = snackbarHostState,
-                modifier = Modifier.align(Alignment.BottomCenter)
-            )
+                    modifier = Modifier.align(Alignment.BottomCenter)
+                )
+            }
         }
     }
 }

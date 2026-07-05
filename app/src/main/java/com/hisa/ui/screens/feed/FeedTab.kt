@@ -24,15 +24,18 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.navigation.NavController
+import com.hisa.data.cache.UiResumeStateStore
 import com.hisa.data.model.ServiceListing
 import com.hisa.data.repository.ServiceRepository
 import com.hisa.ui.components.CategoryChipRow
@@ -64,26 +67,25 @@ fun FeedTab(
     onAtTopChange: ((Boolean) -> Unit)? = null,
     onSeeAllStalls: () -> Unit = {}
 ) {
+    val context = LocalContext.current
+    val resumeStateStore = remember { UiResumeStateStore(context.applicationContext) }
     val stallsViewModel: StallsViewModel = hiltViewModel()
-    val services by feedViewModel.services.collectAsState()
     val stalls by stallsViewModel.stalls.collectAsState()
-    val categories by feedViewModel.categories.collectAsState()
-    val selectedCategory by feedViewModel.selectedCategory.collectAsState()
-    val isLoading by feedViewModel.isLoading.collectAsState()
+    val feedUiState by feedViewModel.feedUiState.collectAsState()
     val profileRepository = LocalProfileRepository.current
     val profiles by profileRepository.profiles.collectAsState()
-    val showLoading = rememberTabLoadingVisibility(isLoading = isLoading)
-
-    val stallCategories = stalls
-        .flatMap { it.categories }
-        .map(::normalizeCategory)
-        .filter { it.isNotBlank() }
-        .distinct()
-        .sorted()
-
-    val allCategories = (categories + stallCategories)
-        .distinct()
-        .sorted()
+    val showLoading = rememberTabLoadingVisibility(isLoading = feedUiState.isLoading)
+    val allCategories = remember(stalls, feedUiState.categories) {
+        val stallCategories = stalls
+            .flatMap { it.categories }
+            .map(::normalizeCategory)
+            .filter { it.isNotBlank() }
+            .distinct()
+            .sorted()
+        (feedUiState.categories + stallCategories)
+            .distinct()
+            .sorted()
+    }
 
     LaunchedEffect(allCategories) {
         if (allCategories.isNotEmpty()) {
@@ -92,83 +94,92 @@ fun FeedTab(
     }
 
     val saved = navController.currentBackStackEntry?.savedStateHandle
-    var searchText by rememberSaveable { mutableStateOf(saved?.get<String>("feed_searchQuery") ?: searchQuery) }
-    var showAllServices by rememberSaveable { mutableStateOf(saved?.get<Boolean>("feed_showAllServices") ?: false) }
+    var searchText by remember { mutableStateOf(resumeStateStore.feedSearchQuery.ifBlank { searchQuery }) }
+    var showAllServices by remember { mutableStateOf(resumeStateStore.feedShowAllServices) }
 
     LaunchedEffect(searchQuery) {
-        if (searchQuery != searchText) searchText = searchQuery
+        if (searchQuery != searchText) {
+            searchText = searchQuery
+        }
+    }
+
+    LaunchedEffect(searchText) {
+        resumeStateStore.saveFeedSearchQuery(searchText)
+        feedViewModel.setSearchQuery(searchText)
+    }
+
+    LaunchedEffect(Unit) {
+        val restoredCategory = resumeStateStore.feedSelectedCategory
+        if (!restoredCategory.isNullOrBlank()) {
+            feedViewModel.setSelectedCategory(restoredCategory)
+        }
+        feedViewModel.setShowAllServices(showAllServices)
     }
 
     LaunchedEffect(showAllServices) {
         saved?.set("feed_showAllServices", showAllServices)
+        resumeStateStore.saveFeedShowAllServices(showAllServices)
+        feedViewModel.setShowAllServices(showAllServices)
     }
 
-    val listState = rememberLazyListState()
-    val gridState = rememberLazyGridState()
-
-    LaunchedEffect(services) {
-        profileRepository.ensureProfiles(services.map { it.pubkey }.toSet())
+    LaunchedEffect(feedUiState.selectedCategory) {
+        resumeStateStore.saveFeedCategory(feedUiState.selectedCategory)
     }
 
-    val sortedServices = services.sortedByDescending { it.createdAt }
-    val sortedStalls = stalls.sortedByDescending { it.createdAt }
-    val normalizedQuery = searchText.trim()
+    val listState = rememberLazyListState(
+        initialFirstVisibleItemIndex = resumeStateStore.feedListFirstVisibleItemIndex,
+        initialFirstVisibleItemScrollOffset = resumeStateStore.feedListFirstVisibleItemOffset
+    )
+    val gridState = rememberLazyGridState(
+        initialFirstVisibleItemIndex = resumeStateStore.feedListFirstVisibleItemIndex,
+        initialFirstVisibleItemScrollOffset = resumeStateStore.feedListFirstVisibleItemOffset
+    )
+
+    LaunchedEffect(feedUiState.services) {
+        profileRepository.ensureProfiles(feedUiState.services.map { it.pubkey }.toSet())
+    }
+
+    val sortedStalls = remember(stalls) { stalls.sortedByDescending { it.createdAt } }
+    val normalizedQuery = remember(searchText) { searchText.trim() }
     val isSearching = normalizedQuery.isNotEmpty()
-    val activeCategory = selectedCategory?.takeIf { it.isNotBlank() }
-    val showingDiscovery = !isSearching && !showAllServices
+    val showingDiscovery = remember(showAllServices, isSearching) { !isSearching && !showAllServices }
 
-    val filteredServices = sortedServices
-        .filter { service ->
-            activeCategory?.let { category ->
-                service.tags.map(::normalizeCategory).any { it == category }
-            } ?: true
-        }
-        .filter { service ->
-            if (!isSearching) return@filter true
-            service.title.contains(normalizedQuery, ignoreCase = true) ||
-                (service.summary ?: "").contains(normalizedQuery, ignoreCase = true) ||
-                service.tags.any { it.contains(normalizedQuery, ignoreCase = true) }
-        }
-
-    val filteredStalls = sortedStalls
-        .filter { stall ->
-            activeCategory?.let { category ->
-                stall.categories.map(::normalizeCategory).any { it == category }
-            } ?: true
-        }
-        .filter { stall ->
-            if (!isSearching) return@filter true
-            stall.name.contains(normalizedQuery, ignoreCase = true) ||
-                stall.description.contains(normalizedQuery, ignoreCase = true) ||
-                stall.ownerDisplayName.contains(normalizedQuery, ignoreCase = true) ||
-                stall.categories.any { it.contains(normalizedQuery, ignoreCase = true) }
-        }
+    val filteredServices = feedUiState.services
+    val filteredStalls = remember(sortedStalls, feedUiState.selectedCategory, normalizedQuery) {
+        sortedStalls
+            .filter { stall ->
+                feedUiState.selectedCategory?.takeIf { it.isNotBlank() }?.let { category ->
+                    stall.categories.map(::normalizeCategory).any { it == category }
+                } ?: true
+            }
+            .filter { stall ->
+                if (normalizedQuery.isEmpty()) return@filter true
+                stall.name.contains(normalizedQuery, ignoreCase = true) ||
+                    stall.description.contains(normalizedQuery, ignoreCase = true) ||
+                    stall.ownerDisplayName.contains(normalizedQuery, ignoreCase = true) ||
+                    stall.categories.any { it.contains(normalizedQuery, ignoreCase = true) }
+            }
+    }
 
     LaunchedEffect(listState, gridState, showingDiscovery, isSearching) {
-        if (showingDiscovery || isSearching) {
-            var previousIsAtTop = true
-            snapshotFlow { listState.firstVisibleItemIndex to listState.firstVisibleItemScrollOffset }
-                .collect { (index, offset) ->
-                    val isAtTop = index == 0 && offset == 0
-                    if (isAtTop != previousIsAtTop) {
-                        onAtTopChange?.invoke(isAtTop)
-                        previousIsAtTop = isAtTop
-                    }
-                }
-        } else {
-            var previousIsAtTop = true
-            snapshotFlow { gridState.firstVisibleItemIndex to gridState.firstVisibleItemScrollOffset }
-                .collect { (index, offset) ->
-                    val isAtTop = index == 0 && offset == 0
-                    if (isAtTop != previousIsAtTop) {
-                        onAtTopChange?.invoke(isAtTop)
-                        previousIsAtTop = isAtTop
-                    }
-                }
+        var previousIsAtTop = true
+        snapshotFlow {
+            if (showingDiscovery || isSearching) {
+                listState.firstVisibleItemIndex to listState.firstVisibleItemScrollOffset
+            } else {
+                gridState.firstVisibleItemIndex to gridState.firstVisibleItemScrollOffset
+            }
+        }.collect { (index, offset) ->
+            resumeStateStore.saveFeedScrollPosition(index, offset)
+            val isAtTop = index == 0 && offset == 0
+            if (isAtTop != previousIsAtTop) {
+                onAtTopChange?.invoke(isAtTop)
+                previousIsAtTop = isAtTop
+            }
         }
     }
 
-    if (showLoading && services.isEmpty() && stalls.isEmpty()) {
+    if (showLoading && feedUiState.services.isEmpty() && stalls.isEmpty()) {
         FeedSkeletonLoader(
             modifier = Modifier.fillMaxSize(),
             itemCount = 5
@@ -177,7 +188,7 @@ fun FeedTab(
     }
 
     when {
-        showingDiscovery && services.isEmpty() && stalls.isEmpty() -> {
+        showingDiscovery && feedUiState.services.isEmpty() && stalls.isEmpty() -> {
             EmptyFeedState(
                 modifier = Modifier.fillMaxSize(),
                 onRefresh = { feedViewModel.subscribeToFeed() }
@@ -195,7 +206,7 @@ fun FeedTab(
                     item {
                         CategoryChipRow(
                             categories = allCategories,
-                            selectedCategory = selectedCategory,
+                            selectedCategory = feedUiState.selectedCategory,
                             onSelect = { feedViewModel.setSelectedCategory(it) }
                         )
                     }
@@ -304,7 +315,7 @@ fun FeedTab(
                     item {
                         CategoryChipRow(
                             categories = allCategories,
-                            selectedCategory = selectedCategory,
+                            selectedCategory = feedUiState.selectedCategory,
                             onSelect = { feedViewModel.setSelectedCategory(it) }
                         )
                     }
@@ -380,7 +391,7 @@ fun FeedTab(
                 if (allCategories.isNotEmpty()) {
                     CategoryChipRow(
                         categories = allCategories,
-                        selectedCategory = selectedCategory,
+                        selectedCategory = feedUiState.selectedCategory,
                         onSelect = { feedViewModel.setSelectedCategory(it) },
                         modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp)
                     )

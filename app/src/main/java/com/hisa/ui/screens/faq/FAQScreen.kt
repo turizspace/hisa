@@ -16,12 +16,14 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.navigation.NavHostController
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import com.hisa.data.model.FAQ
 import com.hisa.data.model.FAQRepository
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun FAQScreen() {
+fun FAQScreen(navController: NavHostController? = null) {
     val faqs = remember { FAQRepository.faqs.groupBy { it.category } }
     
     Scaffold(
@@ -32,6 +34,11 @@ fun FAQScreen() {
                         "FAQs",
                         style = MaterialTheme.typography.headlineMedium
                     )
+                },
+                navigationIcon = {
+                    IconButton(onClick = { navController?.navigateUp() }) {
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+                    }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(
                     containerColor = MaterialTheme.colorScheme.primaryContainer,

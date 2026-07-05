@@ -49,6 +49,7 @@ import androidx.compose.material.icons.filled.Photo
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Verified
 import androidx.compose.material.icons.filled.VerifiedUser
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material3.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.draw.clip
@@ -131,14 +132,29 @@ fun ProfileScreen(
     // Refresh trigger
     var isRefreshing by remember { mutableStateOf(false) }
 
-    Surface(color = MaterialTheme.colorScheme.background, modifier = Modifier.fillMaxSize()) {
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .verticalScroll(rememberScrollState()),
-            verticalArrangement = Arrangement.Top,
-            horizontalAlignment = Alignment.CenterHorizontally
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = { Text("Profile") },
+                navigationIcon = {
+                    IconButton(onClick = { navController?.navigateUp() }) {
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+                    }
+                }
+            )
+        }
+    ) { paddingValues ->
+        Surface(
+            color = MaterialTheme.colorScheme.background,
+            modifier = Modifier.fillMaxSize().padding(paddingValues)
         ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.Top,
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
             Box {
                 // Card with profile info
                 Card(
@@ -539,5 +555,6 @@ fun ProfileScreen(
                     }
                 }
             )
-}
+        }
     }
+}
