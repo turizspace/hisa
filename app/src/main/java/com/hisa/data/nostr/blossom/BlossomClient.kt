@@ -1,7 +1,10 @@
 package com.hisa.data.nostr.blossom
 
+import android.content.Context
+import android.net.Uri
 import android.util.Base64
-import com.hisa.data.nostr.NostrEventSigner
+import com.hisa.data.nostr.NostrSigningService
+import com.hisa.util.CryptoUtils
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
@@ -11,110 +14,106 @@ import okhttp3.RequestBody
 import okio.BufferedSink
 import org.json.JSONArray
 import org.json.JSONObject
+import android.util.Log
 import java.io.File
-import java.security.MessageDigest
 
 /**
- * Minimal Blossom.band client to upload media authenticated by a signed Nostr event.
- * Uses NIP-01 signing via existing `NostrEventSigner` and underlying Schnorr sign in MessageRepository.
+ * Blossom.band HTTP client with NIP-98 authentication support
+ * 
+ * Features:
+ * - File upload with NIP-98 signed events
+ * - Progress reporting for streaming uploads
+ * - Support for File and URI (Android Content Provider)
+ * - Multiple auth header formats for server compatibility
+ * 
+ * Best Practices:
+ * - Uses streaming for large files (memory-safe)
+ * - Delegates signing to NostrSigningService
+ * - Validates signed events before sending to server
+ * - Includes detailed logging for debugging
  */
 class BlossomClient(
     val baseUrl: String = "https://blossom.band",
-    private val http: OkHttpClient = OkHttpClient()
+    private val http: OkHttpClient = OkHttpClient(),
+    private val signingService: NostrSigningService
 ) {
 
     data class UploadResult(val ok: Boolean, val statusCode: Int, val body: String?)
 
-    private fun sha256Hex(bytes: ByteArray): String {
-        val h = MessageDigest.getInstance("SHA-256").digest(bytes)
-        return h.joinToString("") { "%02x".format(it) }
-    }
-
-    private fun sha256HexFromFile(file: File): String {
-        val digest = MessageDigest.getInstance("SHA-256")
-        file.inputStream().use { input ->
-            val buffer = ByteArray(8 * 1024)
-            var read: Int
-            while (true) {
-                read = input.read(buffer)
-                if (read <= 0) break
-                digest.update(buffer, 0, read)
-            }
-        }
-        return digest.digest().joinToString("") { "%02x".format(it) }
-    }
-
-    // Build a BUD-compliant authorization event (kind 24242) and return the raw JSON string
-    private suspend fun buildAuthEventJson(
-        pubkey: String,
-        privKey: ByteArray?,
-        verb: String,
-        fileSha256Hex: String? = null,
-        content: String = "",
-        externalSignerPubkey: String? = null,
-        externalSignerPackage: String? = null
-    ): String {
-        val kind = 24242
-        val tags = mutableListOf<List<String>>()
-        tags.add(listOf("t", verb))
-        // expiration: 5 minutes from now
-        val expiration = ((System.currentTimeMillis() / 1000L) + 300L).toString()
-        tags.add(listOf("expiration", expiration))
-        if (!fileSha256Hex.isNullOrBlank()) {
-            tags.add(listOf("x", fileSha256Hex))
-        }
-        val evt = NostrEventSigner.signEvent(
-            kind = kind,
-            content = content,
-            tags = tags,
-            pubkey = pubkey,
-            privKey = privKey,
-            externalSignerPubkey = externalSignerPubkey,
-            externalSignerPackage = externalSignerPackage
-        )
-        return evt.toString()
-    }
-
-    // Base64-encode the event JSON and format as Authorization: Nostr <base64>
-    private fun buildAuthorizationHeaderValue(eventJson: String): String {
-        return "Nostr ${Base64.encodeToString(eventJson.toByteArray(Charsets.UTF_8), Base64.NO_WRAP)}"
+    private companion object {
+        const val TAG = "BlossomClient"
     }
 
     /**
-     * Upload a file using streaming RequestBody and report progress via [onProgress].
-     * endpoint can be "upload", "media", or "mirror" depending on Blossom API.
+     * Sign a BUD event using internal signing service
+     * 
+     * Handles both local signing (if private key available) and
+     * external signing (via Amber/Quartz)
+     */
+    suspend fun signEvent(
+        eventJsonRaw: String,
+        pubkeyHex: String,
+        privKey: ByteArray? = null,
+        externalSignerPubkey: String? = null,
+        externalSignerPackage: String? = null,
+        timeoutMs: Long = 60000L
+    ): String {
+        val signingContext = signingService.resolveSigningContext(
+            pubkeyHint = pubkeyHex,
+            localPrivateKeyBytesHint = privKey,
+            externalSignerPubkeyHint = externalSignerPubkey,
+            externalSignerPackageHint = externalSignerPackage
+        )
+        
+        if (!signingContext.canSign) {
+            throw IllegalStateException("No signing credentials available")
+        }
+        
+        // Parse event to extract kind, content, tags
+        val event = JSONObject(eventJsonRaw)
+        val kind = event.getInt("kind")
+        val content = event.getString("content")
+        val tagsArray = event.getJSONArray("tags")
+        val tags = mutableListOf<List<String>>()
+        for (i in 0 until tagsArray.length()) {
+            val tag = tagsArray.getJSONArray(i)
+            val tagList = mutableListOf<String>()
+            for (j in 0 until tag.length()) {
+                tagList.add(tag.getString(j))
+            }
+            tags.add(tagList)
+        }
+        
+        Log.d(TAG, "Signing event (kind=$kind, content_len=${content.length})")
+        
+        // Sign via service (which calls NostrEventSigner internally)
+        val signedEventJson = signingService.signEvent(
+            signingContext = signingContext,
+            kind = kind,
+            content = content,
+            tags = tags
+        )
+        
+        return signedEventJson.toString()
+    }
+
+    /**
+     * Upload a file using streaming RequestBody
+     * Best Practice: Uses streaming for memory efficiency on large files
      */
     suspend fun uploadFile(
         file: File,
         contentType: String,
-        pubkeyHex: String,
-        privKey: ByteArray?,
+        signedEvent: String,
         endpoint: String = "upload",
-        externalSignerPubkey: String? = null,
-        externalSignerPackage: String? = null,
         onProgress: ((bytesSent: Long, totalBytes: Long) -> Unit)? = null
     ): UploadResult = withContext(Dispatchers.IO) {
-    val totalBytes = file.length()
-    val sha = sha256HexFromFile(file)
-    val hasLocalKey = privKey?.isNotEmpty() == true
-    val hasExternalSigner = !externalSignerPubkey.isNullOrBlank() && !externalSignerPackage.isNullOrBlank()
-    if (pubkeyHex.isBlank() || (!hasLocalKey && !hasExternalSigner)) {
-        return@withContext UploadResult(false, 0, "Missing signing credentials for authenticated upload")
-    }
-    val authEventJson = buildAuthEventJson(
-        pubkey = pubkeyHex,
-        privKey = privKey,
-        verb = "upload",
-        fileSha256Hex = sha,
-        content = "Upload ${file.name}",
-        externalSignerPubkey = externalSignerPubkey,
-        externalSignerPackage = externalSignerPackage
-    )
-    val authHeaderValue = buildAuthorizationHeaderValue(authEventJson)
+        val totalBytes = file.length()
+        val authHeaderValue = CryptoUtils.encodeAuthHeaderValue(signedEvent)
+        val url = "$baseUrl/${endpoint.trimStart('/')}"
 
-        val url = "$baseUrl/${endpoint.trimStart('/') }"
-
-        val mediaType = contentType.toMediaTypeOrNull() ?: "application/octet-stream".toMediaTypeOrNull()
+        val mediaType = contentType.toMediaTypeOrNull() 
+            ?: "application/octet-stream".toMediaTypeOrNull()
 
         val requestBody = object : RequestBody() {
             override fun contentType() = mediaType
@@ -124,113 +123,197 @@ class BlossomClient(
             override fun writeTo(sink: BufferedSink) {
                 file.inputStream().use { input ->
                     val buffer = ByteArray(8 * 1024)
-                    var read: Int
+                    var bytesRead: Int
                     var sent = 0L
-                    while (true) {
-                        read = input.read(buffer)
-                        if (read == -1) break
-                        sink.write(buffer, 0, read)
-                        sent += read
+                    while (input.read(buffer).also { bytesRead = it } != -1) {
+                        sink.write(buffer, 0, bytesRead)
+                        sent += bytesRead
                         onProgress?.invoke(sent, totalBytes)
                     }
                 }
             }
         }
 
-        val reqBuilder = Request.Builder().url(url).put(requestBody).addHeader("Content-Type", contentType)
-        if (authHeaderValue.isNotBlank()) {
-            // Primary BUD header
-            reqBuilder.addHeader("Authorization", authHeaderValue)
-            // Compatibility headers
-            reqBuilder.addHeader("Blossom-Authorization", authHeaderValue)
-            reqBuilder.addHeader("BlossomAuthorization", authHeaderValue)
-            // Also include the raw event JSON for servers that expect X-Nostr-Auth
-            // Encode the JSON to ensure it contains only valid header characters
-            val encodedAuthJson = java.net.URLEncoder.encode(authEventJson, "UTF-8")
-            reqBuilder.addHeader("X-Nostr-Auth", encodedAuthJson)
-        }
+        val reqBuilder = Request.Builder()
+            .url(url)
+            .put(requestBody)
+            .addHeader("Content-Type", contentType)
+            // NIP-98 authorization header
+            .addHeader("Authorization", authHeaderValue)
+            // Compatibility headers for different Blossom implementations
+            .addHeader("Blossom-Authorization", authHeaderValue)
+            .addHeader("BlossomAuthorization", authHeaderValue)
+        
         val req = reqBuilder.build()
 
         try {
+            Log.d(TAG, "Uploading to: $url (size: $totalBytes bytes)")
             http.newCall(req).execute().use { resp ->
-                val b = resp.body?.string()
-                return@withContext UploadResult(resp.isSuccessful, resp.code, b)
+                val body = resp.body?.string()
+                Log.d(TAG, "Upload response: ${resp.code} (body_len=${body?.length ?: 0})")
+                return@withContext UploadResult(resp.isSuccessful, resp.code, body)
             }
         } catch (e: Exception) {
+            Log.e(TAG, "Upload failed", e)
             return@withContext UploadResult(false, 0, e.message)
         }
     }
 
     /**
-     * HEAD /<sha> to check existence. Returns pair(ok, statusCode)
+     * Upload a file from URI (Android Content Provider)
+     * Supports scoped storage on Android Q+
+     */
+    suspend fun uploadFileFromUri(
+        context: Context,
+        uri: Uri,
+        contentType: String,
+        signedEvent: String,
+        endpoint: String = "upload",
+        onProgress: ((bytesSent: Long, totalBytes: Long) -> Unit)? = null
+    ): UploadResult = withContext(Dispatchers.IO) {
+        // Get file size
+        val totalBytes = context.contentResolver.openFileDescriptor(uri, "r")
+            ?.use { it.statSize }
+            ?: throw IllegalArgumentException("Cannot determine file size for URI: $uri")
+
+        val authHeaderValue = CryptoUtils.encodeAuthHeaderValue(signedEvent)
+        val url = "$baseUrl/${endpoint.trimStart('/')}"
+
+        val mediaType = contentType.toMediaTypeOrNull() 
+            ?: "application/octet-stream".toMediaTypeOrNull()
+
+        val requestBody = object : RequestBody() {
+            override fun contentType() = mediaType
+
+            override fun contentLength(): Long = totalBytes
+
+            override fun writeTo(sink: BufferedSink) {
+                context.contentResolver.openInputStream(uri)?.use { input ->
+                    val buffer = ByteArray(8 * 1024)
+                    var bytesRead: Int
+                    var sent = 0L
+                    while (input.read(buffer).also { bytesRead = it } != -1) {
+                        sink.write(buffer, 0, bytesRead)
+                        sent += bytesRead
+                        onProgress?.invoke(sent, totalBytes)
+                    }
+                } ?: throw IllegalArgumentException("Cannot open URI: $uri")
+            }
+        }
+
+        val reqBuilder = Request.Builder()
+            .url(url)
+            .put(requestBody)
+            .addHeader("Content-Type", contentType)
+            .addHeader("Authorization", authHeaderValue)
+            .addHeader("Blossom-Authorization", authHeaderValue)
+            .addHeader("BlossomAuthorization", authHeaderValue)
+        
+        val req = reqBuilder.build()
+
+        try {
+            Log.d(TAG, "Uploading URI to: $url (size: $totalBytes bytes)")
+            http.newCall(req).execute().use { resp ->
+                val body = resp.body?.string()
+                return@withContext UploadResult(resp.isSuccessful, resp.code, body)
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "URI upload failed", e)
+            return@withContext UploadResult(false, 0, e.message)
+        }
+    }
+
+    /**
+     * HEAD /<sha> to check file existence
      */
     suspend fun headFile(shaHex: String, endpointPrefix: String = ""): Pair<Boolean, Int> = withContext(Dispatchers.IO) {
-        val url = if (endpointPrefix.isBlank()) "$baseUrl/$shaHex" else "$baseUrl/${endpointPrefix.trimStart('/')}/$shaHex"
+        val url = if (endpointPrefix.isBlank()) {
+            "$baseUrl/$shaHex"
+        } else {
+            "$baseUrl/${endpointPrefix.trimStart('/')}/$shaHex"
+        }
         val req = Request.Builder().url(url).head().build()
         try {
             http.newCall(req).execute().use { resp ->
                 return@withContext Pair(resp.isSuccessful, resp.code)
             }
         } catch (e: Exception) {
+            Log.e(TAG, "HEAD request failed", e)
             return@withContext Pair(false, 0)
         }
     }
 
     /**
-     * DELETE /<sha> with authentication
+     * DELETE /<sha> with NIP-98 authentication
      */
     suspend fun deleteFile(
         shaHex: String,
-        pubkeyHex: String,
-        privKey: ByteArray,
-        endpointPrefix: String = ""
+        signedEvent: String,
+        endpoint: String = ""
     ): UploadResult = withContext(Dispatchers.IO) {
-        val authEventJson = if (pubkeyHex.isNotBlank() && privKey.isNotEmpty()) buildAuthEventJson(pubkeyHex, privKey, verb = "delete", fileSha256Hex = shaHex, content = "Delete $shaHex") else ""
-        val authHeaderValue = if (authEventJson.isNotBlank()) buildAuthorizationHeaderValue(authEventJson) else ""
-        val url = if (endpointPrefix.isBlank()) "$baseUrl/$shaHex" else "$baseUrl/${endpointPrefix.trimStart('/')}/$shaHex"
-        val reqBuilder = Request.Builder().url(url).delete()
-        if (authHeaderValue.isNotBlank()) {
-            reqBuilder.addHeader("Authorization", authHeaderValue)
-            reqBuilder.addHeader("Blossom-Authorization", authHeaderValue)
-            reqBuilder.addHeader("BlossomAuthorization", authHeaderValue)
-            reqBuilder.addHeader("X-Nostr-Auth", authEventJson)
+        val authHeaderValue = CryptoUtils.encodeAuthHeaderValue(signedEvent)
+        val url = if (endpoint.isBlank()) {
+            "$baseUrl/$shaHex"
+        } else {
+            "$baseUrl/${endpoint.trimStart('/')}/$shaHex"
         }
+        val reqBuilder = Request.Builder().url(url).delete()
+            .addHeader("Authorization", authHeaderValue)
+            .addHeader("Blossom-Authorization", authHeaderValue)
+            .addHeader("BlossomAuthorization", authHeaderValue)
+
         val req = reqBuilder.build()
         try {
             http.newCall(req).execute().use { resp ->
-                val b = resp.body?.string()
-                return@withContext UploadResult(resp.isSuccessful, resp.code, b)
+                val body = resp.body?.string()
+                return@withContext UploadResult(resp.isSuccessful, resp.code, body)
             }
         } catch (e: Exception) {
             return@withContext UploadResult(false, 0, e.message)
         }
     }
 
-    // Parse blossom upload response body and prefer NIP-94 nested url, fallback to top-level url.
+    /**
+     * Parse upload response to extract URL
+     * Handles both NIP-94 nested format and flat JSON format
+     */
     fun parseUploadUrl(responseBody: String?): String? {
         if (responseBody.isNullOrBlank()) return null
         try {
             val root = JSONObject(responseBody)
+            
+            // Try NIP-94 format
             if (root.has("nip94")) {
                 val nip94 = root.getJSONArray("nip94")
                 for (i in 0 until nip94.length()) {
                     val entry = nip94.get(i)
                     if (entry is JSONArray && entry.length() >= 2) {
-                        val key = entry.getString(0)
-                        if (key == "url") return entry.getString(1)
+                        if (entry.getString(0) == "url") {
+                            return entry.getString(1)
+                        }
                     }
                 }
             }
-            if (root.has("url")) return root.getString("url")
+            
+            // Try flat format
+            if (root.has("url")) {
+                return root.getString("url")
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Could not parse response as JSON", e)
+        }
+        
+        // Fallback regex for unstructured responses
+        try {
+            val regex = Regex(""""url"\s*:\s*"([^"]+)""")
+            val match = regex.find(responseBody)
+            if (match != null) {
+                return match.groupValues[1]
+            }
         } catch (e: Exception) {
             // ignore
         }
-        // Last-ditch regex fallback
-        try {
-            val regex = Regex("\\[\\s*\"url\"\\s*,\\s*\"([^\"]+)\"")
-            val m = regex.find(responseBody)
-            if (m != null && m.groups.size > 1) return m.groups[1]!!.value
-        } catch (e: Exception) {}
+        
         return null
     }
 }

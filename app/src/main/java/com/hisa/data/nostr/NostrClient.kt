@@ -15,6 +15,8 @@ import java.util.concurrent.TimeUnit
 import javax.inject.Inject
 import javax.inject.Singleton
 import timber.log.Timber
+import com.hisa.util.Constants
+import com.hisa.util.RelayHealth
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -33,22 +35,23 @@ class NostrClient @Inject constructor(
      */
     @Synchronized
     fun updateRelays(newRelays: List<String>) {
-        // Normalize incoming list: trim, remove blanks, dedupe
-        val cleaned = newRelays.map { it.trim() }.filter { it.isNotBlank() }.distinct()
+        // Normalize incoming list, remove invalid URLs, and prefer a reachable subset when possible.
+        val cleaned = RelayHealth.normalizeRelayUrls(newRelays)
+        val selected = RelayHealth.selectRelayUrls(cleaned, fallback = Constants.ONBOARDING_RELAYS, probeReachability = false)
 
         // Compare as sets so order or duplication doesn't prevent real updates
-        if (cleaned.toSet() == relayUrls.toSet()) {
-            Timber.d("updateRelays called but relay set unchanged: %s", cleaned)
+        if (selected.toSet() == relayUrls.toSet()) {
+            Timber.d("updateRelays called but relay set unchanged: %s", selected)
             return
         }
 
-        Timber.i("Updating relays -> %s", cleaned)
+        Timber.i("Updating relays -> %s", selected)
 
         // Disconnect from current relays
         disconnect()
 
         // Update relay list (atomic swap)
-        relayUrls = cleaned
+        relayUrls = selected
 
         // Connect to new relays
         connect()
@@ -89,8 +92,8 @@ class NostrClient @Inject constructor(
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val webSockets = ConcurrentHashMap<String, WebSocket>()
     private val subscriptions = ConcurrentHashMap<String, String>() // id -> filterJson
-    // Assignment of subscription id to a single relay to avoid sending REQ to all relays
-    private val subscriptionAssignment = ConcurrentHashMap<String, String>() // id -> relayUrl
+    // Assignment of subscription id to one or more relays to avoid sending CLOSE to all relays unnecessarily
+    private val subscriptionAssignment = ConcurrentHashMap<String, Set<String>>() // id -> relayUrls
     private val roundRobinIndex = AtomicInteger(0)
     private val publishAssignment = ConcurrentHashMap<String, String>() // eventId -> relayUrl
     private val relayPublishLastSent = ConcurrentHashMap<String, Long>()
@@ -99,6 +102,7 @@ class NostrClient @Inject constructor(
     private val maxRetries = 5
     private val retryDelay = 3000L // ms
     private val pendingMessages = Collections.synchronizedList(mutableListOf<String>())
+    private val pendingSubscriptionRequests = ConcurrentHashMap<String, String>()
     // Throttle map to avoid sending too many REQ messages to the same relay in a short time
     private val lastSubscriptionSent = ConcurrentHashMap<String, Long>()
     private val SUBSCRIPTION_MIN_INTERVAL_MS = 80L
@@ -146,12 +150,25 @@ class NostrClient @Inject constructor(
     }
     
     fun closeSubscription(subscriptionId: String) {
+        val relayUrls = subscriptionAssignment.remove(subscriptionId) ?: webSockets.keys.toSet()
         val closeMsg = JSONArray().apply {
             put("CLOSE")
             put(subscriptionId)
+        }.toString()
+
+        relayUrls.forEach { relayUrl ->
+            webSockets[relayUrl]?.let { ws ->
+                try {
+                    ws.send(closeMsg)
+                    Timber.d("Sent CLOSE for %s to %s", subscriptionId, relayUrl)
+                } catch (e: Exception) {
+                    Timber.w(e, "Failed to send CLOSE for %s to %s", subscriptionId, relayUrl)
+                }
+            }
         }
-        sendMessageInternal(closeMsg.toString(), shouldQueue = false)
+
         subscriptions.remove(subscriptionId)
+        pendingSubscriptionRequests.remove(subscriptionId)
     }
 
     fun registerMessageHandler(handler: (String) -> Unit) {
@@ -178,6 +195,13 @@ class NostrClient @Inject constructor(
             return
         }
 
+        val reachableRelays = RelayHealth.selectRelayUrls(relayUrls, fallback = Constants.ONBOARDING_RELAYS, probeReachability = true)
+        if (reachableRelays.isEmpty()) {
+            Timber.w("No reachable relays found from %s; falling back to configured set", relayUrls)
+        }
+        val connectTargets = reachableRelays.ifEmpty { relayUrls }
+        relayUrls = connectTargets
+
         _connectionState.value = ConnectionState.CONNECTING
         var openCount = 0
         var errorCount = 0
@@ -192,13 +216,37 @@ class NostrClient @Inject constructor(
                         _connectionState.value = ConnectionState.CONNECTED
                         retryCount = 0
 
-                        // Send any pending messages immediately (to all currently open websockets)
+                        // Send any pending generic messages immediately (to all currently open websockets)
                         val iterator = pendingMessages.iterator()
                         while (iterator.hasNext()) {
                             val message = iterator.next()
                             webSockets.values.forEach { it.send(message) }
                             Timber.d("Sent pending message: %s", message)
                             iterator.remove()
+                        }
+
+                        // Replay pending subscription requests once per relay using the same dedupe rules as normal subscriptions.
+                        pendingSubscriptionRequests.entries.toList().forEach { (subscriptionId, requestPayload) ->
+                            val existingAssignments = subscriptionAssignment[subscriptionId].orEmpty()
+                            if (!shouldSendSubscriptionToRelay(subscriptionId, relayUrl, existingAssignments)) {
+                                Timber.d("Skipping replay of pending subscription %s to relay %s (already assigned)", subscriptionId, relayUrl)
+                                return@forEach
+                            }
+                            val reqString = requestPayload
+                            try {
+                                sendReqToRelay(
+                                    relayUrl = relayUrl,
+                                    webSocket = webSocket,
+                                    reqString = reqString,
+                                    source = "pending-subscription",
+                                    minDelayMs = 0L,
+                                    priority = subscriptionPriority(requestPayload)
+                                )
+                                subscriptionAssignment[subscriptionId] = (existingAssignments + relayUrl).toSet()
+                                pendingSubscriptionRequests.remove(subscriptionId)
+                            } catch (e: Exception) {
+                                Timber.w(e, "Failed to replay pending subscription %s to %s", subscriptionId, relayUrl)
+                            }
                         }
 
                         resubscribeRelay(relayUrl, webSocket)
@@ -219,7 +267,7 @@ class NostrClient @Inject constructor(
                                             // Reassign any subscriptions previously assigned to this relay
                                             scope.launch {
                                                 try {
-                                                    val reassigned = subscriptionAssignment.entries.filter { it.value == relayUrl }.map { it.key }
+                                                    val reassigned = subscriptionAssignment.entries.filter { relayUrl in it.value }.map { it.key }
                                                     reassigned.forEach { subId ->
                                                         subscriptionAssignment.remove(subId)
                                                         val filter = subscriptions[subId]
@@ -240,7 +288,7 @@ class NostrClient @Inject constructor(
                                             Timber.w("Relay %s reported auth-required on OK: %s", relayUrl, reason)
                                             scope.launch {
                                                 try {
-                                                    val reassigned = subscriptionAssignment.entries.filter { it.value == relayUrl }.map { it.key }
+                                                    val reassigned = subscriptionAssignment.entries.filter { relayUrl in it.value }.map { it.key }
                                                     reassigned.forEach { subId ->
                                                         subscriptionAssignment.remove(subId)
                                                         val filter = subscriptions[subId]
@@ -264,7 +312,7 @@ class NostrClient @Inject constructor(
                                             Timber.w("Relay %s closed with auth-required: %s", relayUrl, reason)
                                             scope.launch {
                                                 try {
-                                                    val reassigned = subscriptionAssignment.entries.filter { it.value == relayUrl }.map { it.key }
+                                                    val reassigned = subscriptionAssignment.entries.filter { relayUrl in it.value }.map { it.key }
                                                     reassigned.forEach { subId ->
                                                         subscriptionAssignment.remove(subId)
                                                         val filter = subscriptions[subId]
@@ -306,8 +354,9 @@ class NostrClient @Inject constructor(
                         // Expose the error to observers; UI can decide how to display it.
                         _lastError.value = "Connection error: ${t.localizedMessage}"
                         webSockets.remove(relayUrl)
+                        clearRelayAssignments(relayUrl)
                         errorCount++
-                        if (errorCount == relayUrls.size) {
+                        if (errorCount == connectTargets.size) {
                             _connectionState.value = ConnectionState.ERROR
                             attemptReconnect()
                         }
@@ -321,6 +370,7 @@ class NostrClient @Inject constructor(
                     override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
             Timber.w("WebSocket closed (%s): %d %s", relayUrl, code, reason)
                         webSockets.remove(relayUrl)
+                        clearRelayAssignments(relayUrl)
                         if (webSockets.isEmpty()) {
                             _connectionState.value = ConnectionState.DISCONNECTED
                             attemptReconnect()
@@ -339,17 +389,18 @@ class NostrClient @Inject constructor(
             ws.close(1000, "Normal closure")
         }
         webSockets.clear()
+        pendingSubscriptionRequests.clear()
         _connectionState.value = ConnectionState.DISCONNECTED
     }
 
     fun sendSubscription(id: String, filterJson: String) {
-    subscriptions[id] = filterJson
-    Timber.d(
-        "sendSubscription called: id=%s priority=%s filter=%s",
-        id,
-        subscriptionPriority(filterJson),
-        filterJson
-    )
+        subscriptions[id] = filterJson
+        Timber.d(
+            "sendSubscription called: id=%s priority=%s filter=%s",
+            id,
+            subscriptionPriority(filterJson),
+            filterJson
+        )
 
         try {
             val reqString = buildReqString(id, filterJson) ?: return
@@ -357,23 +408,36 @@ class NostrClient @Inject constructor(
 
             if (webSockets.isNotEmpty() && _connectionState.value == ConnectionState.CONNECTED) {
                 val priority = subscriptionPriority(filterJson)
-                webSockets.entries
+                val targetEntries = webSockets.entries
                     .filter { (relayUrl, _) -> relayRequiresAuth[relayUrl] != true }
                     .let { entries -> relayTargetsFor(priority, id, entries) }
-                    .forEachIndexed { relayIndex, (relayUrl, ws) ->
-                        val delayMs = initialSendDelay(priority, relayIndex)
-                        sendReqToRelay(
-                            relayUrl = relayUrl,
-                            webSocket = ws,
-                            reqString = reqString,
-                            source = "subscription",
-                            minDelayMs = delayMs,
-                            priority = priority
-                        )
+
+                val existingAssignments = subscriptionAssignment[id].orEmpty()
+                val selectedRelays = linkedSetOf<String>()
+                targetEntries.forEachIndexed { relayIndex, (relayUrl, ws) ->
+                    if (!shouldSendSubscriptionToRelay(id, relayUrl, existingAssignments + selectedRelays)) {
+                        Timber.d("Skipping duplicate REQ for subscription %s to relay %s", id, relayUrl)
+                        return@forEachIndexed
+                    }
+                    selectedRelays += relayUrl
+                    val delayMs = initialSendDelay(priority, relayIndex)
+                    sendReqToRelay(
+                        relayUrl = relayUrl,
+                        webSocket = ws,
+                        reqString = reqString,
+                        source = "subscription",
+                        minDelayMs = delayMs,
+                        priority = priority
+                    )
+                }
+
+                if (selectedRelays.isNotEmpty()) {
+                    subscriptionAssignment[id] = (existingAssignments + selectedRelays).toSet()
+                    pendingSubscriptionRequests.remove(id)
                 }
             } else {
                 Timber.w("No active WebSockets, attempting to connect...")
-                pendingMessages.add(reqString)
+                pendingSubscriptionRequests[id] = reqString
                 connect()
             }
         } catch (e: Exception) {
@@ -393,6 +457,11 @@ class NostrClient @Inject constructor(
                 try {
                     val priority = subscriptionPriority(filters)
                     if (!shouldReplayOnRelay(priority, id, relayUrl)) return@forEachIndexed
+                    val existingAssignments = subscriptionAssignment[id].orEmpty()
+                    if (!shouldSendSubscriptionToRelay(id, relayUrl, existingAssignments)) {
+                        Timber.d("Skipping resubscribe replay for subscription %s to relay %s (already assigned)", id, relayUrl)
+                        return@forEachIndexed
+                    }
                     val reqString = buildReqString(id, filters) ?: return@forEachIndexed
                     sendReqToRelay(
                         relayUrl = relayUrl,
@@ -402,6 +471,7 @@ class NostrClient @Inject constructor(
                         minDelayMs = resubscribeDelay(priority, index),
                         priority = priority
                     )
+                    subscriptionAssignment[id] = (existingAssignments + relayUrl).toSet()
                 } catch (e: Exception) {
                     Timber.e(e, "Failed to resubscribe on open for %s", relayUrl)
                 }
@@ -469,6 +539,21 @@ class NostrClient @Inject constructor(
         }
     }
 
+    private fun clearRelayAssignments(relayUrl: String) {
+        if (relayUrl.isBlank()) return
+        val relayAssignments = subscriptionAssignment.entries.toList()
+        relayAssignments.forEach { (subscriptionId, relays) ->
+            if (relayUrl in relays) {
+                val updated = relays - relayUrl
+                if (updated.isEmpty()) {
+                    subscriptionAssignment.remove(subscriptionId)
+                } else {
+                    subscriptionAssignment[subscriptionId] = updated
+                }
+            }
+        }
+    }
+
     private fun initialSendDelay(priority: SubscriptionPriority, relayIndex: Int): Long {
         return when (priority) {
             SubscriptionPriority.DIRECT_MESSAGES -> relayIndex * 15L
@@ -517,6 +602,17 @@ class NostrClient @Inject constructor(
             SubscriptionPriority.USER_RELAYS -> 100L + index * 30L
             SubscriptionPriority.METADATA -> 220L + index * 45L
             SubscriptionPriority.OTHER -> 160L + index * 40L
+        }
+    }
+
+    companion object {
+        fun shouldSendSubscriptionToRelay(
+            subscriptionId: String,
+            relayUrl: String,
+            assignedRelays: Set<String>
+        ): Boolean {
+            if (subscriptionId.isBlank() || relayUrl.isBlank()) return true
+            return relayUrl !in assignedRelays
         }
     }
 
@@ -597,7 +693,13 @@ class NostrClient @Inject constructor(
             try {
                 val verification = com.hisa.data.nostr.EventVerifier.verifyEvent(eventJson.toString())
                 if (!verification.idMatches) {
-                    Timber.w("Event id mismatch for event=%s given=%s computed=%s — aborting publish", event.id, event.id, verification.computedId)
+                    Timber.w(
+                        "Event id mismatch for event=%s given=%s computed=%s — aborting publish. eventJson=%s",
+                        event.id,
+                        event.id,
+                        verification.computedId,
+                        eventJson.toString().take(300)
+                    )
                     return
                 }
                 if (!verification.signatureValid) {

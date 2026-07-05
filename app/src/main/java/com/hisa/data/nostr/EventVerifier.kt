@@ -75,16 +75,18 @@ object EventVerifier {
 
             // Try to verify with ACINQ Secp256k1 via reflection. If native library is not available
             // (e.g., during unit tests), skip signature verification and report accordingly.
+            var nativeError: String? = null
             val signatureValid = try {
                 val cls = Class.forName("fr.acinq.secp256k1.Secp256k1")
                 val method = cls.getMethod("verifySchnorr", ByteArray::class.java, ByteArray::class.java, ByteArray::class.java)
                 method.invoke(null, sig, msg, pub) as? Boolean ?: false
             } catch (e: Throwable) {
-                // Native library unavailable or method not found
+                // Native library unavailable or method not found — surface this as a reason
+                nativeError = "Native verification unavailable: ${e.message}"
                 false
             }
 
-            return VerificationResult(idMatches, signatureValid, computedId, null)
+            return VerificationResult(idMatches, signatureValid, computedId, nativeError)
         } catch (e: Exception) {
             return VerificationResult(false, false, "", "Exception: ${e.message}")
         }

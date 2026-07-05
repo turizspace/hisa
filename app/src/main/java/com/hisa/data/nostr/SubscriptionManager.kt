@@ -65,7 +65,7 @@ class SubscriptionManager @Inject constructor(
         // addressed to us; sender identity is only known after decrypting the seal.
         val filters = JSONArray().apply {
             put(createFilter {
-                put("kinds", JSONArray().put(1059))
+                put("kinds", JSONArray().put(4).put(14).put(1059))
                 put("#p", JSONArray().put(userPubkey))
                 sinceTime?.let { put("since", it) }
                 safeLimit?.let { put("limit", it) }

@@ -1,6 +1,6 @@
 package com.hisa.data.nostr.crypto
 
-import java.util.Base64
+import android.util.Base64
 
 data class EncryptedPayload(
     val nonce: ByteArray,
@@ -8,7 +8,7 @@ data class EncryptedPayload(
     val mac: ByteArray
 ) {
     fun encode(): String {
-        return Base64.getEncoder().encodeToString(byteArrayOf(VERSION.toByte()) + nonce + ciphertext + mac)
+        return Base64.encodeToString(byteArrayOf(VERSION.toByte()) + nonce + ciphertext + mac, Base64.NO_WRAP)
     }
 
     companion object {
@@ -18,7 +18,7 @@ data class EncryptedPayload(
             val p = payload.trim()
             if (p.isEmpty() || p.startsWith("#")) return null
             return try {
-                val raw = Base64.getDecoder().decode(p)
+                val raw = Base64.decode(p, Base64.NO_WRAP)
                 if (raw[0].toInt() != VERSION) return null
                 EncryptedPayload(
                     nonce = raw.copyOfRange(1, 33),
