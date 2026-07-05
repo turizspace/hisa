@@ -9,6 +9,8 @@ import dagger.hilt.InstallIn
 import dagger.hilt.android.components.ViewModelComponent
 import dagger.hilt.android.scopes.ViewModelScoped
 import com.hisa.data.nostr.NostrClient
+import com.hisa.data.nostr.NostrSigningService
+import com.hisa.data.cache.MessageCacheStore
 import com.hisa.data.repository.MetadataRepository
 import com.hisa.data.repository.MessageRepository
 import com.hisa.data.storage.SecureStorage
@@ -24,8 +26,10 @@ object MessagesViewModelModule {
         messageRepository: MessageRepository,
         metadataRepository: MetadataRepository,
         secureStorage: SecureStorage,
-        subscriptionManager: com.hisa.data.nostr.SubscriptionManager
+        subscriptionManager: com.hisa.data.nostr.SubscriptionManager,
+        signingService: NostrSigningService,
+        messageCacheStore: MessageCacheStore
     ): MessagesViewModel {
-        return MessagesViewModel(nostrClient, messageRepository, metadataRepository, secureStorage, subscriptionManager)
+        return MessagesViewModel(nostrClient, messageRepository, metadataRepository, secureStorage, subscriptionManager, signingService, messageCacheStore)
     }
 }

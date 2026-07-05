@@ -1,6 +1,7 @@
 package com.hisa.di
 
 import com.hisa.data.nostr.blossom.BlossomClient
+import com.hisa.data.nostr.NostrSigningService
 import dagger.Module
 import dagger.Provides
 import dagger.hilt.InstallIn
@@ -17,5 +18,8 @@ object BlossomModule {
 
     @Provides
     @Singleton
-    fun provideBlossomClient(http: OkHttpClient): BlossomClient = BlossomClient(http = http)
+    fun provideBlossomClient(
+        http: OkHttpClient,
+        signingService: NostrSigningService
+    ): BlossomClient = BlossomClient(http = http, signingService = signingService)
 }

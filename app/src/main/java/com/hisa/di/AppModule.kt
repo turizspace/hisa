@@ -12,6 +12,7 @@ import dagger.hilt.android.qualifiers.ApplicationContext
 import dagger.hilt.components.SingletonComponent
 import javax.inject.Singleton
 import com.hisa.util.Constants
+import com.hisa.util.SecurePreferencesHelper
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -36,20 +37,14 @@ object AppModule {
     fun provideRelayUrls(@ApplicationContext context: Context): List<String> {
         // Use EncryptedSharedPreferences to load relays from user settings
         val prefs = try {
-            val masterKey = androidx.security.crypto.MasterKey.Builder(context)
-                .setKeyScheme(androidx.security.crypto.MasterKey.KeyScheme.AES256_GCM)
-                .build()
-            androidx.security.crypto.EncryptedSharedPreferences.create(
-                context,
-                "secure_prefs",
-                masterKey,
-                androidx.security.crypto.EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
-                androidx.security.crypto.EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
+            SecurePreferencesHelper.create(
+                context = context,
+                prefsName = SecurePreferencesHelper.AUTH_PREFS_NAME,
+                fallbackPrefsName = SecurePreferencesHelper.AUTH_PREFS_FALLBACK
             )
         } catch (e: Exception) {
-            // Clearer logging and fallback to regular SharedPreferences when EncryptedSharedPreferences isn't available
             android.util.Log.w("AppModule", "EncryptedSharedPreferences unavailable, falling back to regular SharedPreferences: ${e.localizedMessage}")
-            context.getSharedPreferences("secure_prefs_fallback", Context.MODE_PRIVATE)
+            context.getSharedPreferences(SecurePreferencesHelper.AUTH_PREFS_FALLBACK, Context.MODE_PRIVATE)
         }
 
         val relaysString = try {

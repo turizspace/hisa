@@ -1,8 +1,8 @@
 package com.hisa.data.storage
 
 import android.content.Context
-import androidx.security.crypto.EncryptedSharedPreferences
-import androidx.security.crypto.MasterKey
+import com.hisa.util.AuthPreferenceStore
+import com.hisa.util.SecurePreferencesHelper
 import dagger.hilt.android.qualifiers.ApplicationContext
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -16,27 +16,15 @@ class SecureStorage @Inject constructor(
     @ApplicationContext private val context: Context
 ) {
     private val prefs by lazy {
-        try {
-            val masterKey = MasterKey.Builder(context)
-                .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
-                .build()
-            EncryptedSharedPreferences.create(
-                context,
-                "secure_storage_prefs",
-                masterKey,
-                EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
-                EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
-            )
-        } catch (e: Exception) {
-            // If EncryptedSharedPreferences isn't available (e.g., unit tests), fall back to regular prefs
-            context.getSharedPreferences("secure_storage_fallback", Context.MODE_PRIVATE)
-        }
+        SecurePreferencesHelper.create(
+            context = context,
+            prefsName = SecurePreferencesHelper.SECURE_STORAGE_PREFS_NAME,
+            fallbackPrefsName = SecurePreferencesHelper.SECURE_STORAGE_FALLBACK
+        )
     }
 
     companion object {
         private const val KEY_X25519_PRIVATE = "x25519_private"
-        private const val AUTH_PREFS_NAME = "secure_prefs"
-        private const val AUTH_PREFS_FALLBACK = "secure_prefs_fallback"
         private const val KEY_EXTERNAL_SIGNER_PUBKEY = "external_signer_pubkey"
         private const val KEY_EXTERNAL_SIGNER_PACKAGE = "external_signer_package"
     }
@@ -53,26 +41,9 @@ class SecureStorage @Inject constructor(
     // Returns the bech32 nsec (e.g. "nsec1...") or null if not found.
     fun getNsec(): String? {
         return try {
-            // Try to open the same encrypted shared prefs name used in AuthViewModel
-            val masterKey = MasterKey.Builder(context)
-                .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
-                .build()
-            val authPrefs = EncryptedSharedPreferences.create(
-                context,
-                AUTH_PREFS_NAME,
-                masterKey,
-                EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
-                EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
-            )
-            authPrefs.getString("nsec", null)
+            AuthPreferenceStore.readNsec(context)
         } catch (e: Exception) {
-            // Fallback to the same fallback filename used elsewhere in the app
-            try {
-                val fallback = context.getSharedPreferences(AUTH_PREFS_FALLBACK, android.content.Context.MODE_PRIVATE)
-                fallback.getString("nsec", null)
-            } catch (ex: Exception) {
-                null
-            }
+            null
         }
     }
 
@@ -86,24 +57,13 @@ class SecureStorage @Inject constructor(
 
     private fun readAuthPref(key: String): String? {
         return try {
-            val masterKey = MasterKey.Builder(context)
-                .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
-                .build()
-            val authPrefs = EncryptedSharedPreferences.create(
-                context,
-                AUTH_PREFS_NAME,
-                masterKey,
-                EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
-                EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
-            )
-            authPrefs.getString(key, null)
-        } catch (e: Exception) {
-            try {
-                val fallback = context.getSharedPreferences(AUTH_PREFS_FALLBACK, android.content.Context.MODE_PRIVATE)
-                fallback.getString(key, null)
-            } catch (ex: Exception) {
-                null
+            when (key) {
+                KEY_EXTERNAL_SIGNER_PUBKEY -> AuthPreferenceStore.readExternalSignerPubkey(context)
+                KEY_EXTERNAL_SIGNER_PACKAGE -> AuthPreferenceStore.readExternalSignerPackage(context)
+                else -> null
             }
+        } catch (e: Exception) {
+            null
         }
     }
 
