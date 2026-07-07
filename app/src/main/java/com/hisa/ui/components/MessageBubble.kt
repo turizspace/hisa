@@ -83,85 +83,82 @@ private fun BubbleContent(
     maxBubbleWidth: androidx.compose.ui.unit.Dp
 ) {
     val bubbleShape = if (isOwnMessage) {
-        RoundedCornerShape(18.dp, 18.dp, 18.dp, 6.dp)
+        RoundedCornerShape(18.dp, 18.dp, 4.dp, 18.dp)
     } else {
-        RoundedCornerShape(18.dp, 18.dp, 6.dp, 18.dp)
+        RoundedCornerShape(18.dp, 18.dp, 18.dp, 4.dp)
     }
     val bubbleColor = if (isOwnMessage) {
-        MaterialTheme.colorScheme.primary.copy(alpha = 0.14f)
+        MaterialTheme.colorScheme.primary
     } else {
         MaterialTheme.colorScheme.surfaceVariant
     }
     val textColor = if (isOwnMessage) {
         MaterialTheme.colorScheme.onPrimary
     } else {
-        MaterialTheme.colorScheme.onSurface
+        MaterialTheme.colorScheme.onSurfaceVariant
     }
-    val metadataColor = textColor.copy(alpha = 0.68f)
 
     Column(
-        modifier = Modifier
-            .wrapContentWidth()
-            .widthIn(max = maxBubbleWidth)
-            .defaultMinSize(minHeight = 36.dp)
-            .clip(shape = bubbleShape)
-            .background(color = bubbleColor)
-            .border(
-                width = 1.dp,
-                color = if (isOwnMessage) {
-                    MaterialTheme.colorScheme.primary.copy(alpha = 0.18f)
-                } else {
-                    MaterialTheme.colorScheme.outline.copy(alpha = 0.16f)
-                },
-                shape = bubbleShape
-            )
-            .padding(horizontal = 14.dp, vertical = 10.dp)
+        modifier = Modifier.wrapContentWidth()
     ) {
-        when (message) {
-            is Message.TextMessage -> Text(
-                text = message.content,
-                style = MaterialTheme.typography.bodyMedium.copy(lineHeight = 20.sp),
-                color = textColor
-            )
-            is Message.FileMessage -> Text(
-                text = "📎 ${message.fileUrl}",
-                style = MaterialTheme.typography.bodyMedium.copy(lineHeight = 20.sp),
-                color = textColor
-            )
-            is Message.ReactionMessage -> Text(
-                text = "Reaction: ${reactionValueForUi(message.content)}",
-                style = MaterialTheme.typography.bodyMedium.copy(lineHeight = 20.sp),
-                color = textColor
-            )
-            else -> Text("")
+        Column(
+            modifier = Modifier
+                .wrapContentWidth()
+                .widthIn(max = maxBubbleWidth)
+                .defaultMinSize(minHeight = 36.dp)
+                .clip(shape = bubbleShape)
+                .background(color = bubbleColor)
+                .padding(horizontal = 14.dp, vertical = 10.dp)
+        ) {
+            when (message) {
+                is Message.TextMessage -> Text(
+                    text = message.content,
+                    style = MaterialTheme.typography.bodyMedium.copy(lineHeight = 20.sp),
+                    color = textColor
+                )
+                is Message.FileMessage -> Text(
+                    text = "📎 ${message.fileUrl}",
+                    style = MaterialTheme.typography.bodyMedium.copy(lineHeight = 20.sp),
+                    color = textColor
+                )
+                is Message.ReactionMessage -> Text(
+                    text = "Reaction: ${reactionValueForUi(message.content)}",
+                    style = MaterialTheme.typography.bodyMedium.copy(lineHeight = 20.sp),
+                    color = textColor
+                )
+                else -> Text("")
+            }
+
+            val replyToId = message.replyTo
+            if (replyToId != null) {
+                Spacer(modifier = Modifier.height(6.dp))
+                Text(
+                    text = "Reply to: ${replyToId.take(8)}...",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = textColor.copy(alpha = 0.75f),
+                    modifier = Modifier.align(if (isOwnMessage) Alignment.End else Alignment.Start)
+                )
+            }
         }
 
-        Spacer(modifier = Modifier.height(8.dp))
+        Spacer(modifier = Modifier.height(4.dp))
 
         Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = if (isOwnMessage) Arrangement.End else Arrangement.Start
+            modifier = Modifier
+                .wrapContentWidth()
+                .align(if (isOwnMessage) Alignment.End else Alignment.Start),
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+            verticalAlignment = Alignment.CenterVertically
         ) {
             Text(
                 text = SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date(message.createdAt * 1000)),
                 style = MaterialTheme.typography.labelSmall,
-                color = metadataColor
-            )
-        }
-
-        val replyToId = message.replyTo
-        if (replyToId != null) {
-            Spacer(modifier = Modifier.height(6.dp))
-            Text(
-                text = "Reply to: ${replyToId.take(8)}...",
-                style = MaterialTheme.typography.labelSmall,
-                color = metadataColor,
-                modifier = Modifier.align(if (isOwnMessage) Alignment.End else Alignment.Start)
+                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
             )
         }
 
         if (reactions.isNotEmpty()) {
-            Spacer(modifier = Modifier.height(8.dp))
+            Spacer(modifier = Modifier.height(6.dp))
             val reactionSummary = reactions
                 .groupBy { reactionValueForUi(it.content) }
                 .mapValues { (_, values) -> values.size }
@@ -169,7 +166,9 @@ private fun BubbleContent(
                 .sortedByDescending { (_, count) -> count }
 
             Row(
-                modifier = Modifier.align(if (isOwnMessage) Alignment.End else Alignment.Start),
+                modifier = Modifier
+                    .wrapContentWidth()
+                    .align(if (isOwnMessage) Alignment.End else Alignment.Start),
                 horizontalArrangement = Arrangement.spacedBy(6.dp)
             ) {
                 reactionSummary.forEach { (label, count) ->
