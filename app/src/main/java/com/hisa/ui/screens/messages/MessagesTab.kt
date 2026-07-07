@@ -108,7 +108,8 @@ fun MessagesTab(
 
         when (selectedTab) {
             0 -> {
-                if (isLoading) {
+                // Show shimmer only on initial load when cache is empty
+                if (isLoading && conversations.isEmpty()) {
                     MessagesSkeletonLoader(
                         modifier = Modifier.fillMaxSize(),
                         itemCount = 6
@@ -229,12 +230,6 @@ fun MessagesTab(
                             trailingContent = {
                                 if (isUnread) {
                                     Badge { Text("New") }
-                                } else if (order.isRead) {
-                                    Text(
-                                        text = "Read",
-                                        style = MaterialTheme.typography.labelSmall,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.72f)
-                                    )
                                 }
                             },
                             leadingContent = {

@@ -179,6 +179,7 @@ fun FeedTab(
         }
     }
 
+    // Show shimmer only on initial load when both cache is empty and we're loading
     if (showLoading && feedUiState.services.isEmpty() && stalls.isEmpty()) {
         FeedSkeletonLoader(
             modifier = Modifier.fillMaxSize(),
@@ -188,13 +189,6 @@ fun FeedTab(
     }
 
     when {
-        showingDiscovery && feedUiState.services.isEmpty() && stalls.isEmpty() -> {
-            EmptyFeedState(
-                modifier = Modifier.fillMaxSize(),
-                onRefresh = { feedViewModel.refreshFeed() }
-            )
-        }
-
         showingDiscovery -> {
             LazyColumn(
                 state = listState,
@@ -222,11 +216,11 @@ fun FeedTab(
                 }
 
                 item {
-                    if (filteredServices.isEmpty()) {
+                    if (filteredServices.isEmpty() && !feedUiState.isLoading) {
                         PreviewSectionEmptyState(
                             text = "No services yet. Pull to refresh or check back soon."
                         )
-                    } else {
+                    } else if (filteredServices.isNotEmpty()) {
                         LazyRow(
                             contentPadding = PaddingValues(horizontal = 12.dp),
                             horizontalArrangement = Arrangement.spacedBy(12.dp)
@@ -264,11 +258,11 @@ fun FeedTab(
                 }
 
                 item {
-                    if (filteredStalls.isEmpty()) {
+                    if (filteredStalls.isEmpty() && !feedUiState.isLoading) {
                         PreviewSectionEmptyState(
                             text = "No stalls yet. New shops will show up here."
                         )
-                    } else {
+                    } else if (filteredStalls.isNotEmpty()) {
                         LazyRow(
                             contentPadding = PaddingValues(horizontal = 12.dp),
                             horizontalArrangement = Arrangement.spacedBy(12.dp)
