@@ -1,7 +1,7 @@
 package com.hisa.util
 
 import android.util.Base64
-import org.json.JSONArray
+import com.hisa.data.nostr.NostrCanonicalJson
 import org.json.JSONObject
 import java.security.MessageDigest
 
@@ -26,29 +26,7 @@ object CryptoUtils {
         return try {
             val event = JSONObject(eventJson)
             
-            // Build canonical event structure per NIP-01
-            val pubkey = event.getString("pubkey")
-            val createdAt = event.getLong("created_at")
-            val kind = event.getInt("kind")
-            val tags = event.getJSONArray("tags")
-            val content = event.getString("content")
-            
-            // Reconstruct as canonical array to match signer's computation
-            val canonicalArray = JSONArray().apply {
-                put(0)
-                put(pubkey)
-                put(createdAt)
-                put(kind)
-                put(tags)
-                put(content)
-            }
-            
-            val canonicalJson = canonicalArray.toString()
-            val hash = MessageDigest.getInstance("SHA-256")
-                .digest(canonicalJson.toByteArray(Charsets.UTF_8))
-            
-            // Hex encode
-            hash.joinToString("") { "%02x".format(it) }
+            NostrCanonicalJson.computeEventId(event)
         } catch (e: Exception) {
             throw IllegalArgumentException("Failed to calculate event ID: ${e.message}")
         }
