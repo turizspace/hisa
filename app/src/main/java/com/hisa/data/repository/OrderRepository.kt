@@ -1,5 +1,6 @@
 package com.hisa.data.repository
 
+import android.content.Context
 import com.hisa.data.model.Order
 import com.hisa.data.model.OrderItem
 import com.hisa.data.nostr.NostrClient
@@ -7,7 +8,9 @@ import com.hisa.data.nostr.NostrEvent
 import com.hisa.data.nostr.NostrSigningService
 import com.hisa.data.nostr.SubscriptionManager
 import com.hisa.data.nostr.toNostrEvent
+import com.hisa.util.SecurePreferencesHelper
 import com.hisa.util.normalizeNostrPubkey
+import dagger.hilt.android.qualifiers.ApplicationContext
 import org.json.JSONArray
 import org.json.JSONObject
 import java.util.UUID
@@ -30,7 +33,8 @@ class OrderRepository @Inject constructor(
     private val metadataRepository: MetadataRepository,
     private val profileRepository: ProfileRepository,
     private val signingService: NostrSigningService,
-    private val appScope: CoroutineScope
+    private val appScope: CoroutineScope,
+    @ApplicationContext private val context: Context
 ) {
     companion object {
         private const val EMIT_DEBOUNCE_MS = 120L
@@ -64,6 +68,7 @@ class OrderRepository @Inject constructor(
     private var subscriptionListenerId: String? = null
     private val ordersByEventId = ConcurrentHashMap<String, Order>()
     private val pendingProfilePubkeys = ConcurrentHashMap.newKeySet<String>()
+    private val readStateStoresByUser = ConcurrentHashMap<String, OrderReadStateStore>()
     private val emitLock = Any()
 
     @Volatile
@@ -72,6 +77,7 @@ class OrderRepository @Inject constructor(
     @Volatile
     private var started = false
     private var currentUserPubkey: String? = null
+    private var activeReadStateStore: OrderReadStateStore? = null
 
     fun ensureStarted(userPubkey: String) {
         val normalizedPubkey = userPubkey.trim().lowercase()
@@ -82,6 +88,9 @@ class OrderRepository @Inject constructor(
         clearAllOrders()
 
         currentUserPubkey = normalizedPubkey
+        activeReadStateStore = readStateStoresByUser.computeIfAbsent(normalizedPubkey) {
+            loadReadStateStore(normalizedPubkey)
+        }
         started = true
 
         nostrClient.connect()
@@ -109,6 +118,7 @@ class OrderRepository @Inject constructor(
         subscriptionListenerId?.let { subscriptionManager.unsubscribe(it) }
         subscriptionListenerId = null
         started = false
+        activeReadStateStore = null
     }
 
     private fun getProfileMetadata(pubkey: String): Pair<String, String>? {
@@ -124,6 +134,8 @@ class OrderRepository @Inject constructor(
     }
 
     fun markAsRead(orderId: String) {
+        activeReadStateStore?.markRead(orderId)
+        persistReadState(currentUserPubkey)
         ordersByEventId.replaceAll { _, order ->
             if (order.orderId == orderId) order.copy(isRead = true) else order
         }
@@ -137,6 +149,8 @@ class OrderRepository @Inject constructor(
 
     fun markMultipleAsRead(orderIds: List<String>) {
         val ids = orderIds.toSet()
+        activeReadStateStore?.markRead(ids)
+        persistReadState(currentUserPubkey)
         ordersByEventId.replaceAll { _, order ->
             if (order.orderId in ids) order.copy(isRead = true) else order
         }
@@ -220,7 +234,8 @@ class OrderRepository @Inject constructor(
     private fun upsertOrder(order: Order) {
         val existing = ordersByEventId[order.eventId]
         if (existing == null || order.createdAt >= existing.createdAt) {
-            ordersByEventId[order.eventId] = order.copy(isRead = existing?.isRead ?: order.isRead)
+            val resolvedReadState = existing?.isRead ?: activeReadStateStore?.isRead(order.orderId) ?: order.isRead
+            ordersByEventId[order.eventId] = order.copy(isRead = resolvedReadState)
             scheduleEmit()
         }
     }
@@ -256,6 +271,27 @@ class OrderRepository @Inject constructor(
         _unreadCount.value = orders.count { order ->
             !order.isRead && (userPubkey.isNullOrBlank() || !order.isBuyer(userPubkey))
         }
+    }
+
+    private fun loadReadStateStore(pubkey: String): OrderReadStateStore {
+        val prefs = SecurePreferencesHelper.create(
+            context = context,
+            prefsName = "order_read_state_prefs",
+            fallbackPrefsName = "order_read_state_prefs_fallback"
+        )
+        val ids = prefs.getStringSet("read_order_ids:$pubkey", emptySet()) ?: emptySet()
+        return OrderReadStateStore().apply { replaceWith(ids) }
+    }
+
+    private fun persistReadState(pubkey: String?) {
+        val targetPubkey = pubkey?.trim()?.takeIf { it.isNotBlank() } ?: return
+        val store = readStateStoresByUser[targetPubkey] ?: activeReadStateStore ?: return
+        val prefs = SecurePreferencesHelper.create(
+            context = context,
+            prefsName = "order_read_state_prefs",
+            fallbackPrefsName = "order_read_state_prefs_fallback"
+        )
+        prefs.edit().putStringSet("read_order_ids:$targetPubkey", store.snapshot()).apply()
     }
 
     private fun parseOrder(event: NostrEvent): Order? {

@@ -27,6 +27,7 @@ import java.math.BigInteger
 import com.hisa.data.nostr.NostrEventSigner
 import com.hisa.data.nostr.NostrSigningService
 import com.hisa.data.nostr.EventVerifier
+import com.hisa.data.nostr.NostrCanonicalJson
 import com.hisa.data.nostr.crypto.getNip44
 
 
@@ -40,6 +41,7 @@ import com.hisa.data.nostr.crypto.getNip44
 object MessageRepository {
     private val secureRandom = SecureRandom()
     private val nip44 = getNip44()
+    private const val LOCAL_RUMOR_EVENT_KEY = "__local_rumor_event"
     
     private fun generateRandomTimestamp(maxAgeSeconds: Int): Long {
         val now = System.currentTimeMillis() / 1000
@@ -115,6 +117,31 @@ object MessageRepository {
     }
 
     /**
+     * Implements NIP-04 message encryption (deprecated, uses AES-256-CBC)
+     * Format: "base64(encryptedText)?iv=base64(initVector)"
+     */
+    @RequiresApi(Build.VERSION_CODES.O)
+    fun nip04Encrypt(
+        plaintext: String,
+        senderPrivateKey: ByteArray,
+        recipientPubkey: String
+    ): String {
+        require(plaintext.isNotBlank()) { "NIP-04 plaintext must not be blank" }
+        require(senderPrivateKey.size == 32) { "Sender private key must be 32 bytes" }
+        require(recipientPubkey.matches(Regex("[0-9a-fA-F]{64}"))) { "Invalid recipient pubkey" }
+
+        val sharedSecret = calculateSharedSecret(senderPrivateKey, recipientPubkey)
+        val key = SecretKeySpec(sharedSecret, 0, 32, "AES")
+        val iv = ByteArray(16).also { secureRandom.nextBytes(it) }
+        val cipher = Cipher.getInstance("AES/CBC/PKCS5Padding")
+        cipher.init(Cipher.ENCRYPT_MODE, key, IvParameterSpec(iv))
+        val ciphertext = cipher.doFinal(plaintext.toByteArray(Charsets.UTF_8))
+        val encodedCiphertext = Base64.getEncoder().encodeToString(ciphertext)
+        val encodedIv = Base64.getEncoder().encodeToString(iv)
+        return "$encodedCiphertext?iv=$encodedIv"
+    }
+
+    /**
      * Implements NIP-04 message decryption (deprecated, uses AES-256-CBC)
      * Format: "base64(encryptedText)?iv=base64(initVector)"
      */
@@ -186,13 +213,11 @@ object MessageRepository {
 
     // Helper function to convert hex string to byte array
     private fun hexToBytes(hex: String): ByteArray {
-        // Strict: expect exactly 64 hex chars (32 bytes)
         val cleanHex = hex.replace("0x", "").trim().lowercase()
-        if (!cleanHex.matches(Regex("[0-9a-f]{64}"))) {
-            throw IllegalArgumentException("Invalid 32-byte hex string (expected 64 hex chars)")
-        }
+        require(cleanHex.length % 2 == 0) { "Hex string must contain an even number of characters" }
+        require(cleanHex.all { it.isDigit() || it in 'a'..'f' }) { "Hex string contains invalid characters" }
 
-        return ByteArray(32).also { bytes ->
+        return ByteArray(cleanHex.length / 2).also { bytes ->
             for (i in bytes.indices) {
                 val j = i * 2
                 bytes[i] = cleanHex.substring(j, j + 2).toInt(16).toByte()
@@ -237,10 +262,17 @@ object MessageRepository {
         require(privateKey.size == 32) { "Private key must be 32 bytes" }
         val privScalar = BigInteger(1, privateKey)
         require(privScalar >= BigInteger.ONE && privScalar < SECP256K1_N) { "Invalid secp256k1 private key scalar" }
+
         val cleanPub = normalizeToXOnlyHex(otherPubkeyHex)
             ?: throw IllegalArgumentException("Invalid or unsupported pubkey format: $otherPubkeyHex")
-        val compressed = hexToBytes("02$cleanPub")
-        val otherPoint: ECPoint = ECKey.CURVE.curve.decodePoint(compressed)
+
+        val pointBytes = if (cleanPub.length == 64) {
+            hexToBytes("02$cleanPub")
+        } else {
+            hexToBytes(cleanPub)
+        }
+
+        val otherPoint: ECPoint = ECKey.CURVE.curve.decodePoint(pointBytes)
         require(!otherPoint.isInfinity) { "Invalid secp256k1 public key point" }
         val sharedPoint = otherPoint.multiply(privScalar).normalize()
         return to32Bytes(sharedPoint.xCoord.encoded)
@@ -592,25 +624,14 @@ object MessageRepository {
      * This ensures decrypted inner events have a stable, predictable id so UI can correlate them.
      */
     private fun computeEventIdCanonical(pubkey: String, createdAt: Long, kind: Int, tags: List<List<String>>, content: String): String {
-        val tagsJsonArray = JSONArray().apply { tags.forEach { inner -> put(JSONArray(inner)) } }
-        val arrElement = JSONArray().apply {
-            put(0)
-            put(pubkey)
-            put(createdAt)
-            put(kind)
-            put(tagsJsonArray)
-            put(content)
-        }
-        val serialized = arrElement.toString()
-        val hash = MessageDigest.getInstance("SHA-256").digest(serialized.toByteArray(Charsets.UTF_8))
-        return hash.joinToString("") { "%02x".format(it) }
+        return NostrCanonicalJson.computeEventId(pubkey, createdAt, kind, tags, content)
     }
 
     /**
      * Prepare a gift-wrapped message using NIP-59.
      */
     @RequiresApi(Build.VERSION_CODES.O)
-    fun prepareGiftWrappedMessage(
+    suspend fun prepareGiftWrappedMessage(
         senderPrivateKey: ByteArray,
         recipientPubkey: String,
         content: String,
@@ -635,27 +656,14 @@ object MessageRepository {
         val sealCreatedAt = generateRandomTimestamp(twoDaysInSeconds)
         // NIP-59: seal (kind 13) MUST have empty tags.
         val sealTags = emptyList<List<String>>()
-        val sealId = computeEventIdCanonical(senderPubkey, sealCreatedAt, 13, sealTags, sealContent)
-        val sealHash = MessageDigest.getInstance("SHA-256").digest(
-            JSONArray().apply {
-                put(0)
-                put(senderPubkey)
-                put(sealCreatedAt)
-                put(13)
-                put(JSONArray().apply { sealTags.forEach { put(JSONArray(it)) } })
-                put(sealContent)
-            }.toString().toByteArray(Charsets.UTF_8)
+        val sealEvent = NostrEventSigner.signEvent(
+            kind = 13,
+            content = sealContent,
+            tags = sealTags,
+            pubkey = senderPubkey,
+            privKey = senderPrivateKey,
+            createdAt = sealCreatedAt
         )
-        val sealSig = bytesToHex(schnorrSignBIP340(sealHash, senderPrivateKey))
-        val sealEvent = JSONObject().apply {
-            put("id", sealId)
-            put("pubkey", senderPubkey)
-            put("created_at", sealCreatedAt)
-            put("kind", 13)
-            put("tags", JSONArray())
-            put("content", sealContent)
-            put("sig", sealSig)
-        }
 
         // Gift wrap (kind:1059) signed by one-time key; content is encrypted seal.
         val ephemeralKey = ECKey()
@@ -664,27 +672,60 @@ object MessageRepository {
         val wrapCreatedAt = generateRandomTimestamp(twoDaysInSeconds)
         val wrapContent = nip44Encrypt(sealEvent.toString(), ephemeralPriv, recipientPubkey.lowercase())
         val wrapTags = listOf(listOf("p", recipientPubkey.lowercase()))
-        val wrapId = computeEventIdCanonical(ephemeralPub, wrapCreatedAt, 1059, wrapTags, wrapContent)
-        val wrapHash = MessageDigest.getInstance("SHA-256").digest(
-            JSONArray().apply {
-                put(0)
-                put(ephemeralPub)
-                put(wrapCreatedAt)
-                put(1059)
-                put(JSONArray().apply { wrapTags.forEach { put(JSONArray(it)) } })
-                put(wrapContent)
-            }.toString().toByteArray(Charsets.UTF_8)
+        val wrapEvent = NostrEventSigner.signEvent(
+            kind = 1059,
+            content = wrapContent,
+            tags = wrapTags,
+            pubkey = ephemeralPub,
+            privKey = ephemeralPriv,
+            createdAt = wrapCreatedAt
         )
-        val wrapSig = bytesToHex(schnorrSignBIP340(wrapHash, ephemeralPriv))
 
-        return JSONObject().apply {
-            put("id", wrapId)
-            put("pubkey", ephemeralPub)
-            put("created_at", wrapCreatedAt)
-            put("kind", 1059)
-            put("tags", JSONArray().apply { wrapTags.forEach { put(JSONArray(it)) } })
-            put("content", wrapContent)
-            put("sig", wrapSig)
+        val wrapVerification = EventVerifier.verifyEvent(wrapEvent.toString())
+        if (!wrapVerification.idMatches || !wrapVerification.signatureValid) {
+            android.util.Log.w(
+                "MessageRepository",
+                "Local gift-wrap event verification failed: idMatches=${wrapVerification.idMatches} sigValid=${wrapVerification.signatureValid} computed=${wrapVerification.computedId}"
+            )
+        }
+
+        return wrapEvent.apply {
+            put(LOCAL_RUMOR_EVENT_KEY, rumor.toString())
+        }
+    }
+
+    /**
+     * Prepare a gift-wrapped message for either a local nsec or an external signer session.
+     * This is the single entry point used by the UI send flow so both auth modes share one implementation.
+     */
+    @RequiresApi(Build.VERSION_CODES.O)
+    suspend fun prepareGiftWrappedMessageForSigningContext(
+        signingService: NostrSigningService,
+        signingContext: NostrSigningService.SigningContext,
+        recipientPubkey: String,
+        content: String,
+        kind: Int,
+        tags: List<List<String>>,
+        externalEncryptor: suspend (plaintext: String, recipientPubkey: String) -> String
+    ): JSONObject {
+        return when {
+            signingContext.localPrivateKeyBytes != null -> prepareGiftWrappedMessage(
+                senderPrivateKey = signingContext.localPrivateKeyBytes,
+                recipientPubkey = recipientPubkey,
+                content = content,
+                kind = kind,
+                tags = tags
+            )
+            signingContext.hasExternalSigner -> prepareGiftWrappedMessageExternal(
+                signingService = signingService,
+                signingContext = signingContext,
+                recipientPubkey = recipientPubkey,
+                content = content,
+                kind = kind,
+                tags = tags,
+                externalEncryptor = externalEncryptor
+            )
+            else -> throw IllegalStateException("No signing key available. Import an nsec or connect an external signer.")
         }
     }
 
@@ -738,16 +779,7 @@ object MessageRepository {
         val wrapContent = nip44Encrypt(sealEvent.toString(), ephemeralPriv, recipient)
         val wrapTags = listOf(listOf("p", recipient))
         val wrapId = computeEventIdCanonical(ephemeralPub, wrapCreatedAt, 1059, wrapTags, wrapContent)
-        val wrapHash = MessageDigest.getInstance("SHA-256").digest(
-            JSONArray().apply {
-                put(0)
-                put(ephemeralPub)
-                put(wrapCreatedAt)
-                put(1059)
-                put(JSONArray().apply { wrapTags.forEach { put(JSONArray(it)) } })
-                put(wrapContent)
-            }.toString().toByteArray(Charsets.UTF_8)
-        )
+        val wrapHash = NostrCanonicalJson.computeEventHash(ephemeralPub, wrapCreatedAt, 1059, wrapTags, wrapContent)
         val wrapSig = bytesToHex(schnorrSignBIP340(wrapHash, ephemeralPriv))
 
         return JSONObject().apply {
@@ -758,6 +790,46 @@ object MessageRepository {
             put("tags", JSONArray().apply { wrapTags.forEach { put(JSONArray(it)) } })
             put("content", wrapContent)
             put("sig", wrapSig)
+            put(LOCAL_RUMOR_EVENT_KEY, rumor.toString())
+        }
+    }
+
+    fun localRumorEventFromGiftWrap(wrapEvent: JSONObject): JSONObject? {
+        val raw = wrapEvent.optString(LOCAL_RUMOR_EVENT_KEY).takeIf { it.isNotBlank() } ?: return null
+        return try {
+            JSONObject(raw)
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    /**
+     * Decrypt a gift-wrapped message using either the local key material or an external signer.
+     */
+    @RequiresApi(Build.VERSION_CODES.O)
+    suspend fun decryptGiftWrappedMessageForSigningContext(
+        event: JSONObject,
+        signingContext: NostrSigningService.SigningContext,
+        externalDecryptor: (suspend (ciphertext: String, senderPubkey: String) -> String)? = null,
+        maxSenderCandidates: Int? = null,
+        senderPubkeyHints: List<String> = emptyList()
+    ): JSONObject? {
+        return when {
+            signingContext.localPrivateKeyBytes != null -> decryptGiftWrappedMessage(
+                event = event,
+                recipientPrivateKey = signingContext.localPrivateKeyBytes,
+                externalDecryptor = null,
+                maxSenderCandidates = maxSenderCandidates,
+                senderPubkeyHints = senderPubkeyHints
+            )
+            signingContext.hasExternalSigner -> decryptGiftWrappedMessage(
+                event = event,
+                recipientPrivateKey = null,
+                externalDecryptor = externalDecryptor,
+                maxSenderCandidates = maxSenderCandidates,
+                senderPubkeyHints = senderPubkeyHints
+            )
+            else -> null
         }
     }
 
@@ -1245,14 +1317,13 @@ object MessageRepository {
         tags: JSONArray,
         content: String
     ): String {
-        val arr = JSONArray()
-        arr.put(0)
-        arr.put(pubkey)
-        arr.put(createdAt)
-        arr.put(kind)
-        arr.put(tags)
-        arr.put(content)
-        return arr.toString()
+        return NostrCanonicalJson.serializeEventForId(
+            pubkey = pubkey,
+            createdAt = createdAt,
+            kind = kind,
+            tags = NostrCanonicalJson.tagsFromJsonArray(tags),
+            content = content
+        )
     }
 
     /**

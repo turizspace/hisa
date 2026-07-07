@@ -4,10 +4,12 @@ import android.content.Context
 import com.hisa.data.model.ServiceListing
 import com.hisa.util.SecurePreferencesHelper
 import dagger.hilt.android.qualifiers.ApplicationContext
+import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import javax.inject.Inject
 import javax.inject.Singleton
+import timber.log.Timber
 
 @Singleton
 class FeedCacheStore @Inject constructor(
@@ -22,15 +24,37 @@ class FeedCacheStore @Inject constructor(
     fun readServices(): List<ServiceListing> {
         val json = sharedPreferences.getString(KEY_SERVICES, null) ?: return emptyList()
         return runCatching {
-            Json.decodeFromString<List<ServiceListing>>(json)
+            Json.decodeFromString<List<CachedServiceListing>>(json)
+                .map { cached ->
+                    ServiceListing(
+                        eventId = cached.eventId,
+                        title = cached.title,
+                        summary = cached.summary,
+                        content = cached.content,
+                        price = cached.price,
+                        tags = cached.tags,
+                        pubkey = cached.pubkey,
+                        rawTags = emptyList(),
+                        rawEvent = null,
+                        createdAt = cached.createdAt
+                    )
+                }
         }.getOrDefault(emptyList())
     }
 
     fun writeServices(services: List<ServiceListing>) {
-        val json = Json.encodeToString(services)
-        sharedPreferences.edit()
-            .putString(KEY_SERVICES, json)
-            .apply()
+        val sanitized = services
+            .take(MAX_CACHED_SERVICES)
+            .map { it.toCachedService() }
+
+        runCatching {
+            val json = Json.encodeToString(sanitized)
+            sharedPreferences.edit()
+                .putString(KEY_SERVICES, json)
+                .apply()
+        }.onFailure { error ->
+            Timber.w(error, "Failed to cache feed services")
+        }
     }
 
     fun clear() {
@@ -39,5 +63,31 @@ class FeedCacheStore @Inject constructor(
 
     companion object {
         private const val KEY_SERVICES = "services"
+        private const val MAX_CACHED_SERVICES = 100
+    }
+
+    @Serializable
+    private data class CachedServiceListing(
+        val eventId: String,
+        val title: String,
+        val summary: String,
+        val content: String?,
+        val price: String,
+        val tags: List<String>,
+        val pubkey: String,
+        val createdAt: Long
+    )
+
+    private fun ServiceListing.toCachedService(): CachedServiceListing {
+        return CachedServiceListing(
+            eventId = eventId,
+            title = title.take(240),
+            summary = summary.take(2000),
+            content = content?.take(4000),
+            price = price.take(120),
+            tags = tags.take(20),
+            pubkey = pubkey,
+            createdAt = createdAt
+        )
     }
 }
