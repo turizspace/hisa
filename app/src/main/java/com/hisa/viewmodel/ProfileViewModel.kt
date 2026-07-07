@@ -7,7 +7,6 @@ import com.hisa.data.cache.ProfileCache
 import com.hisa.data.model.Metadata
 import com.hisa.data.nostr.NostrClient
 import com.hisa.data.nostr.NostrSigningService
-import com.hisa.data.nostr.toNostrEvent
 import com.hisa.util.normalizeNostrPubkey
 import dagger.hilt.android.lifecycle.HiltViewModel
 import javax.inject.Inject
@@ -29,7 +28,7 @@ class ProfileViewModel @Inject constructor(
 ) : ViewModel() {
     private val pubkey: String = requireNotNull(savedStateHandle.get<String>("pubkey")) {
         "pubkey parameter is required"
-    }
+    }.let { normalizeNostrPubkey(it) ?: it }
 
     // Store all kind:0 metadata events for the pubkey
     private val _allMetadata = MutableStateFlow<List<Metadata>>(emptyList())
@@ -44,6 +43,7 @@ class ProfileViewModel @Inject constructor(
 
     sealed class SaveStatus {
         object Idle : SaveStatus()
+        object Saving : SaveStatus()
         object Success : SaveStatus()
         data class Error(val message: String) : SaveStatus()
     }
@@ -121,39 +121,48 @@ class ProfileViewModel @Inject constructor(
         }
     }
 
-    fun updateMetadata(metadata: Metadata, privateKeyHex: String, pubkey: String) {
-        _metadata.value = metadata
-        val newHistory = _allMetadata.value + metadata
-        _allMetadata.value = newHistory
-        
-        // Update cache
-        profileCache.cacheProfile(pubkey, metadata)
-        profileCache.cacheProfileHistory(pubkey, newHistory)
-        
-        publishMetadata(metadata, privateKeyHex, pubkey)
-    }
-
-    private fun publishMetadata(meta: Metadata, privateKeyHex: String, pubkey: String) {
+    fun updateMetadata(
+        metadata: Metadata,
+        privateKeyHex: String?,
+        pubkey: String,
+        externalSignerPubkey: String? = null,
+        externalSignerPackage: String? = null
+    ) {
         viewModelScope.launch {
+            _saveStatus.value = SaveStatus.Saving
             try {
-                val content = Json.encodeToString(meta)
+                val targetPubkey = normalizeNostrPubkey(pubkey)
+                    ?: normalizeNostrPubkey(this@ProfileViewModel.pubkey)
+                    ?: throw IllegalArgumentException("Invalid profile pubkey")
                 val signingContext = signingService.resolveSigningContext(
-                    pubkeyHint = pubkey,
-                    privateKeyHexHint = privateKeyHex
+                    pubkeyHint = targetPubkey,
+                    privateKeyHexHint = privateKeyHex,
+                    externalSignerPubkeyHint = externalSignerPubkey,
+                    externalSignerPackageHint = externalSignerPackage
                 )
                 val signerPubkey = signingContext.requirePubkey()
-                val targetPubkey = normalizeNostrPubkey(pubkey)
-                if (!targetPubkey.isNullOrBlank() && targetPubkey != signerPubkey) {
+                if (targetPubkey != signerPubkey) {
                     error("Active signer does not match this profile")
                 }
-                val eventJson = signingService.signEvent(
+
+                val content = Json.encodeToString(metadata)
+                signingService.signAndPublish(
+                    nostrClient = nostrClient,
                     signingContext = signingContext,
                     kind = 0,
                     content = content,
                     tags = emptyList()
                 )
-                nostrClient.connect()
-                nostrClient.publishEvent(eventJson.toNostrEvent())
+
+                _metadata.value = metadata
+                val newHistory = if (_allMetadata.value.lastOrNull() == metadata) {
+                    _allMetadata.value
+                } else {
+                    _allMetadata.value + metadata
+                }
+                _allMetadata.value = newHistory
+                profileCache.cacheProfile(targetPubkey, metadata)
+                profileCache.cacheProfileHistory(targetPubkey, newHistory)
                 _saveStatus.value = SaveStatus.Success
             } catch (e: Exception) {
                 _saveStatus.value = SaveStatus.Error("Failed to save: ${e.localizedMessage}")

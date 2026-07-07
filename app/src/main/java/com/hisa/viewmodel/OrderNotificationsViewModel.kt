@@ -145,6 +145,8 @@ class OrderNotificationsViewModel @Inject constructor(
 
     override fun onCleared() {
         super.onCleared()
-        stopListeningForOrders()
+        // OrderRepository is a singleton shared by the Messages tab, order drawer,
+        // and order conversation screen. A route-scoped ViewModel being cleared
+        // during navigation must not clear the shared order list.
     }
 }

@@ -334,6 +334,7 @@ class MessagesViewModel @Inject constructor(
 
     private fun restoreCachedMessages() {
         val cached = messageCacheStore.readMessages()
+            .filter { message -> !message.id.startsWith("temp-") }
         if (cached.isNotEmpty()) {
             messagesById.clear()
             cached.forEach { message ->
@@ -557,9 +558,9 @@ class MessagesViewModel @Inject constructor(
             }
             val innerEvent = authContext.localPrivateKeyBytes?.let { recipientPrivateKeyBytes ->
                 timber.log.Timber.d("Using local nsec key for NIP-44 decrypt")
-                messageRepository.decryptGiftWrappedMessage(
+                messageRepository.decryptGiftWrappedMessageForSigningContext(
                     event = wrapEvent,
-                    recipientPrivateKey = recipientPrivateKeyBytes,
+                    signingContext = authContext,
                     senderPubkeyHints = senderHints
                 )
             } ?: run {
@@ -584,9 +585,9 @@ class MessagesViewModel @Inject constructor(
                 // many candidate public keys. Prefer hinted candidates and limit attempts
                 // so the launcher isn't spammed with multiple decrypt prompts.
                 try {
-                    messageRepository.decryptGiftWrappedMessage(
+                    messageRepository.decryptGiftWrappedMessageForSigningContext(
                         event = wrapEvent,
-                        recipientPrivateKey = null,
+                        signingContext = authContext,
                         externalDecryptor = { ciphertext, senderPubkey ->
                             com.hisa.data.nostr.ExternalSignerManager.nip44Decrypt(ciphertext, senderPubkey)
                         },
@@ -667,7 +668,6 @@ class MessagesViewModel @Inject constructor(
             val incomingForMe = cleanedRecipients.any { it.equals(cleanedUserPubkey, true) }
             val senderLooksWrapperLike =
                 cleanedPub.isBlank() ||
-                cleanedPub.equals(cleanedUserPubkey, true) ||
                 cleanedPub.equals(cleanedOuter, true)
 
             val candidateExpected = if (cleanedExpected.matches(Regex("[0-9a-f]{64}", RegexOption.IGNORE_CASE))) cleanedExpected else ""
@@ -1221,7 +1221,7 @@ class MessagesViewModel @Inject constructor(
         recipientPubkey: String,
         encryptionPrivateKeyBytes: ByteArray?,
         senderSigningPubkey: String
-    ) {
+    ): Message? {
         val innerKind = innerMessage.optInt("kind", 14)
         val innerContent = innerMessage.optString("content", "")
         val innerTags = innerMessage.optJSONArray("tags")?.let { arr ->
@@ -1236,20 +1236,11 @@ class MessagesViewModel @Inject constructor(
         } ?: listOf(listOf("p", recipientPubkey))
 
         // Use the MessageRepository to prepare the encrypted message
-        val wrappedEvent = if (encryptionPrivateKeyBytes != null) {
-            messageRepository.prepareGiftWrappedMessage(
-                senderPrivateKey = encryptionPrivateKeyBytes,
-                recipientPubkey = recipientPubkey,
-                content = innerContent,
-                kind = innerKind,
-                tags = innerTags
-            )
+        val authCtx = resolveAuthContext(refreshOnce = false)
+        val wrappedEvent = if (!authCtx.hasExternalSigner && encryptionPrivateKeyBytes == null) {
+            throw IllegalStateException("No signing key available. Import an nsec or connect an external signer.")
         } else {
-            if (!signingService.hasExternalSignerTransport()) {
-                throw IllegalStateException("External signer is not attached")
-            }
-            val authCtx = resolveAuthContext(refreshOnce = false)
-            messageRepository.prepareGiftWrappedMessageExternal(
+            messageRepository.prepareGiftWrappedMessageForSigningContext(
                 signingService = signingService,
                 signingContext = authCtx,
                 recipientPubkey = recipientPubkey,
@@ -1262,6 +1253,15 @@ class MessagesViewModel @Inject constructor(
             )
         }
         publishGiftWrappedEvent(wrappedEvent)
+        val localRumor = MessageRepository.localRumorEventFromGiftWrap(wrappedEvent) ?: return null
+        return MessageRepository.parseMessage(localRumor.toString())?.let { parsed ->
+            normalizeMessage(
+                message = parsed,
+                outerPubkey = wrappedEvent.optString("pubkey"),
+                resolvedSenderPubkey = senderSigningPubkey,
+                expectedOtherPubkey = recipientPubkey
+            )
+        }
     }
 
     private fun resolveSenderSigningPubkey(signingPrivateKeyBytes: ByteArray?): String {
@@ -1355,29 +1355,22 @@ class MessagesViewModel @Inject constructor(
                 // Create the inner kind:14 message event
                 val innerMessage = createInnerMessageEvent(cleanRecipientPubkey, content, subject, replyTo)
                 
-                // Add to local state immediately for UI responsiveness. Use the
-                // unsigned rumor id so the sender copy can reconcile without a duplicate.
-                val optimisticId = innerMessage.optString("id").ifBlank { "temp-${System.currentTimeMillis()}" }
-                val newMessage = Message.TextMessage(
-                    id = optimisticId,
-                    pubkey = senderSigningPubkey,
-                    recipientPubkeys = listOf(cleanRecipientPubkey),
-                    content = content,
-                    createdAt = innerMessage.optLong("created_at", System.currentTimeMillis() / 1000),
-                    subject = subject,
-                    replyTo = replyTo,
-                    relayUrls = null // Will be updated when we receive the relay's copy
-                )
-                Timber.i("Adding optimistic message id=%s to=%s", optimisticId, cleanRecipientPubkey)
-                upsertMessage(newMessage, emitImmediately = true)
+                Timber.i("Sending direct message to=%s", cleanRecipientPubkey)
 
-                // NIP-17: seal and gift-wrap the unsigned rumor only to the recipient.
-                sendGiftWrappedMessage(
+                val sentMessage = sendGiftWrappedMessage(
                     innerMessage = innerMessage,
                     recipientPubkey = cleanRecipientPubkey,
                     encryptionPrivateKeyBytes = signingPrivateKeyBytes,
                     senderSigningPubkey = senderSigningPubkey
                 )
+
+                // Preserve the locally-sent DM in state so own bubbles show immediately.
+                // This uses the exact inner message payload, so the relay copy will dedupe
+                // when it arrives and will not create stale temporary entries.
+                if (sentMessage != null) {
+                    updateMessageState(sentMessage, cleanRecipientPubkey)
+                    emitMessagesSnapshotNow()
+                }
 
                 // Save conversation mapping
                 val myPub = senderSigningPubkey.ifBlank { userPubkey }
