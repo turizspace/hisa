@@ -140,7 +140,7 @@ fun ConversationScreen(
     val selectedOrder = selectedOrderId?.let { id -> orders.firstOrNull { it.orderId == id } }
 
     LaunchedEffect(selectedOrderId) {
-        selectedOrder?.let { orderNotificationsViewModel.markOrderAsRead(it.orderId) }
+        selectedOrderId?.let { orderNotificationsViewModel.markOrderAsRead(it) }
     }
 
     val normalizedConversationId = cleanPubkeyFormat(conversationId)
@@ -186,7 +186,6 @@ fun ConversationScreen(
     val displayName =
         contactName ?: fetchedMeta?.displayName ?: fetchedMeta?.name ?: conversationId.take(8) + "..."
     val displayPicture = contactProfilePicture ?: fetchedMeta?.picture
-    val ownDisplayName = ownMeta?.displayName ?: ownMeta?.name ?: "You"
     val ownDisplayPicture = ownMeta?.picture
     val profileMetaUtil = LocalProfileMetaUtil.current
 
@@ -314,13 +313,6 @@ fun ConversationScreen(
                 items(visibleMessages, key = { it.id }) { message ->
                     val normalizedSender = cleanPubkeyFormat(message.pubkey)
                     val isOwnMessage = normalizedSender == normalizedUserPubkey
-                    val incomingDisplayName = if (normalizedSender.equals(normalizedConversationId, true)) {
-                        displayName
-                    } else if (normalizedSender.isNotBlank()) {
-                        normalizedSender.take(12) + "..."
-                    } else {
-                        "Unknown"
-                    }
                     val incomingDisplayPicture = if (normalizedSender.equals(normalizedConversationId, true)) {
                         displayPicture
                     } else {
@@ -329,9 +321,7 @@ fun ConversationScreen(
                     com.hisa.ui.components.MessageBubble(
                         message = message,
                         isOwnMessage = isOwnMessage,
-                        displayName = incomingDisplayName,
                         profilePicUrl = incomingDisplayPicture,
-                        ownDisplayName = ownDisplayName,
                         ownProfilePicUrl = ownDisplayPicture,
                         reactions = reactionsByTarget[message.id].orEmpty()
                     )

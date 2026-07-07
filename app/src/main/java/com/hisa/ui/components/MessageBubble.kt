@@ -4,34 +4,31 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.ui.layout.ContentScale
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import com.hisa.data.model.Message
-import androidx.compose.material3.Icon
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Person
 import coil.compose.rememberAsyncImagePainter
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
-import com.hisa.ui.components.MediaText
 
 @Composable
 fun MessageBubble(
     message: Message,
     isOwnMessage: Boolean,
-    displayName: String? = null,
     profilePicUrl: String? = null,
-    ownDisplayName: String? = null,
     ownProfilePicUrl: String? = null,
     reactions: List<Message.ReactionMessage> = emptyList(),
     showProfileImage: Boolean = true
@@ -54,7 +51,6 @@ fun MessageBubble(
                 BubbleContent(
                     message = message,
                     isOwnMessage = isOwnMessage,
-                    displayName = ownDisplayName,
                     reactions = reactions,
                     maxBubbleWidth = bubbleMaxWidth
                 )
@@ -70,7 +66,6 @@ fun MessageBubble(
                 BubbleContent(
                     message = message,
                     isOwnMessage = isOwnMessage,
-                    displayName = displayName,
                     reactions = reactions,
                     maxBubbleWidth = bubbleMaxWidth
                 )
@@ -84,110 +79,95 @@ fun MessageBubble(
 private fun BubbleContent(
     message: Message,
     isOwnMessage: Boolean,
-    displayName: String?,
     reactions: List<Message.ReactionMessage>,
     maxBubbleWidth: androidx.compose.ui.unit.Dp
 ) {
     val bubbleShape = if (isOwnMessage) {
-        RoundedCornerShape(
-            topStart = 20.dp,
-            topEnd = 20.dp,
-            bottomStart = 20.dp,
-            bottomEnd = 8.dp
-        )
+        RoundedCornerShape(18.dp, 18.dp, 18.dp, 6.dp)
     } else {
-        RoundedCornerShape(
-            topStart = 20.dp,
-            topEnd = 20.dp,
-            bottomStart = 8.dp,
-            bottomEnd = 20.dp
-        )
+        RoundedCornerShape(18.dp, 18.dp, 6.dp, 18.dp)
     }
+    val bubbleColor = if (isOwnMessage) {
+        MaterialTheme.colorScheme.primary.copy(alpha = 0.14f)
+    } else {
+        MaterialTheme.colorScheme.surfaceVariant
+    }
+    val textColor = if (isOwnMessage) {
+        MaterialTheme.colorScheme.onPrimary
+    } else {
+        MaterialTheme.colorScheme.onSurface
+    }
+    val metadataColor = textColor.copy(alpha = 0.68f)
+
     Column(
         modifier = Modifier
             .wrapContentWidth()
             .widthIn(max = maxBubbleWidth)
-            .defaultMinSize(minHeight = 32.dp)
+            .defaultMinSize(minHeight = 36.dp)
             .clip(shape = bubbleShape)
-            .background(
-                color = if (isOwnMessage) MaterialTheme.colorScheme.primaryContainer
-                else MaterialTheme.colorScheme.secondaryContainer
-            )
+            .background(color = bubbleColor)
             .border(
                 width = 1.dp,
                 color = if (isOwnMessage) {
-                    MaterialTheme.colorScheme.primary.copy(alpha = 0.25f)
+                    MaterialTheme.colorScheme.primary.copy(alpha = 0.18f)
                 } else {
-                    MaterialTheme.colorScheme.tertiary.copy(alpha = 0.25f)
+                    MaterialTheme.colorScheme.outline.copy(alpha = 0.16f)
                 },
                 shape = bubbleShape
             )
-            .padding(horizontal = 12.dp, vertical = 8.dp)
+            .padding(horizontal = 14.dp, vertical = 10.dp)
     ) {
-        if (!isOwnMessage) {
-            Text(
-                text = displayName ?: message.pubkey.take(8) + "...",
-                style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.SemiBold),
-                color = MaterialTheme.colorScheme.onSecondaryContainer.copy(alpha = 0.7f)
-            )
-            Spacer(modifier = Modifier.height(4.dp))
-        }
-
         when (message) {
-            is Message.TextMessage -> MediaText(message.content, isOwnMessage)
+            is Message.TextMessage -> Text(
+                text = message.content,
+                style = MaterialTheme.typography.bodyMedium.copy(lineHeight = 20.sp),
+                color = textColor
+            )
             is Message.FileMessage -> Text(
-                text = "[File] ${message.fileUrl}",
-                style = MaterialTheme.typography.bodyMedium,
-                color = if (isOwnMessage)
-                    MaterialTheme.colorScheme.onPrimaryContainer
-                else
-                    MaterialTheme.colorScheme.onSecondaryContainer
+                text = "📎 ${message.fileUrl}",
+                style = MaterialTheme.typography.bodyMedium.copy(lineHeight = 20.sp),
+                color = textColor
             )
             is Message.ReactionMessage -> Text(
                 text = "Reaction: ${reactionValueForUi(message.content)}",
-                style = MaterialTheme.typography.bodyMedium,
-                color = if (isOwnMessage)
-                    MaterialTheme.colorScheme.onPrimaryContainer
-                else
-                    MaterialTheme.colorScheme.onSecondaryContainer
+                style = MaterialTheme.typography.bodyMedium.copy(lineHeight = 20.sp),
+                color = textColor
             )
             else -> Text("")
         }
 
-        Spacer(modifier = Modifier.height(4.dp))
+        Spacer(modifier = Modifier.height(8.dp))
 
-        Row(modifier = Modifier.align(if (isOwnMessage) Alignment.End else Alignment.Start)) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = if (isOwnMessage) Arrangement.End else Arrangement.Start
+        ) {
             Text(
                 text = SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date(message.createdAt * 1000)),
                 style = MaterialTheme.typography.labelSmall,
-                color = if (isOwnMessage)
-                    MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.6f)
-                else
-                    MaterialTheme.colorScheme.onSecondaryContainer.copy(alpha = 0.6f)
+                color = metadataColor
             )
         }
 
-        message.replyTo?.let { replyId ->
-            Spacer(modifier = Modifier.height(4.dp))
+        val replyToId = message.replyTo
+        if (replyToId != null) {
+            Spacer(modifier = Modifier.height(6.dp))
             Text(
-                text = "Reply to: ${replyId.take(8)}...",
+                text = "Reply to: ${replyToId.take(8)}...",
                 style = MaterialTheme.typography.labelSmall,
-                color = if (isOwnMessage)
-                    MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.7f)
-                else
-                    MaterialTheme.colorScheme.onSecondaryContainer.copy(alpha = 0.7f),
+                color = metadataColor,
                 modifier = Modifier.align(if (isOwnMessage) Alignment.End else Alignment.Start)
             )
         }
 
         if (reactions.isNotEmpty()) {
+            Spacer(modifier = Modifier.height(8.dp))
             val reactionSummary = reactions
                 .groupBy { reactionValueForUi(it.content) }
                 .mapValues { (_, values) -> values.size }
                 .toList()
                 .sortedByDescending { (_, count) -> count }
 
-            Spacer(modifier = Modifier.height(6.dp))
             Row(
                 modifier = Modifier.align(if (isOwnMessage) Alignment.End else Alignment.Start),
                 horizontalArrangement = Arrangement.spacedBy(6.dp)

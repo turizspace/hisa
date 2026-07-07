@@ -191,7 +191,7 @@ fun FeedTab(
         showingDiscovery && feedUiState.services.isEmpty() && stalls.isEmpty() -> {
             EmptyFeedState(
                 modifier = Modifier.fillMaxSize(),
-                onRefresh = { feedViewModel.subscribeToFeed() }
+                onRefresh = { feedViewModel.refreshFeed() }
             )
         }
 
@@ -382,7 +382,7 @@ fun FeedTab(
         filteredServices.isEmpty() -> {
             EmptyFeedState(
                 modifier = Modifier.fillMaxSize(),
-                onRefresh = { feedViewModel.subscribeToFeed() }
+                onRefresh = { feedViewModel.refreshFeed() }
             )
         }
 

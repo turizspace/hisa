@@ -21,6 +21,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.unit.dp
@@ -64,6 +65,7 @@ import androidx.navigation.NavHostController
 import com.hisa.ui.navigation.NAV_RESULT_UPLOADED_MEDIA_URL
 import com.hisa.ui.navigation.consumeUploadedMediaResult
 import com.hisa.ui.navigation.prepareUploadResult
+import com.hisa.util.normalizeNostrPubkey
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -76,19 +78,35 @@ fun ProfileScreen(
     navController: NavHostController? = null
 ) {
     val authViewModel: com.hisa.viewmodel.AuthViewModel = androidx.hilt.navigation.compose.hiltViewModel()
-    val privateKeyHex = authViewModel.privateKey.collectAsState().value ?: ""
+    val privateKeyHex by authViewModel.privateKey.collectAsState()
     val currentUserPubkey by authViewModel.pubKey.collectAsState(initial = "")
     val allMetadata by profileViewModel.allMetadata.collectAsState()
+    val currentMetadata by profileViewModel.metadata.collectAsState()
     val saveStatus by profileViewModel.saveStatus.collectAsState()
-    val latestMeta = allMetadata.lastOrNull()
-    var showEdit by remember { mutableStateOf(false) }
-    var editName by remember { mutableStateOf("") }
-    var editAbout by remember { mutableStateOf("") }
-    var editPicture by remember { mutableStateOf("") }
-    var editBanner by remember { mutableStateOf("") }
-    var editWebsite by remember { mutableStateOf("") }
-    var editDisplayName by remember { mutableStateOf("") }
-    var editLud16 by remember { mutableStateOf("") }
+    val latestMeta = allMetadata.lastOrNull() ?: currentMetadata
+    val externalSignerPubkey = authViewModel.getExternalSignerPubkey()
+    val externalSignerPackage = authViewModel.getExternalSignerPackage()
+    val normalizedCurrentUserPubkey = remember(currentUserPubkey) {
+        normalizeNostrPubkey(currentUserPubkey)
+    }
+    val normalizedProfilePubkey = remember(pubkey) {
+        normalizeNostrPubkey(pubkey)
+    }
+    val isOwnProfile = !normalizedCurrentUserPubkey.isNullOrBlank() &&
+        normalizedCurrentUserPubkey == normalizedProfilePubkey
+    val hasLocalSigningKey = !privateKeyHex.isNullOrBlank()
+    val hasExternalSigner = !externalSignerPubkey.isNullOrBlank() && !externalSignerPackage.isNullOrBlank()
+    val canSaveProfile = isOwnProfile && (hasLocalSigningKey || hasExternalSigner)
+    val isSavingProfile = saveStatus is ProfileViewModel.SaveStatus.Saving
+    val saveErrorMessage = (saveStatus as? ProfileViewModel.SaveStatus.Error)?.message
+    var showEdit by rememberSaveable { mutableStateOf(false) }
+    var editName by rememberSaveable { mutableStateOf("") }
+    var editAbout by rememberSaveable { mutableStateOf("") }
+    var editPicture by rememberSaveable { mutableStateOf("") }
+    var editBanner by rememberSaveable { mutableStateOf("") }
+    var editWebsite by rememberSaveable { mutableStateOf("") }
+    var editDisplayName by rememberSaveable { mutableStateOf("") }
+    var editLud16 by rememberSaveable { mutableStateOf("") }
     // Icons
     val walletIcon = Icons.Default.AccountBalanceWallet
     val nip05Icon = Icons.Default.VerifiedUser
@@ -185,10 +203,12 @@ fun ProfileScreen(
                             )
                         }
                         // Small Edit button top-right when viewing own profile; otherwise show Message button to DM
-                        val isOwnProfile = !currentUserPubkey.isNullOrBlank() && currentUserPubkey.equals(pubkey, ignoreCase = true)
                         if (isOwnProfile) {
                             IconButton(
-                                onClick = { showEdit = true },
+                                onClick = {
+                                    profileViewModel.clearSaveStatus()
+                                    showEdit = true
+                                },
                                 modifier = Modifier
                                     .align(Alignment.TopEnd)
                                     .padding(12.dp)
@@ -370,10 +390,14 @@ fun ProfileScreen(
             when (saveStatus) {
                 is ProfileViewModel.SaveStatus.Success -> {
                     LaunchedEffect(saveStatus) {
+                        showEdit = false
                         delay(1500)
                         profileViewModel.clearSaveStatus()
                     }
                     Text("Profile saved!", color = MaterialTheme.colorScheme.primary)
+                }
+                is ProfileViewModel.SaveStatus.Saving -> {
+                    Text("Saving profile...", color = MaterialTheme.colorScheme.primary)
                 }
                 is ProfileViewModel.SaveStatus.Error -> {
                     val msg = (saveStatus as ProfileViewModel.SaveStatus.Error).message
@@ -421,7 +445,9 @@ fun ProfileScreen(
         // Edit Profile Dialog
         if (showEdit) {
             AlertDialog(
-                onDismissRequest = { showEdit = false },
+                onDismissRequest = {
+                    if (!isSavingProfile) showEdit = false
+                },
                 title = { Text("Edit Profile") },
                 text = {
                     val dialogScroll = rememberScrollState()
@@ -529,28 +555,56 @@ fun ProfileScreen(
                             label = { Text("Website") },
                             modifier = Modifier.fillMaxWidth()
                         )
+                        if (!canSaveProfile) {
+                            Text(
+                                text = "No signing key available for this profile.",
+                                color = MaterialTheme.colorScheme.error,
+                                style = MaterialTheme.typography.bodySmall
+                            )
+                        }
+                        if (!saveErrorMessage.isNullOrBlank()) {
+                            Text(
+                                text = saveErrorMessage,
+                                color = MaterialTheme.colorScheme.error,
+                                style = MaterialTheme.typography.bodySmall
+                            )
+                        }
                     }
                 },
                 confirmButton = {
-                    Button(onClick = {
-                        // Save and publish
-                        showEdit = false
-                        val metadata = com.hisa.data.model.Metadata(
-                            name = editName,
-                            displayName = editDisplayName,
-                            about = editAbout,
-                            picture = editPicture,
-                            banner = editBanner,
-                            website = editWebsite,
-                            lud16 = editLud16
-                        )
-                        profileViewModel.updateMetadata(metadata, privateKeyHex, pubkey)
-                    }) {
-                        Text("Save")
+                    Button(
+                        enabled = canSaveProfile && !isSavingProfile,
+                        onClick = {
+                            val updatedMetadata = com.hisa.data.model.Metadata(
+                                name = editName,
+                                displayName = editDisplayName,
+                                about = editAbout,
+                                picture = editPicture,
+                                banner = editBanner,
+                                website = editWebsite,
+                                lud16 = editLud16
+                            )
+                            profileViewModel.updateMetadata(
+                                metadata = updatedMetadata,
+                                privateKeyHex = privateKeyHex,
+                                pubkey = pubkey,
+                                externalSignerPubkey = externalSignerPubkey,
+                                externalSignerPackage = externalSignerPackage
+                            )
+                        }
+                    ) {
+                        if (isSavingProfile) {
+                            CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
+                            Spacer(Modifier.width(8.dp))
+                        }
+                        Text(if (isSavingProfile) "Saving" else "Save")
                     }
                 },
                 dismissButton = {
-                    OutlinedButton(onClick = { showEdit = false }) {
+                    OutlinedButton(
+                        enabled = !isSavingProfile,
+                        onClick = { showEdit = false }
+                    ) {
                         Text("Cancel")
                     }
                 }

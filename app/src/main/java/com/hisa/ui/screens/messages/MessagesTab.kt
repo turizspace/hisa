@@ -12,16 +12,20 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.material3.Badge
 import androidx.compose.material3.ListItem
+import androidx.compose.material3.ListItemDefaults
 import androidx.compose.material3.Tab
 import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
 import androidx.compose.material3.Icon
 import androidx.compose.material3.DividerDefaults
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.unit.dp
 import coil.compose.AsyncImage
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.rememberVectorPainter
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -36,6 +40,7 @@ import com.hisa.viewmodel.OrderNotificationsViewModel
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.text.font.FontWeight
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.NavController
@@ -195,11 +200,42 @@ fun MessagesTab(
                         val counterpartyTitle = order.counterpartyDisplayName(userPubkey)
                         val counterpartyPicture = order.counterpartyPicture(userPubkey)
                         val isBuyer = order.isBuyer(userPubkey)
+                        val isUnread = !order.isRead && !isBuyer
+                        val primaryTextColor = if (order.isRead) {
+                            MaterialTheme.colorScheme.onSurface.copy(alpha = 0.72f)
+                        } else {
+                            MaterialTheme.colorScheme.onSurface
+                        }
+                        val secondaryTextColor = if (order.isRead) {
+                            MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.72f)
+                        } else {
+                            MaterialTheme.colorScheme.onSurfaceVariant
+                        }
                         val orderStatusLabel = if (isBuyer) "You ordered from" else "Order from"
                         ListItem(
-                            headlineContent = { Text("$orderStatusLabel $counterpartyTitle") },
+                            headlineContent = {
+                                Text(
+                                    text = "$orderStatusLabel $counterpartyTitle",
+                                    color = primaryTextColor,
+                                    fontWeight = if (isUnread) FontWeight.SemiBold else FontWeight.Normal
+                                )
+                            },
                             supportingContent = {
-                                Text("${order.subject} • ${order.items.sumOf { it.quantity }} item${if (order.items.sumOf { it.quantity } != 1) "s" else ""} • $amountLabel")
+                                Text(
+                                    text = "${order.subject} • ${order.items.sumOf { it.quantity }} item${if (order.items.sumOf { it.quantity } != 1) "s" else ""} • $amountLabel",
+                                    color = secondaryTextColor
+                                )
+                            },
+                            trailingContent = {
+                                if (isUnread) {
+                                    Badge { Text("New") }
+                                } else if (order.isRead) {
+                                    Text(
+                                        text = "Read",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.72f)
+                                    )
+                                }
                             },
                             leadingContent = {
                                 if (counterpartyPicture.isNotBlank()) {
@@ -221,6 +257,13 @@ fun MessagesTab(
                                     )
                                 }
                             },
+                            colors = ListItemDefaults.colors(
+                                containerColor = if (isUnread) {
+                                    MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.24f)
+                                } else {
+                                    Color.Transparent
+                                }
+                            ),
                             modifier = Modifier.clickable {
                                 navController.navigate(
                                     Routes.DM_ORDER
