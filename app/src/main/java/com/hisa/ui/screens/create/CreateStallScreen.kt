@@ -76,16 +76,6 @@ fun CreateStallScreen(
     var newZoneCost by rememberSaveable { mutableStateOf("") }
 
     Scaffold(
-        topBar = {
-            TopAppBar(
-                title = { Text("Create Stall (NIP-15)") },
-                navigationIcon = {
-                    IconButton(onClick = onNavigateBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back")
-                    }
-                }
-            )
-        },
         bottomBar = {
             Surface(
                 modifier = Modifier.fillMaxWidth(),

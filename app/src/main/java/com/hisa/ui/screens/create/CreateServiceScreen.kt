@@ -93,16 +93,6 @@ fun CreateServiceScreen(
     val ctx = LocalContext.current
 
     Scaffold(
-        topBar = {
-            TopAppBar(
-                title = { Text(if (dTag != null) "Edit Listing" else "Create New Listing") },
-                navigationIcon = {
-                    IconButton(onClick = onNavigateBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back")
-                    }
-                }
-            )
-        },
         bottomBar = {
             Surface(
                 modifier = Modifier.fillMaxWidth(),
