@@ -1,9 +1,7 @@
 package com.hisa.data.nostr
 
-// Use reflection to call Secp256k1.verifySchnorr to avoid loading native library during unit tests
-import org.json.JSONArray
 import org.json.JSONObject
-import java.security.MessageDigest
+import java.lang.reflect.InvocationTargetException
 
 object EventVerifier {
     data class VerificationResult(
@@ -21,33 +19,34 @@ object EventVerifier {
         }
     }
 
+    private data class SchnorrVerification(
+        val isValid: Boolean,
+        val error: String? = null
+    )
+
+    private fun verifySchnorr(sig: ByteArray, msg: ByteArray, pub: ByteArray): SchnorrVerification {
+        return try {
+            val secpClass = Class.forName("fr.acinq.secp256k1.Secp256k1")
+            val secp = secpClass.getMethod("get").invoke(null)
+            val verifySchnorr = secpClass.getMethod(
+                "verifySchnorr",
+                ByteArray::class.java,
+                ByteArray::class.java,
+                ByteArray::class.java
+            )
+            SchnorrVerification(verifySchnorr.invoke(secp, sig, msg, pub) as? Boolean ?: false)
+        } catch (e: Throwable) {
+            val cause = if (e is InvocationTargetException) e.targetException else e
+            val detail = cause.message ?: cause::class.java.simpleName
+            SchnorrVerification(false, "Native verification unavailable: $detail")
+        }
+    }
+
     /**
      * Recompute canonical NIP-01 id for the given event JSONObject.
      */
     fun computeCanonicalId(event: JSONObject): String {
-        val pubkey = event.optString("pubkey", "")
-        val createdAt = event.optLong("created_at", 0L)
-        val kind = event.optInt("kind", 0)
-        val tags = event.optJSONArray("tags") ?: JSONArray()
-        val content = event.optString("content", "")
-
-        val tagsJsonArray = JSONArray()
-        for (i in 0 until tags.length()) {
-            val inner = tags.getJSONArray(i)
-            tagsJsonArray.put(inner)
-        }
-
-        val arr = JSONArray().apply {
-            put(0)
-            put(pubkey)
-            put(createdAt)
-            put(kind)
-            put(tagsJsonArray)
-            put(content)
-        }
-        val serialized = arr.toString()
-        val hash = MessageDigest.getInstance("SHA-256").digest(serialized.toByteArray(Charsets.UTF_8))
-        return hash.joinToString("") { "%02x".format(it) }
+        return NostrCanonicalJson.computeEventId(event)
     }
 
     /**
@@ -73,20 +72,26 @@ object EventVerifier {
             val msg = hexToBytes(computedId)
             val pub = hexToBytes(pubkeyHex)
 
-            // Try to verify with ACINQ Secp256k1 via reflection. If native library is not available
-            // (e.g., during unit tests), skip signature verification and report accordingly.
-            var nativeError: String? = null
-            val signatureValid = try {
-                val cls = Class.forName("fr.acinq.secp256k1.Secp256k1")
-                val method = cls.getMethod("verifySchnorr", ByteArray::class.java, ByteArray::class.java, ByteArray::class.java)
-                method.invoke(null, sig, msg, pub) as? Boolean ?: false
-            } catch (e: Throwable) {
-                // Native library unavailable or method not found — surface this as a reason
-                nativeError = "Native verification unavailable: ${e.message}"
-                false
+            if (sig.size != 64) {
+                return VerificationResult(idMatches, false, computedId, "Invalid signature length: ${sig.size}")
+            }
+            if (msg.size != 32) {
+                return VerificationResult(idMatches, false, computedId, "Invalid event id length: ${msg.size}")
+            }
+            if (pub.size != 32) {
+                return VerificationResult(idMatches, false, computedId, "Invalid pubkey length: ${pub.size}")
             }
 
-            return VerificationResult(idMatches, signatureValid, computedId, nativeError)
+            // Verify via the ACINQ singleton. Reflection keeps JVM unit tests from
+            // hard-failing when the native library is unavailable on the host.
+            val schnorrVerification = verifySchnorr(sig, msg, pub)
+
+            return VerificationResult(
+                idMatches = idMatches,
+                signatureValid = schnorrVerification.isValid,
+                computedId = computedId,
+                reason = schnorrVerification.error
+            )
         } catch (e: Exception) {
             return VerificationResult(false, false, "", "Exception: ${e.message}")
         }

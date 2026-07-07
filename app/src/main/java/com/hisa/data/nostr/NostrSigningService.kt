@@ -43,9 +43,15 @@ class NostrSigningService @Inject constructor(
         externalSignerPubkeyHint: String? = null,
         externalSignerPackageHint: String? = null
     ): SigningContext {
+        val hintedPrivateKeyHex = privateKeyHexHint
+            ?.takeIf { it.isNotBlank() }
+            ?: localPrivateKeyBytesHint
+                ?.takeIf { it.size == 32 }
+                ?.toHex()
+
         val session = resolveAccountSession(
             pubkeyHint = pubkeyHint,
-            privateKeyHexHint = privateKeyHexHint,
+            privateKeyHexHint = hintedPrivateKeyHex,
             nsec = secureStorage.getNsec(),
             externalSignerPubkeyHint = externalSignerPubkeyHint,
             externalSignerPackageHint = externalSignerPackageHint
@@ -172,6 +178,27 @@ class NostrSigningService @Inject constructor(
             localPrivateKeyBytesHint = localPrivateKeyBytesHint,
             externalSignerPubkeyHint = externalSignerPubkeyHint,
             externalSignerPackageHint = externalSignerPackageHint,
+            createdAt = createdAt
+        )
+        val event = eventJson.toNostrEvent()
+        nostrClient.connect()
+        nostrClient.publishEvent(event)
+        return event
+    }
+
+    suspend fun signAndPublish(
+        nostrClient: NostrClient,
+        signingContext: SigningContext,
+        kind: Int,
+        content: String,
+        tags: List<List<String>>,
+        createdAt: Long = System.currentTimeMillis() / 1000
+    ): NostrEvent {
+        val eventJson = signEvent(
+            signingContext = signingContext,
+            kind = kind,
+            content = content,
+            tags = tags,
             createdAt = createdAt
         )
         val event = eventJson.toNostrEvent()

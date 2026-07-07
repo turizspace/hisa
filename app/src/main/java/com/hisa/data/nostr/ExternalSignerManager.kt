@@ -323,7 +323,7 @@ object ExternalSignerManager {
             if (incoming.has("pubkey")) {
                 val p = incoming.optString("pubkey")
                 val hex = if (p.startsWith("npub", true)) npubToHex(p) ?: p else p
-                ev.put("pubkey", hex)
+                ev.put("pubkey", hex.lowercase())
             }
             if (incoming.has("created_at")) ev.put("created_at", incoming.optLong("created_at"))
             if (incoming.has("kind")) ev.put("kind", incoming.optInt("kind"))

@@ -2,7 +2,6 @@
 
     import org.json.JSONArray
     import org.json.JSONObject
-    import java.security.MessageDigest
     import com.hisa.data.repository.MessageRepository
     import com.hisa.util.KeyGenerator
     import com.hisa.util.hexToByteArray
@@ -134,6 +133,11 @@
             val returnedId = parsed.optString("id").takeIf { it.isNotBlank() }
                 ?: throw IllegalStateException("External signer returned empty id")
 
+            // Normalize returned pubkey to x-only lowercase hex before verifying canonical ids.
+            val returnedPubkeyRaw = parsed.optString("pubkey", "")
+            val normalizedReturnedPubkey = normalizeToXOnlyHex(returnedPubkeyRaw)
+                ?: returnedPubkeyRaw.trim().lowercase()
+
             if (returnedSig.length != 128 || !returnedSig.all { it in '0'..'9' || it in 'a'..'f' }) {
                 throw IllegalStateException("Invalid signature format from signer: expected 128-char hex")
             }
@@ -148,12 +152,12 @@
             val sentKind = sentEvent.optInt("kind", -1)
             val sentTags = sentEvent.optJSONArray("tags") ?: JSONArray()
             val sentContent = sentEvent.optString("content", "")
-            val returnedPubkey = parsed.optString("pubkey", "")
             val returnedCreatedAt = parsed.optLong("created_at", 0L)
             val returnedKind = parsed.optInt("kind", -1)
             val returnedTags = parsed.optJSONArray("tags") ?: JSONArray()
             val returnedContent = parsed.optString("content", "")
             
+            val returnedPubkey = normalizedReturnedPubkey
             val pubkeyMatch = sentPubkey == returnedPubkey
             val createdAtMatch = sentCreatedAt == returnedCreatedAt
             val kindMatch = sentKind == returnedKind
@@ -175,7 +179,8 @@
 
             val parsedComputedId = try {
                 computeEventId(
-                    pubkey = parsed.optString("pubkey"),
+                    pubkey = normalizeToXOnlyHex(parsed.optString("pubkey"))
+                        ?: parsed.optString("pubkey"),
                     createdAt = parsed.optLong("created_at"),
                     kind = parsed.optInt("kind"),
                     tags = (0 until parsed.optJSONArray("tags")!!.length()).map { i ->
@@ -195,41 +200,25 @@
                 )
             }
 
-            val verification = try {
+            val parsedVerification = try {
                 EventVerifier.verifyEvent(parsed.toString())
             } catch (e: Exception) {
                 null
             }
-            if (verification != null && (!verification.idMatches || !verification.signatureValid)) {
+            if (parsedVerification != null && (!parsedVerification.idMatches || !parsedVerification.signatureValid)) {
                 android.util.Log.w(
                     "NostrEventSigner",
-                    "Signed external event verification failed: idMatches=${verification.idMatches} sigValid=${verification.signatureValid} computed=${verification.computedId} returnedId=$returnedId pubkey=$normalizedPub kind=$kind"
+                    "Signed external event verification failed: idMatches=${parsedVerification.idMatches} sigValid=${parsedVerification.signatureValid} computed=${parsedVerification.computedId} returnedId=$returnedId pubkey=$normalizedPub kind=$kind"
                 )
             }
 
-            // If the signer returned fields that recompute to our candidate ID, but put a different ID in the response,
-            // check if the signature is actually valid over the candidate ID (signer might have a response-encoding bug)
-            if (parsedComputedId == eventIdCandidate && parsedComputedId != returnedId) {
-                val eventWithCandidateId = JSONObject(parsed.toString()).apply {
-                    put("id", eventIdCandidate)
-                }
-                val verificationWithCandidateId = try {
-                    EventVerifier.verifyEvent(eventWithCandidateId.toString())
-                } catch (e: Exception) {
-                    null
-                }
-                if (verificationWithCandidateId?.signatureValid == true && verificationWithCandidateId.idMatches) {
-                    android.util.Log.d(
-                        "NostrEventSigner",
-                        "Signature IS valid with candidate ID; signer had fields correct but wrong id in response"
-                    )
-                    // Use the candidate ID since signature validates over it
-                    return buildSignedEventFromExternalSigner(eventWithCandidateId.toString(), eventIdCandidate, returnedSig)
-                }
-            }
-
-            // If the signer returned a malformed event JSON, try using the returned signature with the original unsigned payload.
-            val originalSignedEvent = buildSignedEventFromExternalSigner(eventJsonString, eventIdCandidate, returnedSig)
+            // Prefer the original unsigned payload when the signer only returns a signature.
+            val originalSignedEvent = buildSignedEventFromExternalSigner(
+                signedEventJson = eventJsonString,
+                fallbackId = eventIdCandidate,
+                fallbackSig = returnedSig,
+                unsignedEventJson = eventJsonString
+            )
             val originalVerification = try {
                 EventVerifier.verifyEvent(originalSignedEvent.toString())
             } catch (e: Exception) {
@@ -238,12 +227,31 @@
             if (originalVerification?.signatureValid == true && originalVerification.idMatches) {
                 android.util.Log.d(
                     "NostrEventSigner",
-                    "Fallback to original unsigned payload with signer-provided signature"
+                    "Using original unsigned payload with signer-provided signature"
                 )
                 return originalSignedEvent
             }
 
-            buildSignedEventFromExternalSigner(signedEventJson, eventIdCandidate, returnedSig)
+            // If the signer returned a full event payload, validate it before using it.
+            val signedEvent = buildSignedEventFromExternalSigner(
+                signedEventJson = signedEventJson,
+                fallbackId = eventIdCandidate,
+                fallbackSig = returnedSig,
+                unsignedEventJson = eventJsonString
+            )
+            val signedVerification = try {
+                EventVerifier.verifyEvent(signedEvent.toString())
+            } catch (e: Exception) {
+                null
+            }
+            if (signedVerification?.signatureValid == true && signedVerification.idMatches) {
+                return signedEvent
+            }
+
+            throw IllegalStateException(
+                "External signer returned an event that does not match the canonical payload: " +
+                    "returnedId=$returnedId computedId=$parsedComputedId expectedId=$eventIdCandidate"
+            )
         }
     }
 
@@ -254,24 +262,14 @@
         tags: List<List<String>>,
         content: String
     ): String {
-        val tagsJsonArray = JSONArray().apply { tags.forEach { inner -> put(JSONArray(inner)) } }
-        val arrElement = JSONArray().apply {
-            put(0)
-            put(pubkey)
-            put(createdAt)
-            put(kind)
-            put(tagsJsonArray)
-            put(content)
-        }
-        val serialized = arrElement.toString()
-        val hash = MessageDigest.getInstance("SHA-256").digest(serialized.toByteArray(Charsets.UTF_8))
-        return hash.joinToString("") { "%02x".format(it) }
+        return NostrCanonicalJson.computeEventId(pubkey, createdAt, kind, tags, content)
     }
 
         fun buildSignedEventFromExternalSigner(
             signedEventJson: String,
             fallbackId: String,
-            fallbackSig: String
+            fallbackSig: String,
+            unsignedEventJson: String? = null
         ): JSONObject {
             val signed = JSONObject(signedEventJson)
             val returnedId = signed.optString("id", fallbackId).takeIf { it.isNotBlank() } ?: fallbackId
@@ -289,14 +287,58 @@
                 else -> returnedId
             }
 
-            return JSONObject().apply {
+            val normalizedSignedPubkey = normalizeToXOnlyHex(signed.optString("pubkey"))
+                ?: signed.optString("pubkey").trim().lowercase()
+            val finalEvent = JSONObject().apply {
                 put("id", effectiveId)
-                put("pubkey", signed.optString("pubkey"))
+                put("pubkey", normalizedSignedPubkey)
                 put("created_at", signed.optLong("created_at"))
                 put("kind", signed.optInt("kind"))
                 put("tags", signed.optJSONArray("tags") ?: JSONArray())
                 put("content", signed.optString("content"))
                 put("sig", returnedSig)
             }
+
+            if (!unsignedEventJson.isNullOrBlank()) {
+                val expected = try {
+                    JSONObject(unsignedEventJson)
+                } catch (_: Exception) {
+                    null
+                }
+                if (expected != null) {
+                    val expectedId = try {
+                        EventVerifier.computeCanonicalId(expected)
+                    } catch (_: Exception) {
+                        null
+                    }
+                    val canonicalId = try {
+                        EventVerifier.computeCanonicalId(finalEvent)
+                    } catch (_: Exception) {
+                        null
+                    }
+                    if (expectedId != null && canonicalId != null && !canonicalId.equals(expectedId, ignoreCase = true)) {
+                        throw IllegalStateException(
+                            "External signer returned an event whose canonical id does not match the expected payload: expected=$expectedId actual=$canonicalId"
+                        )
+                    }
+                    val mismatches = mutableListOf<String>()
+                    val expectedPubkey = normalizeToXOnlyHex(expected.optString("pubkey"))
+                        ?: expected.optString("pubkey").trim().lowercase()
+                    val finalPubkey = normalizeToXOnlyHex(finalEvent.optString("pubkey"))
+                        ?: finalEvent.optString("pubkey").trim().lowercase()
+                    if (expectedPubkey != finalPubkey) mismatches.add("pubkey")
+                    if (expected.optLong("created_at") != finalEvent.optLong("created_at")) mismatches.add("created_at")
+                    if (expected.optInt("kind") != finalEvent.optInt("kind")) mismatches.add("kind")
+                    if (expected.optJSONArray("tags")?.toString() != finalEvent.optJSONArray("tags")?.toString()) mismatches.add("tags")
+                    if (expected.optString("content") != finalEvent.optString("content")) mismatches.add("content")
+                    if (mismatches.isNotEmpty()) {
+                        throw IllegalStateException(
+                            "External signer returned event with field mismatches: ${mismatches.joinToString(", ")}"
+                        )
+                    }
+                }
+            }
+
+            return finalEvent
         }
     }

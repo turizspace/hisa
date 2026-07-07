@@ -703,7 +703,11 @@ class NostrClient @Inject constructor(
                     return
                 }
                 if (!verification.signatureValid) {
-                    Timber.w("Event signature invalid for event=%s — will still attempt publish (relay may reject)", event.id)
+                    Timber.w(
+                        "Event signature invalid for event=%s reason=%s — will still attempt publish (relay may reject)",
+                        event.id,
+                        verification.reason ?: "verifySchnorr returned false"
+                    )
                 }
             } catch (e: Exception) {
                 Timber.w(e, "Event verification failed for event=%s", event.id)
