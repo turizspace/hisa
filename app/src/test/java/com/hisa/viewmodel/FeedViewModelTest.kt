@@ -59,8 +59,6 @@ class FeedViewModelTest {
 
         val derived = FeedViewModel.deriveDisplayCategories(categories, services)
 
-        assertTrue(derived.contains("design"))
-        assertTrue(derived.contains("repair"))
-        assertEquals(2, derived.size)
+        assertEquals(listOf("design", "home", "services"), derived)
     }
 }

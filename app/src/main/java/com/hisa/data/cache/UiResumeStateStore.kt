@@ -8,22 +8,16 @@ import javax.inject.Inject
 import javax.inject.Singleton
 
 @Singleton
-class UiResumeStateStore @Inject constructor(
-    @ApplicationContext context: Context
+class UiResumeStateStore internal constructor(
+    private val sharedPreferences: SharedPreferences
 ) {
-    private val prefsName: String = DEFAULT_PREFS_NAME
-    private var sharedPreferences: SharedPreferences = SecurePreferencesHelper.create(
-        context = context,
-        prefsName = prefsName,
-        fallbackPrefsName = "${prefsName}_fallback"
+    @Inject constructor(
+        @ApplicationContext context: Context
+    ) : this(
+        createSharedPreferences(context, DEFAULT_PREFS_NAME)
     )
 
-    constructor(context: Context, prefsName: String) : this(context) {
-        sharedPreferences = SecurePreferencesHelper.create(
-            context = context,
-            prefsName = prefsName,
-            fallbackPrefsName = "${prefsName}_fallback"
-        )
+    constructor(context: Context, prefsName: String) : this(createSharedPreferences(context, prefsName)) {
         sharedPreferences.edit().clear().apply()
     }
 
@@ -119,5 +113,13 @@ class UiResumeStateStore @Inject constructor(
         private const val KEY_FEED_LIST_OFFSET = "feed_list_offset"
         private const val KEY_STALLS_LIST_INDEX = "stalls_list_index"
         private const val KEY_STALLS_LIST_OFFSET = "stalls_list_offset"
+
+        private fun createSharedPreferences(context: Context, prefsName: String): SharedPreferences {
+            return SecurePreferencesHelper.create(
+                context = context,
+                prefsName = prefsName,
+                fallbackPrefsName = "${prefsName}_fallback"
+            )
+        }
     }
 }

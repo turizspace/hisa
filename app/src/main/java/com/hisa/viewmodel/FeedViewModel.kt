@@ -55,6 +55,8 @@ class FeedViewModel @Inject constructor(
 
     fun setSelectedCategory(category: String?) {
         _selectedCategory.value = category
+            ?.let(::normalizeCategory)
+            ?.takeIf { it.isNotBlank() }
     }
 
     fun setSearchQuery(query: String) {
@@ -80,7 +82,9 @@ class FeedViewModel @Inject constructor(
             query: String
         ): List<ServiceListing> {
             val normalizedQuery = query.trim()
-            val activeCategory = selectedCategory?.takeIf { it.isNotBlank() }
+            val activeCategory = selectedCategory
+                ?.let(::normalizeCategory)
+                ?.takeIf { it.isNotBlank() }
 
             return services
                 .sortedByDescending { it.createdAt }
@@ -101,14 +105,16 @@ class FeedViewModel @Inject constructor(
             categories: List<String>,
             services: List<ServiceListing>
         ): List<String> {
+            val normalizedCategories = categories
+                .map(::normalizeCategory)
+                .filter { it.isNotBlank() }
+
             val serviceCategories = services
                 .flatMap { it.tags }
                 .map(::normalizeCategory)
                 .filter { it.isNotBlank() }
-                .distinct()
-                .sorted()
 
-            return (categories + serviceCategories)
+            return (normalizedCategories + serviceCategories)
                 .distinct()
                 .sorted()
         }
