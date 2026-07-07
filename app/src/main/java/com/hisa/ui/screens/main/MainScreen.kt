@@ -405,15 +405,10 @@ fun MainScreen(
                         NavigationBarItem(
                             selected = isSelected,
                             onClick = {
-                                when (index) {
-                                    0 -> selectedTab = 0
-                                    1 -> selectedTab = 1
-                                    2 -> {
-                                        selectedTab = 0
-                                        navController.navigate(Routes.CREATE_SERVICE)
-                                    }
-                                    3 -> selectedTab = 3
-                                    4 -> selectedTab = 4
+                                if (index == 2) {
+                                    navController.navigate(Routes.CREATE_SERVICE)
+                                } else if (selectedTab != index) {
+                                    selectedTab = index
                                 }
                             },
                             icon = {
