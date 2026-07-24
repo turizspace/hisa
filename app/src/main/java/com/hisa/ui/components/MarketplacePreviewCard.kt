@@ -10,8 +10,10 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.wrapContentHeight
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Card
@@ -20,6 +22,8 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -34,6 +38,7 @@ import coil.compose.AsyncImage
 import com.hisa.data.model.Metadata
 import com.hisa.data.model.ServiceListing
 import com.hisa.data.model.Stall
+import com.hisa.ui.util.LocalProfileRepository
 import org.json.JSONArray
 import com.hisa.util.formatServicePrice
 
@@ -45,16 +50,21 @@ fun ServicePreviewCard(
     showTags: Boolean = false,
     onClick: () -> Unit = {}
 ) {
-    val authorHandle = remember(service.pubkey, publisherMetadata?.displayName, publisherMetadata?.name) {
-        (publisherMetadata?.displayName?.ifBlank { null }
-            ?: publisherMetadata?.name?.ifBlank { null }
+    val profileRepository = LocalProfileRepository.current
+    val profiles by profileRepository.profiles.collectAsState()
+    val cachedPublisherMetadata = profiles[service.pubkey]
+    val resolvedPublisherMetadata = publisherMetadata ?: cachedPublisherMetadata
+
+    val authorHandle = remember(service.pubkey, resolvedPublisherMetadata?.displayName, resolvedPublisherMetadata?.name) {
+        (resolvedPublisherMetadata?.displayName?.ifBlank { null }
+            ?: resolvedPublisherMetadata?.name?.ifBlank { null }
             ?: service.pubkey.take(12)).removePrefix("@")
     }
-    val imageUrl = remember(service.eventId, publisherMetadata?.picture, service.rawTags, service.content) {
+    val imageUrl = remember(service.eventId, resolvedPublisherMetadata?.picture, service.rawTags, service.content) {
         service.rawTags
             .firstOrNull { it.isNotEmpty() && it[0] == "image" }
             ?.getOrNull(1) as? String
-            ?: publisherMetadata?.picture?.takeIf { it.isNotBlank() }
+            ?: resolvedPublisherMetadata?.picture?.takeIf { it.isNotBlank() }
             ?: Regex("(https?:\\/\\/\\S+\\.(?:png|jpe?g|gif|webp))", RegexOption.IGNORE_CASE)
                 .find(service.content ?: "")
                 ?.value
@@ -71,7 +81,7 @@ fun ServicePreviewCard(
         summary = service.summary ?: "",
         imageUrl = normalizeImageUrl(imageUrl),
         attribution = authorHandle,
-        attributionImageUrl = normalizeImageUrl(publisherMetadata?.picture),
+        attributionImageUrl = normalizeImageUrl(resolvedPublisherMetadata?.picture),
         primaryChip = formatServicePrice(service),
         secondaryText = supportingText,
         modifier = modifier,
@@ -124,7 +134,8 @@ private fun MarketplacePreviewCard(
     Card(
         modifier = modifier
             .fillMaxWidth()
-            .height(206.dp)
+            .wrapContentHeight()
+            .heightIn(min = 206.dp)
             .clip(RoundedCornerShape(18.dp))
             .clickable(onClick = onClick),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
@@ -184,7 +195,7 @@ private fun MarketplacePreviewCard(
                     text = title,
                     style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.SemiBold),
                     color = MaterialTheme.colorScheme.onSurface,
-                    maxLines = 2,
+                    maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
 
@@ -193,7 +204,7 @@ private fun MarketplacePreviewCard(
                         text = summary,
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        maxLines = 2,
+                        maxLines = 1,
                         overflow = TextOverflow.Ellipsis
                     )
                 }
@@ -208,7 +219,7 @@ private fun MarketplacePreviewCard(
                     )
                 }
 
-                Spacer(modifier = Modifier.weight(1f))
+                Spacer(modifier = Modifier.height(4.dp))
 
                 AttributionRow(
                     handle = attribution,
