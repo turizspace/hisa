@@ -42,7 +42,7 @@ import com.hisa.ui.navigation.NAV_STATE_COMPOSE_DRAFT
 import com.hisa.ui.navigation.Routes
 import com.hisa.ui.navigation.consumeUploadedMediaUrls
 import com.hisa.ui.navigation.prepareUploadResult
-import com.hisa.ui.util.LocalProfileMetaUtil
+import com.hisa.ui.util.LocalProfileRepository
 import com.hisa.viewmodel.MessagesViewModel
 import timber.log.Timber
 
@@ -181,13 +181,14 @@ fun ConversationScreen(
     }
     var newMessage by remember { mutableStateOf("") }
 
-    var fetchedMeta by remember { mutableStateOf<com.hisa.data.model.Metadata?>(null) }
-    var ownMeta by remember { mutableStateOf<com.hisa.data.model.Metadata?>(null) }
+    val profileRepository = LocalProfileRepository.current
+    val profiles by profileRepository.profiles.collectAsState()
+    val contactMetadata = profiles[normalizedConversationId]
+    val ownMetadata = profiles[normalizedUserPubkey]
     val displayName =
-        contactName ?: fetchedMeta?.displayName ?: fetchedMeta?.name ?: conversationId.take(8) + "..."
-    val displayPicture = contactProfilePicture ?: fetchedMeta?.picture
-    val ownDisplayPicture = ownMeta?.picture
-    val profileMetaUtil = LocalProfileMetaUtil.current
+        contactName ?: contactMetadata?.displayName ?: contactMetadata?.name ?: conversationId.take(8) + "..."
+    val displayPicture = contactProfilePicture ?: contactMetadata?.picture
+    val ownDisplayPicture = ownMetadata?.picture
 
     // Initialize conversation, load messages and fetch metadata
     var isInitialized by remember { mutableStateOf(false) }
@@ -229,20 +230,15 @@ fun ConversationScreen(
             messagesViewModel.clearSendError()
         }
     }
-    // Fetch profile metadata if needed (contact)
-    LaunchedEffect(conversationId, contactName, contactProfilePicture) {
-        if ((contactName == null || contactProfilePicture == null) && fetchedMeta == null) {
-            profileMetaUtil.fetchProfileMetadata(conversationId) { meta ->
-                fetchedMeta = meta
-            }
+    // Reuse shared profile metadata from the repository when available, and trigger a
+    // background refresh if the data is still missing.
+    LaunchedEffect(normalizedConversationId, normalizedUserPubkey) {
+        val pubkeysToEnsure = buildSet {
+            if (normalizedConversationId.isNotBlank()) add(normalizedConversationId)
+            if (normalizedUserPubkey.isNotBlank()) add(normalizedUserPubkey)
         }
-    }
-    // Fetch current user metadata for own-message avatar/name.
-    LaunchedEffect(userPubkey) {
-        if (ownMeta == null) {
-            profileMetaUtil.fetchProfileMetadata(userPubkey) { meta ->
-                ownMeta = meta
-            }
+        if (pubkeysToEnsure.isNotEmpty()) {
+            profileRepository.ensureProfiles(pubkeysToEnsure)
         }
     }
 
@@ -286,9 +282,13 @@ fun ConversationScreen(
                             .clip(androidx.compose.foundation.shape.CircleShape),
                         contentScale = ContentScale.Crop
                     )
-                } else if (fetchedMeta == null && (contactName == null || contactProfilePicture == null)) {
-                    // Show shimmer/loading if fetching
-
+                } else if (contactMetadata == null && (contactName == null || contactProfilePicture == null)) {
+                    // Keep the default avatar until shared metadata arrives.
+                    Icon(
+                        imageVector = Icons.Default.Person,
+                        contentDescription = "Default Profile Picture",
+                        modifier = Modifier.size(40.dp)
+                    )
                 } else {
                     Icon(
                         imageVector = Icons.Default.Person,
