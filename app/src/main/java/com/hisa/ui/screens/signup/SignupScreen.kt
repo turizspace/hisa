@@ -10,6 +10,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.DialogProperties
 import androidx.navigation.NavHostController
+import com.hisa.ui.components.HisaFormCard
+import com.hisa.ui.components.HisaPrimaryButton
 import com.hisa.viewmodel.AuthViewModel
 import com.hisa.data.model.Metadata
 import kotlinx.coroutines.delay
@@ -63,53 +65,51 @@ fun SignupScreen(
             Text("Create Your Profile", style = MaterialTheme.typography.headlineMedium)
             Spacer(modifier = Modifier.height(16.dp))
 
-            OutlinedTextField(
-                value = name,
-                onValueChange = { name = it },
-                label = { Text("Display Name") },
-                modifier = Modifier.fillMaxWidth()
-            )
-            Spacer(modifier = Modifier.height(8.dp))
-
-            OutlinedTextField(
-                value = about,
-                onValueChange = { about = it },
-                label = { Text("About") },
-                modifier = Modifier.fillMaxWidth(),
-                minLines = 3
-            )
-            Spacer(modifier = Modifier.height(8.dp))
-
-            Spacer(modifier = Modifier.height(24.dp))
-
-            if (errorMessage != null) {
-                Text(
-                    text = errorMessage!!,
-                    color = MaterialTheme.colorScheme.error,
-                    modifier = Modifier.padding(bottom = 16.dp)
+            HisaFormCard(title = "Profile Details") {
+                OutlinedTextField(
+                    value = name,
+                    onValueChange = { name = it },
+                    label = { Text("Display Name") },
+                    modifier = Modifier.fillMaxWidth()
                 )
-            }
+                Spacer(modifier = Modifier.height(8.dp))
 
-            Button(
-                onClick = {
-                    try {
-                        errorMessage = null
-                        val metadata = Metadata(
-                            name = name,
-                            about = about,
-                            picture = null,
-                            nip05 = null,
-                            website = null
-                        )
-                        viewModel.completeSignup(generatedNsec, metadata)
-                    } catch (e: Exception) {
-                        errorMessage = e.message ?: "An error occurred during signup"
+                OutlinedTextField(
+                    value = about,
+                    onValueChange = { about = it },
+                    label = { Text("About") },
+                    modifier = Modifier.fillMaxWidth(),
+                    minLines = 3
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+
+                if (errorMessage != null) {
+                    Text(
+                        text = errorMessage!!,
+                        color = MaterialTheme.colorScheme.error,
+                        modifier = Modifier.padding(bottom = 16.dp)
+                    )
+                }
+
+                HisaPrimaryButton(
+                    text = "Create Account",
+                    enabled = name.isNotBlank() && about.isNotBlank(),
+                    onClick = {
+                        try {
+                            errorMessage = null
+                            val metadata = Metadata(
+                                name = name,
+                                about = about,
+                                picture = null,
+                                nip05 = null,
+                                website = null
+                            )
+                            viewModel.completeSignup(generatedNsec, metadata)
+                        } catch (e: Exception) {
+                            errorMessage = e.message ?: "An error occurred during signup"
+                        }
                     }
-                },
-                modifier = Modifier.fillMaxWidth(),
-                enabled = name.isNotBlank() && about.isNotBlank()
-            ) {
-                Text("Create Account")
+                )
             }
 
             Spacer(modifier = Modifier.height(12.dp))

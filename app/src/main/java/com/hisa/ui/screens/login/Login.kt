@@ -22,6 +22,8 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.saveable.rememberSaveable
 import com.hisa.viewmodel.AuthViewModel
 import com.hisa.ui.screens.signup.SignupScreen
+import com.hisa.ui.components.HisaFormCard
+import com.hisa.ui.components.HisaPrimaryButton
 
 
 @Composable
@@ -102,7 +104,6 @@ fun LoginScreen(
                     horizontalAlignment = Alignment.CenterHorizontally
                 ) {
                     Spacer(modifier = Modifier.height(32.dp))
-                    // App Logo
                     Image(
                         painter = painterResource(id = R.drawable.png_hisa),
                         contentDescription = "Hisa App Logo",
@@ -111,7 +112,6 @@ fun LoginScreen(
                             .clip(RoundedCornerShape(24.dp))
                     )
                     Spacer(modifier = Modifier.height(16.dp))
-                    // Welcome Text
                     Text(
                         text = "Welcome to Hisa",
                         style = MaterialTheme.typography.headlineLarge,
@@ -123,92 +123,74 @@ fun LoginScreen(
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.7f)
                     )
-                    Spacer(modifier = Modifier.height(32.dp))
-                    // Login Form
-                    Text(stringResource(R.string.login_with_nostr_nsec), style = MaterialTheme.typography.headlineMedium)
-                    Spacer(modifier = Modifier.height(16.dp))
-                    OutlinedTextField(
-                        value = nsec,
-                        onValueChange = {
-                            nsec = it
-                            attempted = false
-                        },
-                        label = { Text(stringResource(R.string.nsec)) },
-                        visualTransformation = PasswordVisualTransformation(),
-                        modifier = Modifier.fillMaxWidth()
-                    )
-                    Spacer(modifier = Modifier.height(16.dp))
-                    Button(
-                        onClick = {
-                            attempted = true
-                            viewModel.loginWithNsec(nsec)
-                        },
-                        modifier = Modifier.fillMaxWidth(),
-                        enabled = !isLoading,
-                        colors = ButtonDefaults.buttonColors(
-                            containerColor = MaterialTheme.colorScheme.primary,
-                            contentColor = MaterialTheme.colorScheme.onPrimary
-                        )
-                    ) {
-                        if (isLoading) {
-                            CircularProgressIndicator(
-                                modifier = Modifier.size(24.dp),
-                                color = MaterialTheme.colorScheme.onPrimary
-                            )
-                        } else {
-                            Text(stringResource(R.string.login), color = MaterialTheme.colorScheme.onPrimary)
-                        }
-                    }
+                    Spacer(modifier = Modifier.height(24.dp))
 
-                    Spacer(modifier = Modifier.height(12.dp))
-                    // Login with Amber (external signer)
-                    Button(
-                        onClick = {
-                            try {
-                                // Build an intent that matches the Amber/Quartz GET_PUBLIC_KEY request shape.
-                                val intent = android.content.Intent(android.content.Intent.ACTION_VIEW, "nostrsigner:".toUri())
-                                intent.putExtra("type", "get_public_key")
-                                // Ask once for the DM operations we need later so Amber can
-                                // serve them through NIP-55 content resolvers without reopening.
-                                intent.putExtra(
-                                    "permissions",
-                                    """[
-                                      {"type":"nip44_encrypt"},
-                                      {"type":"nip44_decrypt"},
-                                      {"type":"sign_event","kind":13},
-                                      {"type":"sign_event","kind":30402},
-                                      {"type":"sign_event","kind":30017},
-                                      {"type":"sign_event","kind":30018},
-                                      {"type":"sign_event","kind":5}
-                                    ]""".trimIndent()
-                                )
-                                externalLauncher.launch(intent)
-                            } catch (e: Exception) {
-                                Log.e("ExternalSigner", "Error launching signer", e)
-                            }
-                        },
-                        modifier = Modifier.fillMaxWidth(),
-                        colors = ButtonDefaults.buttonColors(
-                            containerColor = MaterialTheme.colorScheme.secondaryContainer,
-                            contentColor = MaterialTheme.colorScheme.onSecondaryContainer
-                        )
-                    ) {
-                        Text("Login with Amber")
-                    }
-                    if (clearingData) {
-                        Spacer(modifier = Modifier.height(8.dp))
-                        Row(
-                            horizontalArrangement = Arrangement.Center,
-                            verticalAlignment = Alignment.CenterVertically,
+                    HisaFormCard(title = stringResource(R.string.login_with_nostr_nsec)) {
+                        OutlinedTextField(
+                            value = nsec,
+                            onValueChange = {
+                                nsec = it
+                                attempted = false
+                            },
+                            label = { Text(stringResource(R.string.nsec)) },
+                            visualTransformation = PasswordVisualTransformation(),
                             modifier = Modifier.fillMaxWidth()
+                        )
+                        Spacer(modifier = Modifier.height(16.dp))
+                        HisaPrimaryButton(
+                            text = if (isLoading) "Logging in..." else stringResource(R.string.login),
+                            enabled = !isLoading,
+                            onClick = {
+                                attempted = true
+                                viewModel.loginWithNsec(nsec)
+                            }
+                        )
+                        Spacer(modifier = Modifier.height(12.dp))
+                        Button(
+                            onClick = {
+                                try {
+                                    val intent = android.content.Intent(android.content.Intent.ACTION_VIEW, "nostrsigner:".toUri())
+                                    intent.putExtra("type", "get_public_key")
+                                    intent.putExtra(
+                                        "permissions",
+                                        """[
+                                          {"type":"nip44_encrypt"},
+                                          {"type":"nip44_decrypt"},
+                                          {"type":"sign_event","kind":13},
+                                          {"type":"sign_event","kind":30402},
+                                          {"type":"sign_event","kind":30017},
+                                          {"type":"sign_event","kind":30018},
+                                          {"type":"sign_event","kind":5}
+                                        ]""".trimIndent()
+                                    )
+                                    externalLauncher.launch(intent)
+                                } catch (e: Exception) {
+                                    Log.e("ExternalSigner", "Error launching signer", e)
+                                }
+                            },
+                            modifier = Modifier.fillMaxWidth(),
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = MaterialTheme.colorScheme.secondaryContainer,
+                                contentColor = MaterialTheme.colorScheme.onSecondaryContainer
+                            )
                         ) {
-                            CircularProgressIndicator(modifier = Modifier.size(16.dp))
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Text("Clearing previous data...", style = MaterialTheme.typography.bodyMedium)
+                            Text("Login with Amber")
                         }
-                    } else if (attempted && !loginSuccess && nsec.isNotEmpty() && !isLoading) {
-                        Spacer(modifier = Modifier.height(8.dp))
-                        Text(stringResource(R.string.invalid_nsec_or_login_failed), color = MaterialTheme.colorScheme.error)
+                        if (clearingData) {
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Row(
+                                horizontalArrangement = Arrangement.Center,
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                CircularProgressIndicator(modifier = Modifier.size(16.dp))
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text("Clearing previous data...", style = MaterialTheme.typography.bodyMedium)
+                            }
+                        } else if (attempted && !loginSuccess && nsec.isNotEmpty() && !isLoading) {
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Text(stringResource(R.string.invalid_nsec_or_login_failed), color = MaterialTheme.colorScheme.error)
+                        }
                     }
                     Spacer(modifier = Modifier.weight(1f))
                     Row(
