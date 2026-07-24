@@ -100,6 +100,8 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import com.hisa.data.cache.UiResumeStateStore
 import com.hisa.data.nostr.NostrClient
 import com.hisa.data.nostr.SubscriptionManager
+import com.hisa.ui.components.HisaFormCard
+import com.hisa.ui.components.HisaPrimaryButton
 import com.hisa.ui.components.SearchBar
 import com.hisa.ui.components.OrderNotificationsDrawer
 import com.hisa.util.Constants
@@ -214,12 +216,14 @@ fun MainScreen(
             title = { M3Text("Welcome to Hisa!") },
             text = { M3Text("Your account has been created successfully! Don't forget to backup your keys in Settings.") },
             confirmButton = {
-                Button(onClick = {
-                    showDialog = false
-                    onDialogDismissed?.invoke()
-                }) {
-                    M3Text("OK")
-                }
+                HisaPrimaryButton(
+                    text = "OK",
+                    modifier = Modifier.fillMaxWidth(),
+                    onClick = {
+                        showDialog = false
+                        onDialogDismissed?.invoke()
+                    }
+                )
             }
         )
     }
@@ -233,19 +237,9 @@ fun MainScreen(
                 drawerShape = RoundedCornerShape(topEnd = 28.dp, bottomEnd = 28.dp),
                 drawerContainerColor = MaterialTheme.colorScheme.surface
             ) {
-                Box(
+                HisaFormCard(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(12.dp)
-                        .clip(RoundedCornerShape(20.dp))
-                        .background(
-                            brush = Brush.linearGradient(
-                                listOf(
-                                    MaterialTheme.colorScheme.primary.copy(alpha = 0.14f),
-                                    MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.6f)
-                                )
-                            )
-                        )
                         .padding(12.dp)
                 ) {
                     Row(

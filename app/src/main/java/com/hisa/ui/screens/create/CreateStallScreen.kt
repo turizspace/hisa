@@ -19,6 +19,8 @@ import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.navigation.NavHostController
+import com.hisa.ui.components.HisaFormCard
+import com.hisa.ui.components.HisaPrimaryButton
 import org.json.JSONArray
 import org.json.JSONObject
 import java.util.UUID
@@ -82,9 +84,11 @@ fun CreateStallScreen(
                 shadowElevation = 8.dp,
                 color = MaterialTheme.colorScheme.surface
             ) {
-                Button(
+                HisaPrimaryButton(
+                    text = "Create Stall",
+                    enabled = stallName.isNotBlank(),
+                    modifier = Modifier.padding(16.dp),
                     onClick = {
-                        // Build tags list according to NIP-15
                         val tags = mutableListOf<List<String>>().apply {
                             selectedTagsList.forEach { tag ->
                                 sanitizeListingTag(tag).takeIf { it.isNotBlank() }?.let { add(listOf("t", it)) }
@@ -99,24 +103,8 @@ fun CreateStallScreen(
                         ) {
                             onNavigateBack()
                         }
-                    },
-                    enabled = stallName.isNotBlank(),
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(16.dp),
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = MaterialTheme.colorScheme.primary,
-                        contentColor = MaterialTheme.colorScheme.onPrimary
-                    ),
-                    shape = MaterialTheme.shapes.medium
-                ) {
-                    Icon(Icons.Default.Send, contentDescription = "Create")
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Text(
-                        "Create Stall",
-                        style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold)
-                    )
-                }
+                    }
+                )
             }
         }
     ) { padding ->
@@ -127,319 +115,219 @@ fun CreateStallScreen(
                 .background(MaterialTheme.colorScheme.surface)
                 .verticalScroll(rememberScrollState())
         ) {
-            // Basic Info Card
-            Card(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(16.dp)
-                    .shadow(
-                        elevation = 4.dp,
-                        shape = MaterialTheme.shapes.medium,
-                        spotColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.1f)
-                    ),
-                colors = CardDefaults.cardColors(
-                    containerColor = MaterialTheme.colorScheme.surface,
-                ),
-                shape = MaterialTheme.shapes.medium
+            HisaFormCard(
+                modifier = Modifier.padding(16.dp),
+                title = "Stall Information"
             ) {
-                Column(
+                OutlinedTextField(
+                    value = stallName,
+                    onValueChange = { stallName = it },
+                    label = { Text("Stall Name *") },
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedBorderColor = MaterialTheme.colorScheme.primary,
+                        unfocusedBorderColor = MaterialTheme.colorScheme.outline
+                    )
+                )
+
+                Spacer(modifier = Modifier.height(16.dp))
+
+                OutlinedTextField(
+                    value = stallDescription,
+                    onValueChange = { stallDescription = it },
+                    label = { Text("Description (optional)") },
                     modifier = Modifier
-                        .padding(16.dp)
                         .fillMaxWidth()
+                        .height(100.dp),
+                    minLines = 4,
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedBorderColor = MaterialTheme.colorScheme.primary,
+                        unfocusedBorderColor = MaterialTheme.colorScheme.outline
+                    )
+                )
+            }
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            HisaFormCard(
+                modifier = Modifier.padding(horizontal = 16.dp),
+                title = "Settings"
+            ) {
+                var currencyExpanded by remember { mutableStateOf(false) }
+                ExposedDropdownMenuBox(
+                    expanded = currencyExpanded,
+                    onExpandedChange = { currencyExpanded = !currencyExpanded },
+                    modifier = Modifier.fillMaxWidth()
                 ) {
-                    Text(
-                        "Stall Information",
-                        style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.Bold),
-                        color = MaterialTheme.colorScheme.primary
-                    )
-
-                    Spacer(modifier = Modifier.height(16.dp))
-
                     OutlinedTextField(
-                        value = stallName,
-                        onValueChange = { stallName = it },
-                        label = { Text("Stall Name *") },
-                        modifier = Modifier.fillMaxWidth(),
-                        colors = OutlinedTextFieldDefaults.colors(
-                            focusedBorderColor = MaterialTheme.colorScheme.primary,
-                            unfocusedBorderColor = MaterialTheme.colorScheme.outline
-                        )
-                    )
-
-                    Spacer(modifier = Modifier.height(16.dp))
-
-                    OutlinedTextField(
-                        value = stallDescription,
-                        onValueChange = { stallDescription = it },
-                        label = { Text("Description (optional)") },
+                        value = currency,
+                        onValueChange = { /* readOnly - selection via menu */ },
+                        readOnly = true,
+                        label = { Text("Currency") },
                         modifier = Modifier
                             .fillMaxWidth()
-                            .height(100.dp),
-                        minLines = 4,
-                        colors = OutlinedTextFieldDefaults.colors(
-                            focusedBorderColor = MaterialTheme.colorScheme.primary,
-                            unfocusedBorderColor = MaterialTheme.colorScheme.outline
-                        )
-                    )
-                }
-            }
-
-            Spacer(modifier = Modifier.height(16.dp))
-
-            // Currency Card
-            Card(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 16.dp)
-                    .shadow(
-                        elevation = 4.dp,
-                        shape = MaterialTheme.shapes.medium,
-                        spotColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.1f)
-                    ),
-                colors = CardDefaults.cardColors(
-                    containerColor = MaterialTheme.colorScheme.surface,
-                ),
-                shape = MaterialTheme.shapes.medium
-            ) {
-                Column(
-                    modifier = Modifier
-                        .padding(16.dp)
-                        .fillMaxWidth()
-                ) {
-                    Text(
-                        "Settings",
-                        style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.Bold),
-                        color = MaterialTheme.colorScheme.primary
+                            .menuAnchor(),
+                        trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = currencyExpanded) }
                     )
 
-                    Spacer(modifier = Modifier.height(16.dp))
-
-                    var currencyExpanded by remember { mutableStateOf(false) }
-                    ExposedDropdownMenuBox(
+                    ExposedDropdownMenu(
                         expanded = currencyExpanded,
-                        onExpandedChange = { currencyExpanded = !currencyExpanded },
-                        modifier = Modifier.fillMaxWidth()
+                        onDismissRequest = { currencyExpanded = false }
                     ) {
-                        OutlinedTextField(
-                            value = currency,
-                            onValueChange = { /* readOnly - selection via menu */ },
-                            readOnly = true,
-                            label = { Text("Currency") },
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .menuAnchor(),
-                            trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = currencyExpanded) }
-                        )
-
-                        ExposedDropdownMenu(
-                            expanded = currencyExpanded,
-                            onDismissRequest = { currencyExpanded = false }
-                        ) {
-                            listOf("SATS", "USD", "EUR", "GBP", "BTC").forEach { option ->
-                                DropdownMenuItem(
-                                    text = { Text(option) },
-                                    onClick = {
-                                        currency = option
-                                        currencyExpanded = false
-                                    }
-                                )
-                            }
-                        }
-                    }
-                }
-            }
-
-            Spacer(modifier = Modifier.height(16.dp))
-
-            // Shipping Zones Card
-            Card(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(16.dp)
-                    .shadow(
-                        elevation = 4.dp,
-                        shape = MaterialTheme.shapes.medium,
-                        spotColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.1f)
-                    ),
-                colors = CardDefaults.cardColors(
-                    containerColor = MaterialTheme.colorScheme.surface,
-                ),
-                shape = MaterialTheme.shapes.medium
-            ) {
-                Column(
-                    modifier = Modifier
-                        .padding(16.dp)
-                        .fillMaxWidth()
-                ) {
-                    Text(
-                        "Shipping Zones (optional)",
-                        style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.Bold),
-                        color = MaterialTheme.colorScheme.primary
-                    )
-
-                    Spacer(modifier = Modifier.height(12.dp))
-
-                    shippingZones.forEachIndexed { index, zone ->
-                        Card(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .background(MaterialTheme.colorScheme.surfaceVariant),
-                            colors = CardDefaults.cardColors(
-                                containerColor = MaterialTheme.colorScheme.surfaceVariant
-                            )
-                        ) {
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(12.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.SpaceBetween
-                            ) {
-                                Column(modifier = Modifier.weight(1f)) {
-                                    Text(
-                                        zone.name,
-                                        style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.Bold)
-                                    )
-                                    Text(
-                                        "Cost: ${zone.cost}",
-                                        style = MaterialTheme.typography.labelSmall
-                                    )
-                                }
-                                IconButton(onClick = {
-                                    shippingZones = shippingZones.filterIndexed { i, _ -> i != index }
-                                }) {
-                                    Icon(Icons.Default.Delete, contentDescription = "Delete Zone")
-                                }
-                            }
-                        }
-                        Spacer(modifier = Modifier.height(8.dp))
-                    }
-
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        OutlinedTextField(
-                            value = newZoneName,
-                            onValueChange = { newZoneName = it },
-                            label = { Text("Zone name") },
-                            modifier = Modifier
-                                .weight(0.5f)
-                                .height(48.dp)
-                        )
-                        Spacer(modifier = Modifier.width(8.dp))
-                        OutlinedTextField(
-                            value = newZoneCost,
-                            onValueChange = { newZoneCost = it },
-                            label = { Text("Cost") },
-                            modifier = Modifier
-                                .weight(0.5f)
-                                .height(48.dp)
-                        )
-                    }
-
-                    Spacer(modifier = Modifier.height(8.dp))
-
-                    Button(
-                        onClick = {
-                            if (newZoneName.isNotBlank() && newZoneCost.isNotBlank()) {
-                                shippingZones = shippingZones + ShippingZone(
-                                    id = UUID.randomUUID().toString(),
-                                    name = newZoneName,
-                                    cost = newZoneCost,
-                                    regions = listOf()
-                                )
-                                newZoneName = ""
-                                newZoneCost = ""
-                            }
-                        },
-                        modifier = Modifier.fillMaxWidth(),
-                        colors = ButtonDefaults.buttonColors(
-                            containerColor = MaterialTheme.colorScheme.secondaryContainer,
-                            contentColor = MaterialTheme.colorScheme.onSecondaryContainer
-                        )
-                    ) {
-                        Icon(Icons.Default.Add, contentDescription = "Add Zone")
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Text("Add Zone")
-                    }
-                }
-            }
-
-            Spacer(modifier = Modifier.height(16.dp))
-
-            // Categories Card
-            Card(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(16.dp)
-                    .shadow(
-                        elevation = 4.dp,
-                        shape = MaterialTheme.shapes.medium,
-                        spotColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.1f)
-                    ),
-                colors = CardDefaults.cardColors(
-                    containerColor = MaterialTheme.colorScheme.surface,
-                ),
-                shape = MaterialTheme.shapes.medium
-            ) {
-                Column(
-                    modifier = Modifier
-                        .padding(16.dp)
-                        .fillMaxWidth()
-                ) {
-                    Text(
-                        "Categories",
-                        style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.Bold),
-                        color = MaterialTheme.colorScheme.primary
-                    )
-
-                    Spacer(modifier = Modifier.height(16.dp))
-
-                    FlowRow(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        verticalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        stallPredefinedTags.forEach { tag ->
-                            FilterChip(
-                                selected = tag in selectedTagsList,
+                        listOf("SATS", "USD", "EUR", "GBP", "BTC").forEach { option ->
+                            DropdownMenuItem(
+                                text = { Text(option) },
                                 onClick = {
-                                    selectedTagsList = if (tag in selectedTagsList) {
-                                        selectedTagsList - tag
-                                    } else {
-                                        selectedTagsList + tag
-                                    }
-                                },
-                                label = { Text(tag) },
-                                colors = filterChipColors(
-                                    selectedContainerColor = MaterialTheme.colorScheme.primaryContainer,
-                                    selectedLabelColor = MaterialTheme.colorScheme.onPrimaryContainer
-                                )
+                                    currency = option
+                                    currencyExpanded = false
+                                }
                             )
                         }
                     }
+                }
+            }
 
-                    Spacer(modifier = Modifier.height(12.dp))
+            Spacer(modifier = Modifier.height(16.dp))
 
-                    var newTag by rememberSaveable { mutableStateOf("") }
-                    Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                        OutlinedTextField(
-                            value = newTag,
-                            onValueChange = { newTag = it },
-                            label = { Text("Add category") },
-                            modifier = Modifier.weight(1f)
+            HisaFormCard(
+                modifier = Modifier.padding(16.dp),
+                title = "Shipping Zones (optional)"
+            ) {
+                shippingZones.forEachIndexed { index, zone ->
+                    Card(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(MaterialTheme.colorScheme.surfaceVariant),
+                        colors = CardDefaults.cardColors(
+                            containerColor = MaterialTheme.colorScheme.surfaceVariant
                         )
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Button(onClick = {
-                            val trimmed = sanitizeListingTag(newTag)
-                            if (trimmed.isNotBlank() && trimmed !in selectedTagsList) {
-                                selectedTagsList = selectedTagsList + trimmed
-                                newTag = ""
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(12.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    zone.name,
+                                    style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.Bold)
+                                )
+                                Text(
+                                    "Cost: ${zone.cost}",
+                                    style = MaterialTheme.typography.labelSmall
+                                )
                             }
-                        }) {
-                            Text("Add")
+                            IconButton(onClick = {
+                                shippingZones = shippingZones.filterIndexed { i, _ -> i != index }
+                            }) {
+                                Icon(Icons.Default.Delete, contentDescription = "Delete Zone")
+                            }
                         }
+                    }
+                    Spacer(modifier = Modifier.height(8.dp))
+                }
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    OutlinedTextField(
+                        value = newZoneName,
+                        onValueChange = { newZoneName = it },
+                        label = { Text("Zone name") },
+                        modifier = Modifier
+                            .weight(0.5f)
+                            .height(48.dp)
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    OutlinedTextField(
+                        value = newZoneCost,
+                        onValueChange = { newZoneCost = it },
+                        label = { Text("Cost") },
+                        modifier = Modifier
+                            .weight(0.5f)
+                            .height(48.dp)
+                    )
+                }
+
+                Spacer(modifier = Modifier.height(8.dp))
+
+                Button(
+                    onClick = {
+                        if (newZoneName.isNotBlank() && newZoneCost.isNotBlank()) {
+                            shippingZones = shippingZones + ShippingZone(
+                                id = UUID.randomUUID().toString(),
+                                name = newZoneName,
+                                cost = newZoneCost,
+                                regions = listOf()
+                            )
+                            newZoneName = ""
+                            newZoneCost = ""
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = MaterialTheme.colorScheme.secondaryContainer,
+                        contentColor = MaterialTheme.colorScheme.onSecondaryContainer
+                    )
+                ) {
+                    Icon(Icons.Default.Add, contentDescription = "Add Zone")
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text("Add Zone")
+                }
+            }
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            HisaFormCard(
+                modifier = Modifier.padding(16.dp),
+                title = "Categories"
+            ) {
+                FlowRow(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    stallPredefinedTags.forEach { tag ->
+                        FilterChip(
+                            selected = tag in selectedTagsList,
+                            onClick = {
+                                selectedTagsList = if (tag in selectedTagsList) {
+                                    selectedTagsList - tag
+                                } else {
+                                    selectedTagsList + tag
+                                }
+                            },
+                            label = { Text(tag) },
+                            colors = filterChipColors(
+                                selectedContainerColor = MaterialTheme.colorScheme.primaryContainer,
+                                selectedLabelColor = MaterialTheme.colorScheme.onPrimaryContainer
+                            )
+                        )
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(12.dp))
+
+                var newTag by rememberSaveable { mutableStateOf("") }
+                Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    OutlinedTextField(
+                        value = newTag,
+                        onValueChange = { newTag = it },
+                        label = { Text("Add category") },
+                        modifier = Modifier.weight(1f)
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Button(onClick = {
+                        val trimmed = sanitizeListingTag(newTag)
+                        if (trimmed.isNotBlank() && trimmed !in selectedTagsList) {
+                            selectedTagsList = selectedTagsList + trimmed
+                            newTag = ""
+                        }
+                    }) {
+                        Text("Add")
                     }
                 }
             }

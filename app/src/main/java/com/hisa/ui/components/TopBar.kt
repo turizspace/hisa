@@ -80,26 +80,35 @@ fun TopBar(
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun HisaScreenScaffold(
-    title: String,
+    title: String? = null,
     modifier: Modifier = Modifier,
     onBackClick: (() -> Unit)? = null,
+    topBarContent: (@Composable () -> Unit)? = null,
     content: @Composable (PaddingValues) -> Unit
 ) {
     Scaffold(
         topBar = {
-            TopAppBar(
-                title = { Text(title) },
-                navigationIcon = {
-                    if (onBackClick != null) {
-                        IconButton(onClick = onBackClick) {
-                            Icon(
-                                imageVector = Icons.AutoMirrored.Filled.ArrowBack,
-                                contentDescription = "Back"
-                            )
+            if (topBarContent != null) {
+                topBarContent()
+            } else {
+                TopAppBar(
+                    title = {
+                        if (title != null) {
+                            Text(title)
+                        }
+                    },
+                    navigationIcon = {
+                        if (onBackClick != null) {
+                            IconButton(onClick = onBackClick) {
+                                Icon(
+                                    imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                                    contentDescription = "Back"
+                                )
+                            }
                         }
                     }
-                }
-            )
+                )
+            }
         }
     ) { paddingValues ->
         Box(
@@ -159,9 +168,7 @@ fun HisaTabRow(
             Tab(
                 selected = index == selectedTabIndex,
                 onClick = { onTabSelected(index) },
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(vertical = 16.dp),
+                modifier = Modifier.fillMaxWidth(),
                 text = {
                     Text(
                         text = title,

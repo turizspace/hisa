@@ -29,6 +29,8 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
+import com.hisa.ui.components.HisaFormCard
+import com.hisa.ui.components.HisaPrimaryButton
 import com.hisa.ui.navigation.NAV_RESULT_UPLOADED_MEDIA_URL
 import com.hisa.ui.navigation.Routes
 import com.hisa.ui.navigation.consumeUploadedMediaUrls
@@ -99,9 +101,11 @@ fun CreateServiceScreen(
                 shadowElevation = 8.dp,
                 color = MaterialTheme.colorScheme.surface
             ) {
-                Button(
+                HisaPrimaryButton(
+                    text = if (dTag != null) "Update Service" else "Post Service",
+                    enabled = title.isNotBlank() && summary.isNotBlank(),
+                    modifier = Modifier.padding(16.dp),
                     onClick = {
-                        // Create NIP-99 compliant event
                         val dValue = dTag?.takeIf { it.isNotBlank() } ?: draftDTag
                         val orderedImages = buildList {
                             val cover = coverImageUrl?.takeIf { it in selectedImageUrls } ?: selectedImageUrls.firstOrNull()
@@ -132,7 +136,6 @@ fun CreateServiceScreen(
                             description,
                             tags
                         ) {
-                            // Persist the dValue so future edits reuse the same replaceable key
                             try {
                                 val current = navController?.currentBackStackEntry
                                 val previous = navController?.previousBackStackEntry
@@ -144,24 +147,8 @@ fun CreateServiceScreen(
                             } catch (_: Exception) {}
                             onNavigateBack()
                         }
-                    },
-                    enabled = title.isNotBlank() && summary.isNotBlank(),
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(16.dp),
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = MaterialTheme.colorScheme.primary,
-                        contentColor = MaterialTheme.colorScheme.onPrimary
-                    ),
-                    shape = MaterialTheme.shapes.medium
-                ) {
-                    Icon(Icons.Default.Send, contentDescription = if (dTag != null) "Update" else "Post")
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Text(
-                        if (dTag != null) "Update Service" else "Post Service",
-                        style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold)
-                    )
-                }
+                    }
+                )
             }
         }
     ) { padding ->
@@ -172,252 +159,179 @@ fun CreateServiceScreen(
                 .background(MaterialTheme.colorScheme.surface)
                 .verticalScroll(rememberScrollState())
         ) {
-            Card(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(16.dp)
-                    .shadow(
-                        elevation = 4.dp,
-                        shape = MaterialTheme.shapes.medium,
-                        spotColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.1f)
-                    ),
-                colors = CardDefaults.cardColors(
-                    containerColor = MaterialTheme.colorScheme.surface,
-                ),
-                shape = MaterialTheme.shapes.medium
+            HisaFormCard(
+                modifier = Modifier.padding(16.dp),
+                title = "Service Details"
             ) {
-                Column(
-                    modifier = Modifier
-                        .padding(16.dp)
-                        .fillMaxWidth()
-                ) {
-                    Text(
-                        "Service Details",
-                        style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.Bold),
-                        color = MaterialTheme.colorScheme.primary
+                OutlinedTextField(
+                    value = title,
+                    onValueChange = { title = it },
+                    label = { Text("Title") },
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedBorderColor = MaterialTheme.colorScheme.primary,
+                        unfocusedBorderColor = MaterialTheme.colorScheme.outline
                     )
+                )
 
-                    Spacer(modifier = Modifier.height(16.dp))
+                Spacer(modifier = Modifier.height(16.dp))
 
-                    OutlinedTextField(
-                        value = title,
-                        onValueChange = { title = it },
-                        label = { Text("Title") },
-                        modifier = Modifier.fillMaxWidth(),
-                        colors = OutlinedTextFieldDefaults.colors(
-                            focusedBorderColor = MaterialTheme.colorScheme.primary,
-                            unfocusedBorderColor = MaterialTheme.colorScheme.outline
-                        )
+                OutlinedTextField(
+                    value = summary,
+                    onValueChange = { summary = it },
+                    label = { Text("Summary") },
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedBorderColor = MaterialTheme.colorScheme.primary,
+                        unfocusedBorderColor = MaterialTheme.colorScheme.outline
                     )
+                )
 
-                    Spacer(modifier = Modifier.height(16.dp))
+                Spacer(modifier = Modifier.height(16.dp))
 
-                    OutlinedTextField(
-                        value = summary,
-                        onValueChange = { summary = it },
-                        label = { Text("Summary") },
-                        modifier = Modifier.fillMaxWidth(),
-                        colors = OutlinedTextFieldDefaults.colors(
-                            focusedBorderColor = MaterialTheme.colorScheme.primary,
-                            unfocusedBorderColor = MaterialTheme.colorScheme.outline
-                        )
+                OutlinedTextField(
+                    value = description,
+                    onValueChange = { description = it },
+                    label = { Text("Description") },
+                    modifier = Modifier.fillMaxWidth(),
+                    minLines = 4,
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedBorderColor = MaterialTheme.colorScheme.primary,
+                        unfocusedBorderColor = MaterialTheme.colorScheme.outline
                     )
-
-                    Spacer(modifier = Modifier.height(16.dp))
-
-                    OutlinedTextField(
-                        value = description,
-                        onValueChange = { description = it },
-                        label = { Text("Description") },
-                        modifier = Modifier.fillMaxWidth(),
-                        minLines = 4,
-                        colors = OutlinedTextFieldDefaults.colors(
-                            focusedBorderColor = MaterialTheme.colorScheme.primary,
-                            unfocusedBorderColor = MaterialTheme.colorScheme.outline
-                        )
-                    )
-                }
+                )
             }
 
             Spacer(modifier = Modifier.height(16.dp))
 
             // Pricing and Location Card
-            Card(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 16.dp)
-                    .shadow(
-                        elevation = 4.dp,
-                        shape = MaterialTheme.shapes.medium,
-                        spotColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.1f)
-                    ),
-                colors = CardDefaults.cardColors(
-                    containerColor = MaterialTheme.colorScheme.surface,
-                ),
-                shape = MaterialTheme.shapes.medium
+            HisaFormCard(
+                modifier = Modifier.padding(horizontal = 16.dp),
+                title = "Pricing & Location"
             ) {
-                Column(
-                    modifier = Modifier
-                        .padding(16.dp)
-                        .fillMaxWidth()
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Text(
-                        "Pricing & Location",
-                        style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.Bold),
-                        color = MaterialTheme.colorScheme.primary
+                    OutlinedTextField(
+                        value = price,
+                        onValueChange = { price = it },
+                        label = { Text("Price") },
+                        modifier = Modifier.weight(0.65f)
                     )
 
-                    Spacer(modifier = Modifier.height(16.dp))
+                    Spacer(modifier = Modifier.width(8.dp))
 
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        OutlinedTextField(
-                            value = price,
-                            onValueChange = { price = it },
-                            label = { Text("Price") },
-                            modifier = Modifier.weight(0.65f)
-                        )
-
-                        Spacer(modifier = Modifier.width(8.dp))
-
-                        // Currency picker: show a dropdown to choose currency
-                        var currencyExpanded by remember { mutableStateOf(false) }
-                        ExposedDropdownMenuBox(
-                            expanded = currencyExpanded,
-                            onExpandedChange = { currencyExpanded = !currencyExpanded },
-                            modifier = Modifier.weight(0.35f)
-                        ) {
-                            OutlinedTextField(
-                                value = currency,
-                                onValueChange = { /* readOnly - selection via menu */ },
-                                readOnly = true,
-                                label = { Text("Currency") },
-                                modifier = Modifier.menuAnchor(),
-                                trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = currencyExpanded) }
-                            )
-
-                            ExposedDropdownMenu(
-                                expanded = currencyExpanded,
-                                onDismissRequest = { currencyExpanded = false }
-                            ) {
-                                listOf("USD", "EUR", "GBP", "SATS").forEach { option ->
-                                    DropdownMenuItem(
-                                        text = { Text(option) },
-                                        onClick = {
-                                            currency = option
-                                            currencyExpanded = false
-                                        }
-                                    )
-                                }
-                            }
-                        }
-                    }
-
-                    Spacer(modifier = Modifier.height(16.dp))
-
-                    var frequencyExpanded by remember { mutableStateOf(false) }
+                    var currencyExpanded by remember { mutableStateOf(false) }
                     ExposedDropdownMenuBox(
-                        expanded = frequencyExpanded,
-                        onExpandedChange = { frequencyExpanded = !frequencyExpanded },
-                        modifier = Modifier.fillMaxWidth()
+                        expanded = currencyExpanded,
+                        onExpandedChange = { currencyExpanded = !currencyExpanded },
+                        modifier = Modifier.weight(0.35f)
                     ) {
                         OutlinedTextField(
-                            value = frequency ?: "one-time",
-                            onValueChange = {},
+                            value = currency,
+                            onValueChange = { /* readOnly - selection via menu */ },
                             readOnly = true,
-                            label = { Text("Billing") },
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .menuAnchor(),
-                            trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = frequencyExpanded) }
+                            label = { Text("Currency") },
+                            modifier = Modifier.menuAnchor(),
+                            trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = currencyExpanded) }
                         )
+
                         ExposedDropdownMenu(
-                            expanded = frequencyExpanded,
-                            onDismissRequest = { frequencyExpanded = false }
+                            expanded = currencyExpanded,
+                            onDismissRequest = { currencyExpanded = false }
                         ) {
-                            listOf(null, "hour", "day", "week", "month", "year").forEach { option ->
+                            listOf("USD", "EUR", "GBP", "SATS").forEach { option ->
                                 DropdownMenuItem(
-                                    text = { Text(option ?: "one-time") },
+                                    text = { Text(option) },
                                     onClick = {
-                                        frequency = option
-                                        frequencyExpanded = false
+                                        currency = option
+                                        currencyExpanded = false
                                     }
                                 )
                             }
                         }
                     }
-
-                    Spacer(modifier = Modifier.height(16.dp))
-
-                    OutlinedTextField(
-                        value = location,
-                        onValueChange = { location = it },
-                        label = { Text("Location") },
-                        modifier = Modifier.fillMaxWidth()
-                    )
                 }
+
+                Spacer(modifier = Modifier.height(16.dp))
+
+                var frequencyExpanded by remember { mutableStateOf(false) }
+                ExposedDropdownMenuBox(
+                    expanded = frequencyExpanded,
+                    onExpandedChange = { frequencyExpanded = !frequencyExpanded },
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    OutlinedTextField(
+                        value = frequency ?: "one-time",
+                        onValueChange = {},
+                        readOnly = true,
+                        label = { Text("Billing") },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .menuAnchor(),
+                        trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = frequencyExpanded) }
+                    )
+                    ExposedDropdownMenu(
+                        expanded = frequencyExpanded,
+                        onDismissRequest = { frequencyExpanded = false }
+                    ) {
+                        listOf(null, "hour", "day", "week", "month", "year").forEach { option ->
+                            DropdownMenuItem(
+                                text = { Text(option ?: "one-time") },
+                                onClick = {
+                                    frequency = option
+                                    frequencyExpanded = false
+                                }
+                            )
+                        }
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(16.dp))
+
+                OutlinedTextField(
+                    value = location,
+                    onValueChange = { location = it },
+                    label = { Text("Location") },
+                    modifier = Modifier.fillMaxWidth()
+                )
             }
 
             Spacer(modifier = Modifier.height(16.dp))
 
             // Categories and Image Card
-            Card(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(16.dp)
-                    .shadow(
-                        elevation = 4.dp,
-                        shape = MaterialTheme.shapes.medium,
-                        spotColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.1f)
-                    ),
-                colors = CardDefaults.cardColors(
-                    containerColor = MaterialTheme.colorScheme.surface,
-                ),
-                shape = MaterialTheme.shapes.medium
+            HisaFormCard(
+                modifier = Modifier.padding(16.dp),
+                title = "Categories & Media"
             ) {
-                Column(
-                    modifier = Modifier
-                        .padding(16.dp)
-                        .fillMaxWidth()
+                FlowRow(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    Text(
-                        "Categories & Media",
-                        style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.Bold),
-                        color = MaterialTheme.colorScheme.primary
-                    )
-
-                    Spacer(modifier = Modifier.height(16.dp))
-
-                    FlowRow(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        verticalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        predefinedTags.forEach { tag ->
-                            FilterChip(
-                                selected = tag in selectedTagsList,
-                                onClick = {
-                                    selectedTagsList = if (tag in selectedTagsList) {
-                                        selectedTagsList - tag
-                                    } else {
-                                        selectedTagsList + tag
-                                    }
-                                },
-                                label = { Text(tag) },
-                                colors = filterChipColors(
-                                    selectedContainerColor = MaterialTheme.colorScheme.primaryContainer,
-                                    selectedLabelColor = MaterialTheme.colorScheme.onPrimaryContainer
-                                )
+                    predefinedTags.forEach { tag ->
+                        FilterChip(
+                            selected = tag in selectedTagsList,
+                            onClick = {
+                                selectedTagsList = if (tag in selectedTagsList) {
+                                    selectedTagsList - tag
+                                } else {
+                                    selectedTagsList + tag
+                                }
+                            },
+                            label = { Text(tag) },
+                            colors = filterChipColors(
+                                selectedContainerColor = MaterialTheme.colorScheme.primaryContainer,
+                                selectedLabelColor = MaterialTheme.colorScheme.onPrimaryContainer
                             )
-                        }
+                        )
                     }
+                }
 
-                    Spacer(modifier = Modifier.height(12.dp))
+                Spacer(modifier = Modifier.height(12.dp))
 
-                    // Free-form tag input so users can add their own categories/hashtags
-                    var newTag by rememberSaveable { mutableStateOf("") }
+                var newTag by rememberSaveable { mutableStateOf("") }
                     Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                         OutlinedTextField(
                             value = newTag,
@@ -535,11 +449,10 @@ fun CreateServiceScreen(
                 }
             }
         }
-    }
 
     // Listen for uploaded_media_url result and apply to selectedImageUrls when appropriate
     LaunchedEffect(navController) {
-            // Check for edit payload in savedStateHandle (current or previous entry) and prefill form
+        // Check for edit payload in savedStateHandle (current or previous entry) and prefill form
         try {
             val currentHandle = navController?.currentBackStackEntry?.savedStateHandle
             val prevHandle = navController?.previousBackStackEntry?.savedStateHandle
@@ -602,7 +515,6 @@ fun CreateServiceScreen(
                 } catch (_: Exception) {}
             }
         } catch (_: Exception) {}
-
     }
 
     val uploadHandle = navController?.currentBackStackEntry?.savedStateHandle
@@ -628,6 +540,7 @@ fun CreateServiceScreen(
         }
     }
 }
+
 @RequiresApi(Build.VERSION_CODES.O)
 @Preview(showBackground = true)
 @Composable
