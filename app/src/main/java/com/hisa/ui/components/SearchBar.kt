@@ -1,15 +1,18 @@
 package com.hisa.ui.components
 
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.*
-import androidx.compose.runtime.*
+import androidx.compose.runtime.Composable
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
-import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.ui.Alignment
 
 @Composable
 fun SearchBar(
@@ -18,70 +21,85 @@ fun SearchBar(
     onClearSearch: () -> Unit = {},
     placeholder: String = "Search services...",
     onSearch: (String) -> Unit = {},
-    // Optional leading content to allow placing custom icons (e.g. menu) inside the search field
     leadingContent: (@Composable () -> Unit)? = null,
-    // Optional trailing content (e.g. voice search button)
     trailingContent: (@Composable () -> Unit)? = null,
     modifier: Modifier = Modifier.fillMaxWidth().padding(8.dp)
 ) {
-    var isSearchActive by remember { mutableStateOf(false) }
+    Box(
+        modifier = modifier
+            .height(48.dp)
+            .border(1.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(12.dp))
+            .background(MaterialTheme.colorScheme.surface, RoundedCornerShape(12.dp))
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 8.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Box(
+                modifier = Modifier.size(36.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                if (leadingContent != null) {
+                    leadingContent()
+                } else {
+                    Icon(
+                        imageVector = Icons.Default.Search,
+                        contentDescription = "Search",
+                        tint = MaterialTheme.colorScheme.primary
+                    )
+                }
+            }
 
-    OutlinedTextField(
-        value = value,
-        onValueChange = { newValue ->
-            onValueChange(newValue)
-            isSearchActive = newValue.isNotEmpty()
-            onSearch(newValue)
-        },
-        placeholder = { Text(placeholder) },
-        textStyle = MaterialTheme.typography.bodyLarge.copy(
-            color = MaterialTheme.colorScheme.onSurface
-        ),
-    modifier = modifier,
-    shape = RoundedCornerShape(12.dp),
-        leadingIcon = {
-            if (leadingContent != null) {
-                leadingContent()
-            } else {
-                Icon(
-                    imageVector = Icons.Default.Search,
-                    contentDescription = "Search",
-                    tint = MaterialTheme.colorScheme.primary
+            Box(
+                modifier = Modifier
+                    .weight(1f)
+                    .padding(start = 4.dp, end = 8.dp)
+                    .fillMaxHeight(),
+                contentAlignment = Alignment.CenterStart
+            ) {
+                BasicTextField(
+                    value = value,
+                    onValueChange = { newValue ->
+                        onValueChange(newValue)
+                        onSearch(newValue)
+                    },
+                    singleLine = true,
+                    textStyle = MaterialTheme.typography.bodyLarge.copy(
+                        color = MaterialTheme.colorScheme.onSurface
+                    ),
+                    modifier = Modifier.fillMaxWidth(),
+                    decorationBox = { innerTextField ->
+                        if (value.isEmpty()) {
+                            Text(
+                                text = placeholder,
+                                style = MaterialTheme.typography.bodyLarge,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        innerTextField()
+                    }
                 )
             }
-        },
-        trailingIcon = {
-            Row(
-                modifier = Modifier.fillMaxHeight(),
-                verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.End
-            ) {
-                if (trailingContent != null) {
-                    trailingContent()
-                }
-                if (value.isNotEmpty()) {
-                    IconButton(
-                        onClick = { 
-                            onValueChange("")
-                            isSearchActive = false
-                            onClearSearch()
-                        }
-                    ) {
-                        Icon(
-                            Icons.Default.Close, 
-                            contentDescription = "Clear search",
-                            tint = MaterialTheme.colorScheme.primary
-                        )
+
+            if (trailingContent != null) {
+                trailingContent()
+            }
+            if (value.isNotEmpty()) {
+                IconButton(
+                    onClick = {
+                        onValueChange("")
+                        onClearSearch()
                     }
+                ) {
+                    Icon(
+                        Icons.Default.Close,
+                        contentDescription = "Clear search",
+                        tint = MaterialTheme.colorScheme.primary
+                    )
                 }
             }
-        },
-        singleLine = true,
-        colors = OutlinedTextFieldDefaults.colors(
-            focusedBorderColor = MaterialTheme.colorScheme.primary,
-            unfocusedBorderColor = MaterialTheme.colorScheme.outline,
-            focusedLabelColor = MaterialTheme.colorScheme.primary,
-            unfocusedLabelColor = MaterialTheme.colorScheme.outline
-        )
-    )
+        }
+    }
 }
