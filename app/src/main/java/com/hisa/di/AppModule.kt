@@ -2,8 +2,13 @@ package com.hisa.di
 
 import android.content.Context
 import com.hisa.data.nostr.NostrClient
+import com.hisa.data.nostr.NostrSigningService
 import com.hisa.data.nostr.SubscriptionManager
 import com.hisa.data.repository.MetadataRepository
+import com.hisa.domain.service.CreateMarketplaceService
+import com.hisa.domain.service.OrderCreationService
+import com.hisa.domain.service.RelayMessageService
+import com.hisa.domain.service.RelayMessageServiceImpl
 import com.hisa.ui.util.ProfileMetaUtil
 import dagger.Module
 import dagger.Provides
@@ -80,6 +85,35 @@ object AppModule {
         subscriptionManager: com.hisa.data.nostr.SubscriptionManager
     ): MetadataRepository {
         return MetadataRepository(nostrClient, subscriptionManager)
+    }
+
+    @Provides
+    @Singleton
+    fun provideCreateMarketplaceService(
+        nostrClient: NostrClient,
+        signingService: NostrSigningService
+    ): CreateMarketplaceService {
+        return CreateMarketplaceService(nostrClient, signingService)
+    }
+
+    @Provides
+    @Singleton
+    fun provideOrderCreationService(
+        nostrClient: NostrClient,
+        signingService: NostrSigningService
+    ): OrderCreationService {
+        return OrderCreationService(nostrClient, signingService)
+    }
+
+    @Provides
+    @Singleton
+    fun provideRelayMessageService(
+        nostrClient: NostrClient,
+        subscriptionManager: SubscriptionManager,
+        messageRepository: com.hisa.data.repository.MessageRepository,
+        signingService: NostrSigningService
+    ): RelayMessageService {
+        return RelayMessageServiceImpl(nostrClient, subscriptionManager, messageRepository, signingService)
     }
 
     // MessagesViewModel factory is provided by MessagesViewModelModule

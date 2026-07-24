@@ -14,6 +14,7 @@ import com.hisa.data.cache.MessageCacheStore
 import com.hisa.data.repository.MetadataRepository
 import com.hisa.data.repository.MessageRepository
 import com.hisa.data.storage.SecureStorage
+import com.hisa.domain.service.RelayMessageService
 
 @Module
 @InstallIn(ViewModelComponent::class)
@@ -28,8 +29,9 @@ object MessagesViewModelModule {
         secureStorage: SecureStorage,
         subscriptionManager: com.hisa.data.nostr.SubscriptionManager,
         signingService: NostrSigningService,
-        messageCacheStore: MessageCacheStore
+        messageCacheStore: MessageCacheStore,
+        relayMessageService: RelayMessageService
     ): MessagesViewModel {
-        return MessagesViewModel(nostrClient, messageRepository, metadataRepository, secureStorage, subscriptionManager, signingService, messageCacheStore)
+        return MessagesViewModel(nostrClient, messageRepository, metadataRepository, secureStorage, subscriptionManager, signingService, messageCacheStore, relayMessageService)
     }
 }

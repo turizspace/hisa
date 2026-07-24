@@ -1,7 +1,6 @@
 package com.hisa.di
 
-import com.hisa.data.nostr.NostrClient
-import com.hisa.data.nostr.NostrSigningService
+import com.hisa.domain.service.CreateMarketplaceService
 import com.hisa.ui.screens.create.CreateServiceViewModel
 import dagger.Module
 import dagger.Provides
@@ -16,9 +15,8 @@ object CreateServiceModule {
     @Provides
     @ViewModelScoped
     fun provideCreateServiceViewModel(
-        nostrClient: NostrClient,
-        signingService: NostrSigningService
+        createMarketplaceService: CreateMarketplaceService
     ): CreateServiceViewModel {
-        return CreateServiceViewModel(nostrClient, signingService)
+        return CreateServiceViewModel(createMarketplaceService)
     }
 }

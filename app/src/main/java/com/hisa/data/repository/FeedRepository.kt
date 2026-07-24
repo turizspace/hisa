@@ -87,8 +87,9 @@ class FeedRepository @Inject constructor(
         subscriptionListenerId = subscriptionManager.subscribe(
             filter = SubscriptionManager.filterNIP99(limit = 200),
             onEvent = { event ->
-                val service = ServiceRepository.parseServiceEvent(event.toJson().toString()) ?: return@subscribe
-                upsertService(service)
+                ServiceRepository.parseServiceEvent(event.toJson().toString())?.let { service ->
+                    upsertService(service)
+                }
             },
             onEndOfStoredEvents = {
                 emitSnapshot()

@@ -17,6 +17,7 @@ import com.hisa.data.nostr.NostrSigningService
 import com.hisa.data.repository.ConversationRepository
 import com.hisa.data.repository.MetadataRepository
 import com.hisa.data.repository.MessageRepository
+import com.hisa.domain.service.RelayMessageService
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -46,7 +47,8 @@ class MessagesViewModel @Inject constructor(
     private val secureStorage: com.hisa.data.storage.SecureStorage,
     private val subscriptionManager: com.hisa.data.nostr.SubscriptionManager,
     private val signingService: NostrSigningService,
-    private val messageCacheStore: MessageCacheStore
+    private val messageCacheStore: MessageCacheStore,
+    private val relayMessageService: RelayMessageService
 ) : ViewModel() {
     /**
      * Clears all messages from memory. Call this on logout or when switching accounts.
@@ -1357,11 +1359,13 @@ class MessagesViewModel @Inject constructor(
                 
                 Timber.i("Sending direct message to=%s", cleanRecipientPubkey)
 
-                val sentMessage = sendGiftWrappedMessage(
-                    innerMessage = innerMessage,
+                val sentMessage = relayMessageService.sendMessage(
                     recipientPubkey = cleanRecipientPubkey,
-                    encryptionPrivateKeyBytes = signingPrivateKeyBytes,
-                    senderSigningPubkey = senderSigningPubkey
+                    content = content,
+                    subject = subject,
+                    replyTo = replyTo,
+                    senderSigningPubkey = senderSigningPubkey,
+                    signingPrivateKeyBytes = signingPrivateKeyBytes
                 )
 
                 // Preserve the locally-sent DM in state so own bubbles show immediately.

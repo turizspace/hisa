@@ -33,4 +33,6 @@ abstract class BaseViewModel : ViewModel() {
     protected fun clearError() {
         _error.value = null
     }
+
+    protected fun <T> stateValue(flow: StateFlow<T>): StateFlow<T> = flow
 }

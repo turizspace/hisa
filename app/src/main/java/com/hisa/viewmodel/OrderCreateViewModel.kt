@@ -3,7 +3,7 @@ package com.hisa.viewmodel
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.hisa.data.model.OrderItem
-import com.hisa.data.repository.OrderRepository
+import com.hisa.domain.service.OrderCreationService
 import dagger.hilt.android.lifecycle.HiltViewModel
 import javax.inject.Inject
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -20,7 +20,7 @@ sealed interface OrderCreationState {
 
 @HiltViewModel
 class OrderCreateViewModel @Inject constructor(
-    private val orderRepository: OrderRepository
+    private val orderCreationService: OrderCreationService
 ) : ViewModel() {
     private val _state = MutableStateFlow<OrderCreationState>(OrderCreationState.Idle)
     val state: StateFlow<OrderCreationState> = _state.asStateFlow()
@@ -42,7 +42,7 @@ class OrderCreateViewModel @Inject constructor(
         viewModelScope.launch {
             _state.value = OrderCreationState.Sending
             try {
-                val eventId = orderRepository.createOrder(
+                val eventId = orderCreationService.createOrder(
                     buyerPubkey = buyerPubkey,
                     buyerPrivateKeyHex = buyerPrivateKeyHex,
                     sellerPubkey = sellerPubkey,

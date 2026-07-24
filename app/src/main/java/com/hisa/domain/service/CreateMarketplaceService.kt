@@ -1,0 +1,75 @@
+package com.hisa.domain.service
+
+import com.hisa.data.nostr.NostrClient
+import com.hisa.data.nostr.NostrSigningService
+import org.json.JSONArray
+import org.json.JSONObject
+import java.util.UUID
+
+class CreateMarketplaceService(
+    private val nostrClient: NostrClient,
+    private val signingService: NostrSigningService
+) {
+    suspend fun createService(
+        title: String,
+        summary: String,
+        description: String,
+        tags: List<List<String>>,
+        privateKeyHex: String?,
+        pubKey: String
+    ) {
+        val mutableTags = tags.toMutableList()
+        if (mutableTags.none { it.firstOrNull() == "title" }) {
+            mutableTags.add(listOf("title", title))
+        }
+        if (mutableTags.none { it.firstOrNull() == "summary" }) {
+            mutableTags.add(listOf("summary", summary))
+        }
+
+        signingService.signAndPublish(
+            nostrClient = nostrClient,
+            kind = 30402,
+            content = description,
+            tags = mutableTags.distinct(),
+            pubkeyHint = pubKey,
+            privateKeyHexHint = privateKeyHex
+        )
+    }
+
+    suspend fun createStall(
+        title: String,
+        summary: String,
+        description: String,
+        tags: List<List<String>>,
+        privateKeyHex: String?,
+        pubKey: String
+    ) {
+        val categories = tags.mapNotNull { tag ->
+            if (tag.isNotEmpty() && tag[0] == "t" && tag.size > 1) tag[1] else null
+        }
+
+        val stallId = UUID.randomUUID().toString()
+        val metadata = JSONObject().apply {
+            put("id", stallId)
+            put("name", title)
+            put("description", summary.ifBlank { description })
+            put("currency", "SATS")
+            put("shipping", JSONArray())
+            if (summary.isNotBlank() || description.isNotBlank()) {
+                put("about", summary.ifBlank { description })
+            }
+        }
+
+        val stallTags = mutableListOf<List<String>>(listOf("d", stallId))
+        categories.forEach { stallTags.add(listOf("t", it)) }
+
+        signingService.signAndPublish(
+            nostrClient = nostrClient,
+            kind = 30017,
+            content = metadata.toString(),
+            tags = stallTags,
+            pubkeyHint = pubKey,
+            privateKeyHexHint = privateKeyHex
+        )
+    }
+}
