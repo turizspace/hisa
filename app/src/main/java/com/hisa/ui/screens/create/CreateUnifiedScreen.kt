@@ -33,6 +33,7 @@ import com.hisa.ui.components.HisaTabRow
 fun CreateUnifiedScreen(
     onCreateService: (title: String, summary: String, description: String, tags: List<List<String>>, onSuccess: () -> Unit) -> Unit,
     onCreateStall: (title: String, summary: String, description: String, tags: List<List<String>>, onSuccess: () -> Unit) -> Unit,
+    onCreateProduct: ((stallId: String, name: String, description: String, price: String, currency: String, tags: List<List<String>>, onSuccess: () -> Unit) -> Unit)? = null,
     onNavigateBack: () -> Unit,
     navController: NavHostController? = null
 ) {
@@ -68,6 +69,7 @@ fun CreateUnifiedScreen(
                 1 -> {
                     CreateStallScreen(
                         onCreateStall = onCreateStall,
+                        onCreateProduct = onCreateProduct,
                         onNavigateBack = onNavigateBack,
                         navController = navController
                     )

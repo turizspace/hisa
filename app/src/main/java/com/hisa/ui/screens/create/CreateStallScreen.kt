@@ -66,6 +66,7 @@ val stallPredefinedTags = listOf(
 @Composable
 fun CreateStallScreen(
     onCreateStall: (title: String, summary: String, description: String, tags: List<List<String>>, onSuccess: () -> Unit) -> Unit,
+    onCreateProduct: ((stallId: String, name: String, description: String, price: String, currency: String, tags: List<List<String>>, onSuccess: () -> Unit) -> Unit)? = null,
     onNavigateBack: () -> Unit,
     navController: NavHostController? = null
 ) {
@@ -76,6 +77,14 @@ fun CreateStallScreen(
     var selectedTagsList by rememberSaveable { mutableStateOf(listOf<String>()) }
     var newZoneName by rememberSaveable { mutableStateOf("") }
     var newZoneCost by rememberSaveable { mutableStateOf("") }
+    var showProductComposer by rememberSaveable { mutableStateOf(false) }
+    var createdStallId by rememberSaveable { mutableStateOf<String?>(null) }
+    var newProductName by rememberSaveable { mutableStateOf("") }
+    var newProductDescription by rememberSaveable { mutableStateOf("") }
+    var newProductPrice by rememberSaveable { mutableStateOf("") }
+    var newProductCurrency by rememberSaveable { mutableStateOf("SATS") }
+    var newProductTags by rememberSaveable { mutableStateOf(listOf<String>()) }
+    var productCreated by rememberSaveable { mutableStateOf(false) }
 
     Scaffold(
         bottomBar = {
@@ -101,7 +110,9 @@ fun CreateStallScreen(
                             stallDescription,
                             tags
                         ) {
-                            onNavigateBack()
+                            createdStallId = UUID.randomUUID().toString()
+                            showProductComposer = true
+                            productCreated = true
                         }
                     }
                 )
@@ -115,6 +126,80 @@ fun CreateStallScreen(
                 .background(MaterialTheme.colorScheme.surface)
                 .verticalScroll(rememberScrollState())
         ) {
+            if (showProductComposer && productCreated) {
+                HisaFormCard(
+                    modifier = Modifier.padding(horizontal = 16.dp),
+                    title = "Add a product to this stall"
+                ) {
+                    OutlinedTextField(
+                        value = newProductName,
+                        onValueChange = { newProductName = it },
+                        label = { Text("Product name *") },
+                        modifier = Modifier.fillMaxWidth()
+                    )
+
+                    Spacer(modifier = Modifier.height(12.dp))
+
+                    OutlinedTextField(
+                        value = newProductDescription,
+                        onValueChange = { newProductDescription = it },
+                        label = { Text("Description") },
+                        modifier = Modifier.fillMaxWidth().height(90.dp),
+                        minLines = 3
+                    )
+
+                    Spacer(modifier = Modifier.height(12.dp))
+
+                    Row(modifier = Modifier.fillMaxWidth()) {
+                        OutlinedTextField(
+                            value = newProductPrice,
+                            onValueChange = { newProductPrice = it },
+                            label = { Text("Price") },
+                            modifier = Modifier.weight(1f)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        OutlinedTextField(
+                            value = newProductCurrency,
+                            onValueChange = { newProductCurrency = it },
+                            label = { Text("Currency") },
+                            modifier = Modifier.weight(1f)
+                        )
+                    }
+
+                    Spacer(modifier = Modifier.height(12.dp))
+
+                    Row(modifier = Modifier.fillMaxWidth()) {
+                        HisaPrimaryButton(
+                            text = "Publish Product",
+                            enabled = newProductName.isNotBlank(),
+                            onClick = {
+                                val productTags = mutableListOf<List<String>>().apply {
+                                    newProductTags.forEach { tag ->
+                                        sanitizeListingTag(tag).takeIf { it.isNotBlank() }?.let { add(listOf("t", it)) }
+                                    }
+                                }
+                                onCreateProduct?.invoke(
+                                    createdStallId.orEmpty(),
+                                    newProductName,
+                                    newProductDescription,
+                                    newProductPrice,
+                                    newProductCurrency,
+                                    productTags
+                                ) {
+                                    onNavigateBack()
+                                }
+                            }
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        OutlinedButton(onClick = onNavigateBack) {
+                            Text("Skip")
+                        }
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(16.dp))
+            }
+
             HisaFormCard(
                 modifier = Modifier.padding(16.dp),
                 title = "Stall Information"
