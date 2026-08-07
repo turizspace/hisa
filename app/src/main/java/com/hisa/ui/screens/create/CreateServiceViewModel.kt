@@ -80,4 +80,37 @@ class CreateServiceViewModel @Inject constructor(
             }
         }
     }
+
+    fun createProduct(
+        stallId: String,
+        name: String,
+        description: String,
+        price: String,
+        currency: String,
+        tags: List<List<String>>,
+        privateKeyHex: String?,
+        pubKey: String,
+        onSuccess: () -> Unit
+    ) {
+        viewModelScope.launch {
+            _isLoading.value = true
+            try {
+                createMarketplaceService.createProduct(
+                    stallId = stallId,
+                    name = name,
+                    description = description,
+                    price = price,
+                    currency = currency,
+                    tags = tags,
+                    privateKeyHex = privateKeyHex,
+                    pubKey = pubKey
+                )
+                onSuccess()
+            } catch (e: Exception) {
+                _error.value = e.message
+            } finally {
+                _isLoading.value = false
+            }
+        }
+    }
 }

@@ -329,6 +329,9 @@ fun AppNavGraph(
                 onCreateStall = { title, summary, description, tags, onSuccess ->
                     vm.createStall(title, summary, description, tags, if (privateKey.isBlank()) null else privateKey, pubKey, onSuccess)
                 },
+                onCreateProduct = { stallId, name, description, price, currency, tags, onSuccess ->
+                    vm.createProduct(stallId, name, description, price, currency, tags, if (privateKey.isBlank()) null else privateKey, pubKey, onSuccess)
+                },
                 onNavigateBack = { navController.popBackStack() },
                 navController = navController
             )

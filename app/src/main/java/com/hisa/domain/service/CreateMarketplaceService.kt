@@ -72,4 +72,44 @@ class CreateMarketplaceService(
             privateKeyHexHint = privateKeyHex
         )
     }
+
+    suspend fun createProduct(
+        stallId: String,
+        name: String,
+        description: String,
+        price: String,
+        currency: String,
+        tags: List<List<String>>,
+        privateKeyHex: String?,
+        pubKey: String
+    ) {
+        val productId = UUID.randomUUID().toString()
+        val safePrice = price.ifBlank { "0" }
+        val productMetadata = JSONObject().apply {
+            put("id", productId)
+            put("stall_id", stallId)
+            put("name", name)
+            put("description", description.ifBlank { name })
+            put("currency", currency.ifBlank { "SATS" })
+            put("price", safePrice)
+            put("quantity", null)
+            put("shipping", JSONArray())
+        }
+
+        val productTags = mutableListOf<List<String>>(listOf("d", productId), listOf("stall_id", stallId))
+        tags.forEach { tag ->
+            if (tag.isNotEmpty() && tag[0] == "t" && tag.size > 1) {
+                productTags.add(listOf("t", tag[1]))
+            }
+        }
+
+        signingService.signAndPublish(
+            nostrClient = nostrClient,
+            kind = 30018,
+            content = productMetadata.toString(),
+            tags = productTags,
+            pubkeyHint = pubKey,
+            privateKeyHexHint = privateKeyHex
+        )
+    }
 }
