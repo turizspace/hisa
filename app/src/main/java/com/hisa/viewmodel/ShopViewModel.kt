@@ -2,10 +2,12 @@ package com.hisa.viewmodel
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.hisa.data.model.Stall
 import com.hisa.data.nostr.NostrClient
 import com.hisa.data.nostr.NostrSigningService
 import com.hisa.data.nostr.toNostrEvent
 import com.hisa.data.repository.FeedRepository
+import com.hisa.data.repository.MarketplaceRepository
 import com.hisa.util.cleanPubkeyFormat
 import com.hisa.util.normalizeNostrPubkey
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -22,10 +24,23 @@ import timber.log.Timber
 class ShopViewModel @Inject constructor(
     private val nostrClient: NostrClient,
     private val feedRepository: FeedRepository,
+    private val marketplaceRepository: MarketplaceRepository,
     private val signingService: NostrSigningService
 ) : ViewModel() {
 
     private val ownerPubkey = MutableStateFlow<String?>(null)
+
+    val listingsLoading: StateFlow<Boolean> = feedRepository.isLoading.stateIn(
+        scope = viewModelScope,
+        started = SharingStarted.WhileSubscribed(5_000),
+        initialValue = false
+    )
+
+    val stallsLoading: StateFlow<Boolean> = marketplaceRepository.isLoading.stateIn(
+        scope = viewModelScope,
+        started = SharingStarted.WhileSubscribed(5_000),
+        initialValue = false
+    )
 
     val services: StateFlow<List<com.hisa.data.model.ServiceListing>> = combine(
         feedRepository.services,
@@ -42,9 +57,25 @@ class ShopViewModel @Inject constructor(
         initialValue = emptyList()
     )
 
+    val stalls: StateFlow<List<Stall>> = combine(
+        marketplaceRepository.stalls,
+        ownerPubkey
+    ) { stalls, owner ->
+        if (owner.isNullOrBlank()) {
+            emptyList()
+        } else {
+            stalls.filter { it.ownerPubkey == owner }.sortedByDescending { it.createdAt }
+        }
+    }.stateIn(
+        scope = viewModelScope,
+        started = SharingStarted.WhileSubscribed(5_000),
+        initialValue = emptyList()
+    )
+
     fun subscribeToOwner(ownerHex: String) {
         ownerPubkey.value = normalizeNostrPubkey(ownerHex) ?: cleanPubkeyFormat(ownerHex)
         feedRepository.ensureStarted()
+        marketplaceRepository.ensureStarted()
     }
 
     /**
