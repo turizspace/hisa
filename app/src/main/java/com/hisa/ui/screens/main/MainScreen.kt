@@ -79,6 +79,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.material3.Surface
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
@@ -96,6 +97,11 @@ import com.hisa.ui.screens.feed.FeedTab
 import com.hisa.ui.screens.shop.StallsTab
 import com.hisa.ui.screens.messages.MessagesTab
 import com.hisa.R
+import com.hisa.viewmodel.FeedViewModel
+import com.hisa.viewmodel.MessagesViewModel
+import com.hisa.viewmodel.OrderNotificationsViewModel
+import com.hisa.util.Constants
+import com.hisa.ui.components.OrderNotificationsDrawer
 import androidx.hilt.navigation.compose.hiltViewModel
 import com.hisa.data.cache.UiResumeStateStore
 import com.hisa.data.nostr.NostrClient
@@ -103,11 +109,6 @@ import com.hisa.data.nostr.SubscriptionManager
 import com.hisa.ui.components.HisaFormCard
 import com.hisa.ui.components.HisaPrimaryButton
 import com.hisa.ui.components.SearchBar
-import com.hisa.ui.components.OrderNotificationsDrawer
-import com.hisa.util.Constants
-import com.hisa.viewmodel.FeedViewModel
-import com.hisa.viewmodel.MessagesViewModel
-import com.hisa.viewmodel.OrderNotificationsViewModel
 
 @Composable
 fun DrawerNavActionItem(
@@ -141,8 +142,8 @@ fun DrawerNavActionItem(
     )
 }
 
+    
 @RequiresApi(Build.VERSION_CODES.O)
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun MainScreen(
     navController: NavController,
@@ -190,6 +191,7 @@ fun MainScreen(
     var searchQuery by rememberSaveable { mutableStateOf(resumeStateStore.searchQuery) }
     var showDialog by remember { mutableStateOf(showWelcomeDialog) }
     var showNotificationsDrawer by remember { mutableStateOf(false) }
+    var showSearchOverlay by remember { mutableStateOf(false) }
     // Order changed so Create is in the middle and MyShop is at the end: Feed | Messages | Create | Stalls | MyShop
     val tabs = listOf("Feed", "Messages", "Create", "Stalls", "My Shop")
     val tabIcons = listOf(
@@ -272,7 +274,7 @@ fun MainScreen(
                 Spacer(modifier = Modifier.height(8.dp))
 
                 val drawerItems = listOf(
-                    Triple("Profile", Icons.Default.PersonOutline, true) to { 
+                    Triple("Profile", Icons.Default.PersonOutline, true) to {
                         scope.launch { drawerState.close() }
                         navController.navigate("profile/$userPubkey")
                     },
@@ -284,7 +286,7 @@ fun MainScreen(
                         scope.launch { drawerState.close() }
                         navController.navigate(Routes.FAQ)
                     },
-                    Triple("Donate", Icons.Default.WaterDrop, false) to {
+                    Triple("Donate", Icons.Filled.WaterDrop, false) to {
                         scope.launch { drawerState.close() }
                         navController.navigate(Routes.DONATE)
                     },
@@ -299,12 +301,11 @@ fun MainScreen(
                     }
                 )
 
-                drawerItems.forEachIndexed { _, item ->
-                    val (label, icon, selected) = item.first
+                drawerItems.forEach { item ->
                     DrawerNavActionItem(
-                        label = label,
-                        icon = icon,
-                        selected = selected,
+                        label = item.first.first,
+                        icon = item.first.second,
+                        selected = item.first.third,
                         onClick = item.second
                     )
                 }
@@ -312,79 +313,6 @@ fun MainScreen(
         }
     ) {
         Scaffold(
-            topBar = {
-                // Use a TopAppBar with the app name and a compact SearchBar next to it
-                CenterAlignedTopAppBar(
-                    title = {
-                        val focusManager = LocalFocusManager.current
-                        // Modern design: put the menu icon inside the search bar and let search fill the width
-                        SearchBar(
-                            value = searchQuery,
-                            onValueChange = { new ->
-                                searchQuery = new
-                                // Keep stalls saved state in sync when user types while on Stalls tab
-                                if (selectedTab == 3) {
-                                    navController.currentBackStackEntry?.savedStateHandle?.set("stalls_searchQuery", searchQuery)
-                                }
-                            },
-                            onClearSearch = {
-                                searchQuery = ""
-                                if (selectedTab == 0) {
-                                    feedViewModel.refreshFeed()
-                                }
-                                // Also clear any saved stalls search so clearing the bar truly resets Stalls list
-                                navController.currentBackStackEntry?.savedStateHandle?.set("stalls_searchQuery", "")
-                                focusManager.clearFocus()
-                            },
-                            placeholder = "Search...",
-                            onSearch = { query -> searchQuery = query },
-                            // Provide the menu button as leading content so it's inside the field
-                            leadingContent = {
-                                IconButton(onClick = { scope.launch { drawerState.open() } }) {
-                                    Icon(Icons.Filled.Menu, contentDescription = "Menu")
-                                }
-                            },
-                            modifier = Modifier.fillMaxWidth().height(44.dp)
-                        )
-                    },
-                    actions = {
-                        // Notification bell with badge
-                        val unreadCount = notificationsViewModel.unreadCount.collectAsState().value
-                        Box {
-                            IconButton(onClick = { showNotificationsDrawer = true }) {
-                                Icon(
-                                    Icons.Default.NotificationsActive,
-                                    contentDescription = "Notifications",
-                                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    modifier = Modifier.size(24.dp)
-                                )
-                            }
-                            
-                            // Unread count badge
-                            if (unreadCount > 0) {
-                                Box(
-                                    modifier = Modifier
-                                        .size(20.dp)
-                                        .align(Alignment.TopEnd)
-                                        .clip(CircleShape)
-                                        .background(MaterialTheme.colorScheme.error),
-                                    contentAlignment = Alignment.Center
-                                ) {
-                                    Text(
-                                        text = if (unreadCount > 99) "99+" else unreadCount.toString(),
-                                        style = MaterialTheme.typography.labelSmall.copy(
-                                            fontWeight = androidx.compose.ui.text.font.FontWeight.Bold,
-                                            fontSize = 10.sp
-                                        ),
-                                        color = MaterialTheme.colorScheme.onError
-                                    )
-                                }
-                            }
-                        }
-                    },
-                    // remove separate navigation icon for the new in-field menu
-                )
-            },
             floatingActionButton = {
                 // FAB removed - Create is now a bottom tab
             },
@@ -440,6 +368,70 @@ fun MainScreen(
                             detectTapGestures(onTap = { focusManager.clearFocus() })
                         }
                 ) {
+                    SearchBar(
+                        value = searchQuery,
+                        onValueChange = { new ->
+                            searchQuery = new
+                            if (selectedTab == 3) {
+                                navController.currentBackStackEntry?.savedStateHandle?.set("stalls_searchQuery", new)
+                            }
+                        },
+                        onClearSearch = {
+                            searchQuery = ""
+                            if (selectedTab == 0) {
+                                feedViewModel.refreshFeed()
+                            }
+                            navController.currentBackStackEntry?.savedStateHandle?.set("stalls_searchQuery", "")
+                            focusManager.clearFocus()
+                        },
+                        placeholder = "Search the marketplace...",
+                        onSearch = { query -> searchQuery = query },
+                        leadingContent = {
+                            IconButton(onClick = { scope.launch { drawerState.open() } }) {
+                                Icon(
+                                    Icons.Default.Menu,
+                                    contentDescription = "Open menu",
+                                    tint = MaterialTheme.colorScheme.primary
+                                )
+                            }
+                        },
+                        trailingContent = {
+                            IconButton(onClick = { showNotificationsDrawer = true }) {
+                                Icon(
+                                    Icons.Default.NotificationsActive,
+                                    contentDescription = "Notifications",
+                                    tint = MaterialTheme.colorScheme.primary
+                                )
+                            }
+                        },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp)
+                    )
+                    // Small animated overlay to indicate active search context
+                    LaunchedEffect(searchQuery) {
+                        showSearchOverlay = searchQuery.isNotBlank()
+                    }
+                    androidx.compose.animation.AnimatedVisibility(
+                        visible = showSearchOverlay,
+                        enter = fadeIn(),
+                        exit = fadeOut()
+                    ) {
+                        Surface(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 16.dp, vertical = 8.dp),
+                            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.12f),
+                            shape = RoundedCornerShape(12.dp)
+                        ) {
+                            Row(modifier = Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
+                                Text(text = "Searching for \"$searchQuery\"", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurface)
+                                Spacer(modifier = Modifier.weight(1f))
+                                Text(text = "Searching the marketplace", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+                        }
+                    }
+                    Spacer(modifier = Modifier.height(10.dp))
                     // Tab content – each tab MUST add its own bottom content padding
                     // (e.g., 80.dp) to prevent the last items from being hidden
                     // behind the floating navigation menu.
@@ -465,9 +457,11 @@ fun MainScreen(
                                 messagesViewModel = messagesViewModel
                             )
                         }
-                        2 -> { /* Create tab – navigation handled on click */ }
+                        2 -> {
+                            /* Create tab – navigation handled on click */
+                        }
                         3 -> tabStateHolder.SaveableStateProvider(key = "stalls_tab") {
-                            com.hisa.ui.screens.shop.StallsTab(
+                            StallsTab(
                                 navController = navController,
                                 userPubkey = userPubkey,
                                 nostrClient = nostrClient,

@@ -8,7 +8,24 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
-import androidx.compose.material3.*
+import androidx.compose.material.icons.filled.ArrowForwardIos
+import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material3.Badge
+import androidx.compose.material3.BadgedBox
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.Divider
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.ui.Alignment
@@ -21,6 +38,9 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
 import com.hisa.data.model.Order
+import com.hisa.ui.theme.AccentPrimary
+import com.hisa.ui.theme.AccentSecondary
+import com.hisa.ui.theme.GlassAlphaHigh
 import com.hisa.ui.util.formatTimeAgo
 import com.hisa.viewmodel.OrderNotificationsViewModel
 
@@ -39,9 +59,11 @@ fun OrderNotificationsDrawer(
     val incomingOrders = notificationsViewModel.incomingOrders.collectAsState().value
     val currentUserPubkey = notificationsViewModel.currentUserPubkey.collectAsState().value
 
-    ModalBottomSheet(
-        onDismissRequest = onDismiss,
-        modifier = Modifier.fillMaxWidth()
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp),
+        tonalElevation = 10.dp,
+        color = MaterialTheme.colorScheme.surfaceVariant
     ) {
         Column(
             modifier = Modifier
@@ -58,9 +80,9 @@ fun OrderNotificationsDrawer(
             ) {
                 Column {
                     Text(
-                        text = "New Orders",
-                        style = MaterialTheme.typography.headlineSmall,
-                        fontWeight = FontWeight.Bold
+                        text = "Order pulse",
+                        style = MaterialTheme.typography.headlineSmall.copy(fontWeight = FontWeight.ExtraBold),
+                        color = MaterialTheme.colorScheme.onSurface
                     )
                     Text(
                         text = "$unreadCount unread order${if (unreadCount != 1) "s" else ""}",
@@ -69,17 +91,17 @@ fun OrderNotificationsDrawer(
                     )
                 }
 
-                if (unreadCount > 0) {
-                    Button(
-                        onClick = { notificationsViewModel.markAllAsRead() },
-                        modifier = Modifier.wrapContentWidth()
-                    ) {
-                        Text("Mark All Read", fontSize = 12.sp)
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    TextButton(onClick = { notificationsViewModel.markAllAsRead() }) {
+                        Text("Mark all read")
+                    }
+                    IconButton(onClick = onDismiss) {
+                        Icon(imageVector = Icons.Default.Close, contentDescription = "Close")
                     }
                 }
             }
 
-            Divider()
+            Divider(color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.12f))
 
             // Orders list - show only incoming orders (where user is merchant)
             if (incomingOrders.isEmpty()) {

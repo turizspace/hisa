@@ -10,8 +10,8 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.LaunchedEffect
 import android.util.Log
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.darkColorScheme
-import androidx.compose.material3.lightColorScheme
+import com.hisa.ui.theme.darkColorSchemeFromTokens
+import com.hisa.ui.theme.lightColorSchemeFromTokens
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.navigation.compose.rememberNavController
@@ -54,7 +54,7 @@ class MainActivity : ComponentActivity() {
                 com.hisa.ui.util.LocalProfileRepository provides app.profileRepository
             ) {
                 // Directly read isDarkTheme so Compose will recompose MaterialTheme when it changes.
-                val colors = if (isDarkTheme) darkColorScheme() else lightColorScheme()
+                val colors = if (isDarkTheme) darkColorSchemeFromTokens() else lightColorSchemeFromTokens()
                 // Log at composition time so we can verify MaterialTheme recomposition happens.
                 LaunchedEffect(isDarkTheme) {
                     Log.i("MainActivity", "Compose MaterialTheme recomposing. isDarkTheme=$isDarkTheme, authViewModelHash=${authViewModel.hashCode()}")
