@@ -1,10 +1,12 @@
 package com.hisa.ui.components
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -12,10 +14,12 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.NotificationsActive
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material3.*
@@ -24,6 +28,11 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
+import com.hisa.ui.theme.AccentPrimary
+import com.hisa.ui.theme.AccentSecondary
+import com.hisa.ui.theme.GlassAlphaHigh
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -34,47 +43,89 @@ import com.hisa.viewmodel.OrderNotificationsViewModel
 @Composable
 fun TopBar(
     title: String,
+    onMenuClick: () -> Unit = {},
     onProfileClick: () -> Unit,
     onNotificationBellClick: () -> Unit = {},
     notificationsViewModel: OrderNotificationsViewModel? = hiltViewModel()
 ) {
     val unreadCount = notificationsViewModel?.unreadCount?.collectAsState()?.value ?: 0
 
-    CenterAlignedTopAppBar(
-        title = { Text(title) },
-        actions = {
-            // Notification bell with badge
-            if (notificationsViewModel != null) {
+    Surface(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(
+                Brush.verticalGradient(
+                    colors = listOf(
+                        AccentPrimary.copy(alpha = GlassAlphaHigh * 0.08f),
+                        MaterialTheme.colorScheme.surface.copy(alpha = GlassAlphaHigh),
+                        MaterialTheme.colorScheme.surface.copy(alpha = GlassAlphaHigh * 0.8f)
+                    )
+                )
+            ),
+        color = Color.Transparent,
+        shadowElevation = 20.dp,
+        shape = RoundedCornerShape(bottomStart = 28.dp, bottomEnd = 28.dp)
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 18.dp, vertical = 16.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                IconButton(onClick = onMenuClick) {
+                    Icon(
+                        Icons.Default.Menu,
+                        contentDescription = "Open menu",
+                        tint = MaterialTheme.colorScheme.onSurface
+                    )
+                }
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = title,
+                        style = MaterialTheme.typography.headlineSmall.copy(fontWeight = FontWeight.ExtraBold),
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                    Text(
+                        text = "Your futuristic marketplace hub",
+                        style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.Medium),
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                 Box {
                     IconButton(onClick = onNotificationBellClick) {
                         Icon(
                             Icons.Default.NotificationsActive,
                             contentDescription = "Notifications",
-                            tint = MaterialTheme.colorScheme.onSurfaceVariant
+                            tint = MaterialTheme.colorScheme.onSurface
                         )
                     }
-
-                    // Green dot indicator for new orders
                     if (unreadCount > 0) {
                         Box(
                             modifier = Modifier
-                                .size(12.dp)
+                                .size(14.dp)
                                 .align(Alignment.TopEnd)
-                                .offset(x = (-6).dp, y = 6.dp)
+                                .offset(x = (-4).dp, y = 4.dp)
                                 .clip(CircleShape)
-                                .background(MaterialTheme.colorScheme.primary)
-                        )
+                                .background(AccentSecondary)
+                        ) {}
                     }
                 }
-            }
 
-            // Profile button
-            IconButton(onClick = onProfileClick) {
-                Icon(Icons.Default.Person, contentDescription = "Profile")
+                IconButton(onClick = onProfileClick) {
+                    Icon(
+                        Icons.Default.Person,
+                        contentDescription = "Profile",
+                        tint = MaterialTheme.colorScheme.onSurface
+                    )
+                }
             }
-        },
-        modifier = Modifier.fillMaxWidth()
-    )
+        }
+    }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
