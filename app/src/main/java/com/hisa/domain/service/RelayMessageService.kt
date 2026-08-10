@@ -1,5 +1,7 @@
 package com.hisa.domain.service
 
+import android.os.Build
+import androidx.annotation.RequiresApi
 import com.hisa.data.nostr.NostrClient
 import com.hisa.data.nostr.SubscriptionManager
 import com.hisa.data.repository.MessageRepository
@@ -10,6 +12,7 @@ import com.hisa.util.cleanPubkeyFormat
 import org.json.JSONObject
 
 interface RelayMessageService {
+    @RequiresApi(Build.VERSION_CODES.O)
     suspend fun sendMessage(
         recipientPubkey: String,
         content: String,
@@ -29,6 +32,7 @@ class RelayMessageServiceImpl(
     private val messageRepository: MessageRepository,
     private val signingService: NostrSigningService
 ) : RelayMessageService {
+    @RequiresApi(Build.VERSION_CODES.O)
     override suspend fun sendMessage(
         recipientPubkey: String,
         content: String,

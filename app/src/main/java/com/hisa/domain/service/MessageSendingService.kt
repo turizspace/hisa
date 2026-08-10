@@ -1,5 +1,7 @@
 package com.hisa.domain.service
 
+import android.os.Build
+import androidx.annotation.RequiresApi
 import com.hisa.data.model.Message
 import com.hisa.data.nostr.NostrClient
 import com.hisa.data.nostr.NostrSigningService
@@ -15,6 +17,7 @@ class MessageSendingService(
     private val onLocalMessage: (Message) -> Unit,
     private val onError: (String) -> Unit
 ) {
+    @RequiresApi(Build.VERSION_CODES.O)
     suspend fun sendMessage(
         recipientPubkey: String,
         content: String,
