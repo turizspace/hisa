@@ -15,15 +15,25 @@ android {
     namespace 'com.hisa'
     compileSdk 35
 
+    def keystoreProperties = new Properties()
+    def keystorePropertiesFile = rootProject.file("keystore.properties")
+    if (keystorePropertiesFile.exists()) {
+        keystoreProperties.load(new FileInputStream(keystorePropertiesFile))
+    }
+
     def releaseStoreFilePath = System.getenv("CI_ANDROID_KEYSTORE_PATH") ?:
             project.findProperty("CI_ANDROID_KEYSTORE_PATH") ?:
-            project.findProperty("RELEASE_STORE_FILE")
+            project.findProperty("RELEASE_STORE_FILE") ?:
+            keystoreProperties['storeFile']
     def releaseStorePassword = System.getenv("CI_ANDROID_KEYSTORE_PASSWORD") ?:
-            project.findProperty("RELEASE_STORE_PASSWORD")
+            project.findProperty("RELEASE_STORE_PASSWORD") ?:
+            keystoreProperties['storePassword']
     def releaseKeyAlias = System.getenv("CI_ANDROID_KEY_ALIAS") ?:
-            project.findProperty("RELEASE_KEY_ALIAS")
+            project.findProperty("RELEASE_KEY_ALIAS") ?:
+            keystoreProperties['keyAlias']
     def releaseKeyPassword = System.getenv("CI_ANDROID_KEY_PASSWORD") ?:
-            project.findProperty("RELEASE_KEY_PASSWORD")
+            project.findProperty("RELEASE_KEY_PASSWORD") ?:
+            keystoreProperties['keyPassword']
     def hasReleaseSigning = [releaseStoreFilePath, releaseStorePassword, releaseKeyAlias, releaseKeyPassword].every { value ->
         value != null && value.toString().trim()
     }
@@ -33,7 +43,7 @@ android {
         minSdk 24
         targetSdk 35
         versionCode 2
-        versionName "0.2.3"
+        versionName "0.2.4"
     }
 
     buildFeatures {
