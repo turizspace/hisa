@@ -28,8 +28,11 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import com.hisa.ui.theme.AccentPrimary
+import com.hisa.ui.theme.GlassAlphaLow
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -48,7 +51,9 @@ fun ServicePreviewCard(
     publisherMetadata: Metadata? = null,
     modifier: Modifier = Modifier,
     showTags: Boolean = false,
-    onClick: () -> Unit = {}
+    onClick: () -> Unit = {},
+    hero: Boolean = false,
+    featured: Boolean = false
 ) {
     val profileRepository = LocalProfileRepository.current
     val profiles by profileRepository.profiles.collectAsState()
@@ -85,7 +90,9 @@ fun ServicePreviewCard(
         primaryChip = formatServicePrice(service),
         secondaryText = supportingText,
         modifier = modifier,
-        onClick = onClick
+        onClick = onClick,
+        hero = hero,
+        featured = featured
     )
 }
 
@@ -129,7 +136,9 @@ private fun MarketplacePreviewCard(
     primaryChip: String?,
     secondaryText: String,
     modifier: Modifier = Modifier,
-    onClick: () -> Unit = {}
+    onClick: () -> Unit = {},
+    hero: Boolean = false,
+    featured: Boolean = false
 ) {
     Card(
         modifier = modifier
@@ -142,10 +151,18 @@ private fun MarketplacePreviewCard(
         elevation = CardDefaults.cardElevation(defaultElevation = 3.dp)
     ) {
         Column(modifier = Modifier.fillMaxSize()) {
+            // Image area - supports hero (larger, edge-to-edge) and featured badge with glow
+            val imageHeight = if (modifier == Modifier) 96.dp else  if (false) 96.dp else 96.dp
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(96.dp)
+                    .height(
+                        when {
+                            hero -> 220.dp
+                            !imageUrl.isNullOrBlank() -> 140.dp
+                            else -> 96.dp
+                        }
+                    )
                     .background(MaterialTheme.colorScheme.surfaceVariant)
             ) {
                 if (!imageUrl.isNullOrBlank()) {
@@ -173,12 +190,31 @@ private fun MarketplacePreviewCard(
                             .align(Alignment.BottomStart)
                             .padding(10.dp),
                         shape = RoundedCornerShape(999.dp),
-                        color = MaterialTheme.colorScheme.primary.copy(alpha = 0.9f)
+                        color = AccentPrimary.copy(alpha = 0.9f)
                     ) {
                         Text(
                             text = primaryChip,
                             modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
                             style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.SemiBold),
+                            color = MaterialTheme.colorScheme.onPrimary
+                        )
+                    }
+                }
+
+                // Featured badge with subtle glow
+                if (featured) {
+                    Surface(
+                        modifier = Modifier
+                            .align(Alignment.TopEnd)
+                            .padding(10.dp)
+                            .shadow(8.dp, RoundedCornerShape(12.dp)),
+                        shape = RoundedCornerShape(12.dp),
+                        color = AccentPrimary.copy(alpha = 0.95f)
+                    ) {
+                        Text(
+                            text = "FEATURED",
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                            style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
                             color = MaterialTheme.colorScheme.onPrimary
                         )
                     }
