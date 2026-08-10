@@ -10,10 +10,12 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.material3.Divider
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -25,10 +27,10 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.navigation.NavController
-import com.hisa.data.repository.ServiceRepository
 import com.hisa.ui.components.CompactServiceCard
 import com.hisa.ui.components.HisaTabRow
 import com.hisa.ui.components.StallCard
+import com.hisa.ui.navigation.Routes
 import com.hisa.util.cleanPubkeyFormat
 import com.hisa.util.normalizeNostrPubkey
 import com.hisa.viewmodel.AuthViewModel
@@ -47,8 +49,11 @@ fun ShopScreen(
 
     val shopViewModel: ShopViewModel = hiltViewModel()
     val authViewModel: AuthViewModel = hiltViewModel()
+    var shopSubscriptionStarted by rememberSaveable { mutableStateOf(false) }
+
     androidx.compose.runtime.LaunchedEffect(ownerHex) {
         shopViewModel.subscribeToOwner(ownerHex)
+        shopSubscriptionStarted = true
     }
 
     val myListings by shopViewModel.services.collectAsState(initial = emptyList())
@@ -56,24 +61,55 @@ fun ShopScreen(
     val listingsLoading by shopViewModel.listingsLoading.collectAsState(initial = false)
     val stallsLoading by shopViewModel.stallsLoading.collectAsState(initial = false)
     val privateKeyHex by authViewModel.privateKey.collectAsState()
-    var selectedView by rememberSaveable { mutableStateOf("listings") }
+    val sortedListings = remember(myListings) { myListings.sortedByDescending { it.createdAt } }
+    val sortedStalls = remember(myStalls) { myStalls.sortedByDescending { it.createdAt } }
+    var selectedViewIndex by rememberSaveable { mutableStateOf(0) }
 
     Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
         Column(modifier = Modifier.padding(8.dp)) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(bottom = 12.dp),
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Column {
+                    Text(
+                        text = "My Shop",
+                        style = MaterialTheme.typography.titleLarge,
+                        color = MaterialTheme.colorScheme.onBackground
+                    )
+                    Text(
+                        text = "${myListings.size} listings • ${myStalls.size} stalls",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.7f)
+                    )
+                }
+                TextButton(onClick = { navController.navigate(Routes.CREATE_SERVICE) }) {
+                    Text("Create")
+                }
+            }
+
             HisaTabRow(
                 tabs = listOf("Listings", "Stalls"),
-                selectedTabIndex = if (selectedView == "listings") 0 else 1,
-                onTabSelected = { index -> selectedView = if (index == 0) "listings" else "stalls" },
+                selectedTabIndex = selectedViewIndex,
+                onTabSelected = { index -> selectedViewIndex = index },
                 modifier = Modifier.padding(bottom = 8.dp)
             )
 
-            if (selectedView == "listings") {
+            Divider(
+                color = MaterialTheme.colorScheme.outline.copy(alpha = 0.35f),
+                thickness = 1.dp,
+                modifier = Modifier.padding(bottom = 8.dp)
+            )
+
+            if (selectedViewIndex == 0) {
                 when {
-                    listingsLoading -> LoadingStateCard(title = "Loading")
-                    myListings.isEmpty() && !listingsLoading -> EmptyStateCard(message = "No listings found")
+                    listingsLoading || !shopSubscriptionStarted -> LoadingStateCard(title = "Loading")
+                    sortedListings.isEmpty() -> EmptyStateCard(message = "No listings found")
                     else -> {
-                        LazyColumn(modifier = Modifier.padding(horizontal = 4.dp)) {
-                            items(myListings.sortedByDescending { it.createdAt }, key = { it.eventId }) { service ->
+                        LazyColumn(modifier = Modifier.weight(1f).padding(horizontal = 4.dp)) {
+                            items(sortedListings, key = { it.eventId }) { service ->
                                 CompactServiceCard(
                                     service = service,
                                     onClick = {
@@ -160,11 +196,11 @@ fun ShopScreen(
                 }
             } else {
                 when {
-                    stallsLoading -> LoadingStateCard(title = "Loading")
-                    myStalls.isEmpty() && !stallsLoading -> EmptyStateCard(message = "No stalls found")
+                    stallsLoading || !shopSubscriptionStarted -> LoadingStateCard(title = "Loading")
+                    sortedStalls.isEmpty() -> EmptyStateCard(message = "No stalls found")
                     else -> {
-                        LazyColumn(modifier = Modifier.padding(horizontal = 4.dp)) {
-                            items(myStalls.sortedByDescending { it.createdAt }, key = { it.eventId }) { stall ->
+                        LazyColumn(modifier = Modifier.weight(1f).padding(horizontal = 4.dp)) {
+                            items(sortedStalls, key = { it.eventId }) { stall ->
                                 StallCard(
                                     stall = stall,
                                     onClick = {

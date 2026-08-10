@@ -16,6 +16,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
@@ -29,8 +30,10 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import com.hisa.data.cache.UiResumeStateStore
 import com.hisa.data.nostr.NostrClient
 import com.hisa.data.nostr.SubscriptionManager
+import com.hisa.ui.components.CategoryChipRow
 import com.hisa.ui.components.StallPreviewCard
 import com.hisa.ui.navigation.Routes
+import com.hisa.util.normalizeCategory
 import com.hisa.viewmodel.StallsViewModel
 
 @RequiresApi(Build.VERSION_CODES.O)
@@ -47,8 +50,17 @@ fun StallsTab(
     val resumeStateStore = remember { UiResumeStateStore(context.applicationContext) }
     val viewModel: StallsViewModel = hiltViewModel()
     val stalls by viewModel.stalls.collectAsState()
+    var selectedCategory by rememberSaveable { mutableStateOf<String?>(null) }
     var searchText by remember { mutableStateOf(resumeStateStore.stallsSearchQuery.ifBlank { searchQuery }) }
     val normalizedQuery = remember(searchText) { searchText.trim() }
+    val categories = remember(stalls) {
+        stalls
+            .flatMap { it.categories }
+            .map(::normalizeCategory)
+            .filter { it.isNotBlank() }
+            .distinct()
+            .sorted()
+    }
     val listState = rememberLazyListState(
         initialFirstVisibleItemIndex = resumeStateStore.stallsListFirstVisibleItemIndex,
         initialFirstVisibleItemScrollOffset = resumeStateStore.stallsListFirstVisibleItemOffset
@@ -70,18 +82,21 @@ fun StallsTab(
                 resumeStateStore.saveStallsScrollPosition(index, offset)
             }
     }
-    val filteredStalls = remember(stalls, normalizedQuery) {
-        if (normalizedQuery.isBlank()) {
-            stalls
-        } else {
-            val query = normalizedQuery.lowercase()
-            stalls.filter { stall ->
+    val filteredStalls = remember(stalls, normalizedQuery, selectedCategory) {
+        stalls
+            .filter { stall ->
+                selectedCategory?.let { category ->
+                    stall.categories.map(::normalizeCategory).any { it == category }
+                } ?: true
+            }
+            .filter { stall ->
+                if (normalizedQuery.isBlank()) return@filter true
+                val query = normalizedQuery.lowercase()
                 stall.name.lowercase().contains(query) ||
                     stall.description.lowercase().contains(query) ||
                     stall.ownerDisplayName.lowercase().contains(query) ||
                     stall.categories.any { it.lowercase().contains(query) }
             }
-        }
     }
 
     if (filteredStalls.isEmpty()) {
@@ -103,6 +118,15 @@ fun StallsTab(
         contentPadding = PaddingValues(top = 8.dp, bottom = 96.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp)
     ) {
+        if (categories.isNotEmpty()) {
+            item {
+                CategoryChipRow(
+                    categories = categories,
+                    selectedCategory = selectedCategory,
+                    onSelect = { selectedCategory = it }
+                )
+            }
+        }
         items(
             items = filteredStalls,
             key = { "${it.ownerPubkey}:${it.id}" }
