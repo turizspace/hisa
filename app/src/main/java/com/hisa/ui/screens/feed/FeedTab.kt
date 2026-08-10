@@ -19,6 +19,7 @@ import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.grid.rememberLazyGridState
+import androidx.activity.compose.BackHandler
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -75,16 +76,8 @@ fun FeedTab(
     val profileRepository = LocalProfileRepository.current
     val profiles by profileRepository.profiles.collectAsState()
     val showLoading = rememberTabLoadingVisibility(isLoading = feedUiState.isLoading)
-    val allCategories = remember(stalls, feedUiState.categories) {
-        val stallCategories = stalls
-            .flatMap { it.categories }
-            .map(::normalizeCategory)
-            .filter { it.isNotBlank() }
-            .distinct()
-            .sorted()
-        (feedUiState.categories + stallCategories)
-            .distinct()
-            .sorted()
+    val allCategories = remember(feedUiState.categories) {
+        feedUiState.categories
     }
 
     LaunchedEffect(allCategories) {
@@ -96,6 +89,10 @@ fun FeedTab(
     val saved = navController.currentBackStackEntry?.savedStateHandle
     var searchText by remember { mutableStateOf(resumeStateStore.feedSearchQuery.ifBlank { searchQuery }) }
     var showAllServices by remember { mutableStateOf(resumeStateStore.feedShowAllServices) }
+
+    BackHandler(enabled = showAllServices) {
+        showAllServices = false
+    }
 
     LaunchedEffect(searchQuery) {
         if (searchQuery != searchText) {
@@ -196,13 +193,52 @@ fun FeedTab(
                 contentPadding = PaddingValues(top = 8.dp, bottom = 96.dp),
                 verticalArrangement = Arrangement.spacedBy(18.dp)
             ) {
+                // Today's drops - auto-scrolling featured strip
                 if (allCategories.isNotEmpty()) {
                     item {
                         CategoryChipRow(
                             categories = allCategories,
                             selectedCategory = feedUiState.selectedCategory,
-                            onSelect = { feedViewModel.setSelectedCategory(it) }
+                            onSelect = { feedViewModel.setSelectedCategory(it) },
+                            modifier = Modifier.padding(top = 12.dp, bottom = 4.dp)
                         )
+                    }
+                }
+
+                item {
+                    val drops = feedUiState.services.take(8)
+                    val dropsState = rememberLazyListState()
+                    if (drops.isNotEmpty()) {
+                        LaunchedEffect(drops) {
+                            while (true) {
+                                kotlinx.coroutines.delay(3500)
+                                val visible = dropsState.firstVisibleItemIndex
+                                val next = (visible + 1) % drops.size
+                                dropsState.animateScrollToItem(next)
+                            }
+                        }
+                    }
+
+                    LazyRow(
+                        state = dropsState,
+                        contentPadding = PaddingValues(horizontal = 12.dp),
+                        horizontalArrangement = Arrangement.spacedBy(12.dp),
+                        modifier = Modifier.padding(top = 8.dp, bottom = 8.dp)
+                    ) {
+                        items(drops) { service ->
+                            Box(modifier = Modifier.width(320.dp)) {
+                                ServicePreviewCard(
+                                    service = service,
+                                    publisherMetadata = profiles[service.pubkey],
+                                    showTags = false,
+                                    hero = true,
+                                    featured = true,
+                                    onClick = {
+                                        openServiceDetail(navController, service, searchText)
+                                    }
+                                )
+                            }
+                        }
                     }
                 }
 
@@ -449,27 +485,36 @@ private fun PreviewSectionHeader(
     actionLabel: String? = null,
     onAction: (() -> Unit)? = null
 ) {
-    Row(
+    Surface(
         modifier = Modifier
             .fillMaxWidth()
             .padding(horizontal = 12.dp),
-        verticalAlignment = Alignment.CenterVertically
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.14f),
+        shape = MaterialTheme.shapes.large,
+        tonalElevation = 1.dp
     ) {
-        Column(modifier = Modifier.weight(1f)) {
-            Text(
-                text = title,
-                style = MaterialTheme.typography.titleMedium,
-                color = MaterialTheme.colorScheme.onSurface
-            )
-            Text(
-                text = subtitle,
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-        }
-        if (actionLabel != null && onAction != null) {
-            TextButton(onClick = onAction) {
-                Text(actionLabel)
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = title,
+                    style = MaterialTheme.typography.titleMedium,
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+                Text(
+                    text = subtitle,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            if (actionLabel != null && onAction != null) {
+                TextButton(onClick = onAction) {
+                    Text(actionLabel)
+                }
             }
         }
     }

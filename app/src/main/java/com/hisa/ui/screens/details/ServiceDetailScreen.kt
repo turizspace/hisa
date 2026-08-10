@@ -82,6 +82,7 @@ import com.hisa.data.model.OrderItem
 import com.hisa.ui.components.OrderComposerDialog
 import com.hisa.ui.navigation.Routes
 import com.hisa.ui.util.LocalProfileMetaUtil
+import com.hisa.ui.util.LocalProfileRepository
 import com.hisa.ui.util.formatTimeAgo
 import com.hisa.util.JsonFormatter
 import com.hisa.viewmodel.AuthViewModel
@@ -110,6 +111,8 @@ fun ServiceDetailScreen(
     val privateKeyHex by authViewModel.privateKey.collectAsState()
     val orderState by orderCreateViewModel.state.collectAsState()
     val rawEvent by viewModel.rawEvent.collectAsState()
+    val profileRepository = LocalProfileRepository.current
+    val cachedPublisherMetadata = profileRepository.getCachedProfile(pubkey)
 
     var showOrderDialog by remember { mutableStateOf(false) }
     var orderError by remember { mutableStateOf<String?>(null) }
@@ -140,11 +143,7 @@ fun ServiceDetailScreen(
                 title = {
                     Column {
                         Text("Service details")
-                        Text(
-                            text = "Local offer",
-                            style = MaterialTheme.typography.labelMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
+                        
                     }
                 },
                 navigationIcon = {
@@ -219,11 +218,13 @@ fun ServiceDetailScreen(
                 service != null -> {
                     val serviceData = service!!
                     val profileMetaUtil = LocalProfileMetaUtil.current
-                    var publisherMeta by remember(eventId) { mutableStateOf<Metadata?>(null) }
+                    var publisherMeta by remember(eventId) { mutableStateOf<Metadata?>(cachedPublisherMetadata) }
 
                     LaunchedEffect(eventId, pubkey) {
                         profileMetaUtil.fetchProfileMetadata(pubkey, eventId = eventId) { result ->
-                            publisherMeta = result
+                            if (result != null) {
+                                publisherMeta = result
+                            }
                         }
                     }
 
