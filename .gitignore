@@ -5,7 +5,14 @@ hisa_keypair*.txt
 .gradle/
 .idea/
 .kotlin/
+build*
 build/
 app/build/
 gradle-*
 *.md
+scripts/*
+keystore.*
+
+# Ignore Gradle-generated problem reports
+build/reports/problems/
+build/reports/problems/problems-report.html
