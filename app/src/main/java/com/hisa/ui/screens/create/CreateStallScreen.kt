@@ -21,6 +21,8 @@ import androidx.compose.ui.unit.dp
 import androidx.navigation.NavHostController
 import com.hisa.ui.components.HisaFormCard
 import com.hisa.ui.components.HisaPrimaryButton
+import com.hisa.data.model.ShippingZone as StallShippingZone
+import com.hisa.ui.navigation.NAV_RESULT_EDIT_STALL_PAYLOAD
 import org.json.JSONArray
 import org.json.JSONObject
 import java.util.UUID
@@ -65,7 +67,7 @@ val stallPredefinedTags = listOf(
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
 fun CreateStallScreen(
-    onCreateStall: (title: String, summary: String, description: String, tags: List<List<String>>, onSuccess: () -> Unit) -> Unit,
+    onCreateStall: (stallId: String, title: String, summary: String, description: String, currency: String, shippingZones: List<StallShippingZone>, tags: List<List<String>>, onSuccess: () -> Unit) -> Unit,
     onCreateProduct: ((stallId: String, name: String, description: String, price: String, currency: String, tags: List<List<String>>, onSuccess: () -> Unit) -> Unit)? = null,
     onNavigateBack: () -> Unit,
     navController: NavHostController? = null
@@ -85,6 +87,51 @@ fun CreateStallScreen(
     var newProductCurrency by rememberSaveable { mutableStateOf("SATS") }
     var newProductTags by rememberSaveable { mutableStateOf(listOf<String>()) }
     var productCreated by rememberSaveable { mutableStateOf(false) }
+    var dTag by rememberSaveable { mutableStateOf<String?>(null) }
+    val draftStallId = rememberSaveable { UUID.randomUUID().toString() }
+
+    LaunchedEffect(navController) {
+        try {
+            val currentHandle = navController?.currentBackStackEntry?.savedStateHandle
+            val previousHandle = navController?.previousBackStackEntry?.savedStateHandle
+            val payload = currentHandle?.get<String>(NAV_RESULT_EDIT_STALL_PAYLOAD)
+                ?: previousHandle?.get<String>(NAV_RESULT_EDIT_STALL_PAYLOAD)
+                ?: return@LaunchedEffect
+            val editJson = JSONObject(payload)
+            dTag = editJson.optString("id").trim().takeIf { it.isNotBlank() }
+            stallName = editJson.optString("name", stallName)
+            stallDescription = editJson.optString("description", stallDescription)
+            currency = editJson.optString("currency", currency).ifBlank { currency }
+            selectedTagsList = editJson.optJSONArray("categories")?.let { categories ->
+                (0 until categories.length())
+                    .mapNotNull { categories.optString(it).trim().takeIf { value -> value.isNotBlank() } }
+            }.orEmpty()
+            shippingZones = editJson.optJSONArray("shipping")?.let { zones ->
+                buildList {
+                    for (index in 0 until zones.length()) {
+                        val zone = zones.optJSONObject(index) ?: continue
+                        val id = zone.optString("id").trim().takeIf { it.isNotBlank() } ?: continue
+                        val regions = zone.optJSONArray("regions")?.let { regionArray ->
+                            (0 until regionArray.length())
+                                .mapNotNull { regionArray.optString(it).trim().takeIf { value -> value.isNotBlank() } }
+                        }.orEmpty()
+                        add(
+                            ShippingZone(
+                                id = id,
+                                name = zone.optString("name", id),
+                                cost = zone.opt("cost")?.toString() ?: "0",
+                                regions = regions
+                            )
+                        )
+                    }
+                }
+            }.orEmpty()
+            currentHandle?.remove<String>(NAV_RESULT_EDIT_STALL_PAYLOAD)
+            previousHandle?.remove<String>(NAV_RESULT_EDIT_STALL_PAYLOAD)
+        } catch (_: Exception) {
+            // A malformed edit payload should leave the creation form usable.
+        }
+    }
 
     Scaffold(
         bottomBar = {
@@ -94,10 +141,12 @@ fun CreateStallScreen(
                 color = MaterialTheme.colorScheme.surface
             ) {
                 HisaPrimaryButton(
-                    text = "Create Stall",
+                    text = if (dTag.isNullOrBlank()) "Create Stall" else "Update Stall",
                     enabled = stallName.isNotBlank(),
                     modifier = Modifier.padding(16.dp),
                     onClick = {
+                        val stallId = dTag?.takeIf { it.isNotBlank() } ?: draftStallId
+                        val isEditing = !dTag.isNullOrBlank()
                         val tags = mutableListOf<List<String>>().apply {
                             selectedTagsList.forEach { tag ->
                                 sanitizeListingTag(tag).takeIf { it.isNotBlank() }?.let { add(listOf("t", it)) }
@@ -105,14 +154,29 @@ fun CreateStallScreen(
                         }
 
                         onCreateStall(
+                            stallId,
                             stallName,
                             stallDescription,
                             stallDescription,
+                            currency,
+                            shippingZones.map { zone ->
+                                StallShippingZone(
+                                    id = zone.id,
+                                    name = zone.name,
+                                    cost = zone.cost.toDoubleOrNull() ?: 0.0,
+                                    regions = zone.regions
+                                )
+                            },
                             tags
                         ) {
-                            createdStallId = UUID.randomUUID().toString()
-                            showProductComposer = true
-                            productCreated = true
+                            dTag = stallId
+                            if (isEditing) {
+                                onNavigateBack()
+                            } else {
+                                createdStallId = stallId
+                                showProductComposer = true
+                                productCreated = true
+                            }
                         }
                     }
                 )
@@ -341,7 +405,7 @@ fun CreateStallScreen(
 
                 Button(
                     onClick = {
-                        if (newZoneName.isNotBlank() && newZoneCost.isNotBlank()) {
+                        if (newZoneName.isNotBlank() && newZoneCost.toDoubleOrNull() != null) {
                             shippingZones = shippingZones + ShippingZone(
                                 id = UUID.randomUUID().toString(),
                                 name = newZoneName,

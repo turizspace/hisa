@@ -2,6 +2,7 @@ package com.hisa.ui.screens.create
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.hisa.data.model.ShippingZone
 import com.hisa.domain.service.CreateMarketplaceService
 import dagger.hilt.android.lifecycle.HiltViewModel
 import javax.inject.Inject
@@ -52,9 +53,12 @@ class CreateServiceViewModel @Inject constructor(
     }
 
     fun createStall(
+        stallId: String,
         title: String,
         summary: String,
         description: String,
+        currency: String,
+        shippingZones: List<ShippingZone>,
         tags: List<List<String>>,
         privateKeyHex: String?,
         pubKey: String,
@@ -64,9 +68,12 @@ class CreateServiceViewModel @Inject constructor(
             _isLoading.value = true
             try {
                 createMarketplaceService.createStall(
+                    stallId = stallId,
                     title = title,
                     summary = summary,
                     description = description,
+                    currency = currency,
+                    shippingZones = shippingZones,
                     tags = tags,
                     privateKeyHex = privateKeyHex,
                     pubKey = pubKey
@@ -90,7 +97,9 @@ class CreateServiceViewModel @Inject constructor(
         tags: List<List<String>>,
         privateKeyHex: String?,
         pubKey: String,
-        onSuccess: () -> Unit
+        onSuccess: () -> Unit,
+        productId: String? = null,
+        images: List<String> = emptyList()
     ) {
         viewModelScope.launch {
             _isLoading.value = true
@@ -103,7 +112,9 @@ class CreateServiceViewModel @Inject constructor(
                     currency = currency,
                     tags = tags,
                     privateKeyHex = privateKeyHex,
-                    pubKey = pubKey
+                    pubKey = pubKey,
+                    productId = productId,
+                    images = images
                 )
                 onSuccess()
             } catch (e: Exception) {
