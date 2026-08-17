@@ -5,12 +5,14 @@ import android.widget.Toast
 import androidx.annotation.RequiresApi
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -26,6 +28,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
+import androidx.navigation.NavController
 import com.hisa.data.model.Product
 import com.hisa.data.model.OrderItem
 import com.hisa.ui.components.HisaPrimaryButton
@@ -33,6 +36,7 @@ import com.hisa.ui.components.OrderComposerDialog
 import com.hisa.ui.components.ProductCard
 import com.hisa.ui.components.StallCard
 import com.hisa.ui.screens.create.CreateServiceViewModel
+import com.hisa.ui.navigation.navigateToStallEditor
 import com.hisa.util.cleanPubkeyFormat
 import com.hisa.util.normalizeNostrPubkey
 import com.hisa.viewmodel.AuthViewModel
@@ -43,6 +47,7 @@ import com.hisa.viewmodel.StallDetailViewModel
 @RequiresApi(Build.VERSION_CODES.O)
 @Composable
 fun StallDetailScreen(
+    navController: NavController,
     viewModel: StallDetailViewModel = hiltViewModel()
 ) {
     val context = LocalContext.current
@@ -62,6 +67,11 @@ fun StallDetailScreen(
     var newProductDescription by rememberSaveable { mutableStateOf("") }
     var newProductPrice by rememberSaveable { mutableStateOf("") }
     var newProductCurrency by rememberSaveable { mutableStateOf("SATS") }
+    var editingProduct by remember { mutableStateOf<Product?>(null) }
+    var editProductName by rememberSaveable { mutableStateOf("") }
+    var editProductDescription by rememberSaveable { mutableStateOf("") }
+    var editProductPrice by rememberSaveable { mutableStateOf("") }
+    var editProductCurrency by rememberSaveable { mutableStateOf("SATS") }
 
     val isOwner = remember(stall, buyerPubkey) {
         val normalizedBuyer = normalizeNostrPubkey(buyerPubkey) ?: cleanPubkeyFormat(buyerPubkey.orEmpty()).lowercase()
@@ -88,7 +98,12 @@ fun StallDetailScreen(
                     stall = currentStall,
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(horizontal = 8.dp, vertical = 8.dp)
+                        .padding(horizontal = 8.dp, vertical = 8.dp),
+                    onEdit = if (isOwner) {
+                        { navController.navigateToStallEditor(currentStall) }
+                    } else {
+                        null
+                    }
                 )
             } ?: LoadingCard(
                 title = "Loading stall...",
@@ -180,6 +195,89 @@ fun StallDetailScreen(
             }
         }
 
+        if (isOwner && editingProduct != null) {
+            item {
+                Surface(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 8.dp),
+                    color = MaterialTheme.colorScheme.surfaceVariant,
+                    shape = MaterialTheme.shapes.medium
+                ) {
+                    Column(modifier = Modifier.padding(16.dp)) {
+                        Text(
+                            text = "Edit product",
+                            style = MaterialTheme.typography.titleMedium
+                        )
+                        OutlinedTextField(
+                            value = editProductName,
+                            onValueChange = { editProductName = it },
+                            label = { Text("Product name") },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(top = 12.dp)
+                        )
+                        OutlinedTextField(
+                            value = editProductDescription,
+                            onValueChange = { editProductDescription = it },
+                            label = { Text("Description") },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(top = 8.dp)
+                        )
+                        OutlinedTextField(
+                            value = editProductPrice,
+                            onValueChange = { editProductPrice = it },
+                            label = { Text("Price") },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(top = 8.dp)
+                        )
+                        OutlinedTextField(
+                            value = editProductCurrency,
+                            onValueChange = { editProductCurrency = it },
+                            label = { Text("Currency") },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(top = 8.dp)
+                        )
+                        Row(
+                            modifier = Modifier.padding(top = 12.dp),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            HisaPrimaryButton(
+                                text = if (isCreating) "Updating..." else "Update product",
+                                enabled = !isCreating && editProductName.isNotBlank(),
+                                onClick = {
+                                    val productToUpdate = editingProduct ?: return@HisaPrimaryButton
+                                    val currentStall = stall ?: return@HisaPrimaryButton
+                                    createViewModel.createProduct(
+                                        stallId = currentStall.id,
+                                        name = editProductName.trim(),
+                                        description = editProductDescription.trim(),
+                                        price = editProductPrice.trim(),
+                                        currency = editProductCurrency.trim().ifBlank { "SATS" },
+                                        tags = productToUpdate.categories.map { listOf("t", it) },
+                                        privateKeyHex = privateKeyHex,
+                                        pubKey = buyerPubkey.orEmpty(),
+                                        onSuccess = {
+                                            editingProduct = null
+                                            Toast.makeText(context, "Product updated", Toast.LENGTH_SHORT).show()
+                                        },
+                                        productId = productToUpdate.id,
+                                        images = productToUpdate.pictures
+                                    )
+                                }
+                            )
+                            OutlinedButton(onClick = { editingProduct = null }) {
+                                Text("Cancel")
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         item {
             Text(
                 text = "Products",
@@ -198,9 +296,24 @@ fun StallDetailScreen(
                     modifier = Modifier
                         .fillMaxWidth()
                         .padding(horizontal = 8.dp),
-                    onOrder = {
-                        selectedProduct = product
-                        showOrderDialog = true
+                    onOrder = if (isOwner) {
+                        null
+                    } else {
+                        {
+                            selectedProduct = product
+                            showOrderDialog = true
+                        }
+                    },
+                    onEdit = if (isOwner) {
+                        {
+                            editingProduct = product
+                            editProductName = product.name
+                            editProductDescription = product.description
+                            editProductPrice = product.price
+                            editProductCurrency = product.currency
+                        }
+                    } else {
+                        null
                     }
                 )
             }

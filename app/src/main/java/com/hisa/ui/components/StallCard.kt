@@ -19,7 +19,12 @@ import com.hisa.data.model.Stall
 import org.json.JSONArray
 
 @Composable
-fun StallCard(stall: Stall, modifier: Modifier = Modifier, onClick: (() -> Unit)? = null) {
+fun StallCard(
+    stall: Stall,
+    modifier: Modifier = Modifier,
+    onClick: (() -> Unit)? = null,
+    onEdit: (() -> Unit)? = null
+) {
     val ownerHandle = stall.ownerDisplayName
         .ifBlank { stall.ownerPubkey.take(12) }
         .removePrefix("@")
@@ -137,6 +142,14 @@ fun StallCard(stall: Stall, modifier: Modifier = Modifier, onClick: (() -> Unit)
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
+            }
+            if (onEdit != null) {
+                TextButton(
+                    onClick = onEdit,
+                    modifier = Modifier.padding(top = 8.dp)
+                ) {
+                    Text("Edit stall")
+                }
             }
         }
     }
