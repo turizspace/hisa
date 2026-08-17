@@ -30,7 +30,8 @@ fun ProductCard(
     product: Product,
     modifier: Modifier = Modifier,
     onAddToCart: (() -> Unit)? = null,
-    onOrder: (() -> Unit)? = null
+    onOrder: (() -> Unit)? = null,
+    onEdit: (() -> Unit)? = null
 ) {
     val normalizedPictures = remember(product.pictures) {
         product.pictures.mapNotNull(::normalizeProductImageUrl).distinct()
@@ -145,26 +146,39 @@ fun ProductCard(
                 }
             }
 
-            // Order or add to cart button (optional)
-            when {
-                onOrder != null -> {
-                    Button(
-                        onClick = onOrder,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(top = 12.dp)
-                    ) {
-                        Text("Order now")
+            // Owner editing and customer purchasing actions (optional).
+            if (onEdit != null || onOrder != null || onAddToCart != null) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 12.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    if (onEdit != null) {
+                        OutlinedButton(
+                            onClick = onEdit,
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Text("Edit")
+                        }
                     }
-                }
-                onAddToCart != null -> {
-                    Button(
-                        onClick = onAddToCart,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(top = 12.dp)
-                    ) {
-                        Text("Add to Cart")
+                    when {
+                        onOrder != null -> {
+                            Button(
+                                onClick = onOrder,
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Text("Order now")
+                            }
+                        }
+                        onAddToCart != null -> {
+                            Button(
+                                onClick = onAddToCart,
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Text("Add to Cart")
+                            }
+                        }
                     }
                 }
             }
