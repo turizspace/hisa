@@ -2,6 +2,7 @@ package com.hisa.domain.service
 
 import com.hisa.data.nostr.NostrClient
 import com.hisa.data.nostr.NostrSigningService
+import com.hisa.data.model.ShippingZone
 import org.json.JSONArray
 import org.json.JSONObject
 import java.util.UUID
@@ -37,9 +38,12 @@ class CreateMarketplaceService(
     }
 
     suspend fun createStall(
+        stallId: String,
         title: String,
         summary: String,
         description: String,
+        currency: String,
+        shippingZones: List<ShippingZone>,
         tags: List<List<String>>,
         privateKeyHex: String?,
         pubKey: String
@@ -48,13 +52,21 @@ class CreateMarketplaceService(
             if (tag.isNotEmpty() && tag[0] == "t" && tag.size > 1) tag[1] else null
         }
 
-        val stallId = UUID.randomUUID().toString()
         val metadata = JSONObject().apply {
             put("id", stallId)
             put("name", title)
             put("description", summary.ifBlank { description })
-            put("currency", "SATS")
-            put("shipping", JSONArray())
+            put("currency", currency.ifBlank { "SATS" })
+            put("shipping", JSONArray().apply {
+                shippingZones.forEach { zone ->
+                    put(JSONObject().apply {
+                        put("id", zone.id)
+                        put("name", zone.name)
+                        put("cost", zone.cost)
+                        put("regions", JSONArray(zone.regions))
+                    })
+                }
+            })
             if (summary.isNotBlank() || description.isNotBlank()) {
                 put("about", summary.ifBlank { description })
             }
@@ -81,12 +93,14 @@ class CreateMarketplaceService(
         currency: String,
         tags: List<List<String>>,
         privateKeyHex: String?,
-        pubKey: String
+        pubKey: String,
+        productId: String? = null,
+        images: List<String> = emptyList()
     ) {
-        val productId = UUID.randomUUID().toString()
+        val resolvedProductId = productId?.takeIf { it.isNotBlank() } ?: UUID.randomUUID().toString()
         val safePrice = price.ifBlank { "0" }
         val productMetadata = JSONObject().apply {
-            put("id", productId)
+            put("id", resolvedProductId)
             put("stall_id", stallId)
             put("name", name)
             put("description", description.ifBlank { name })
@@ -94,9 +108,10 @@ class CreateMarketplaceService(
             put("price", safePrice)
             put("quantity", null)
             put("shipping", JSONArray())
+            if (images.isNotEmpty()) put("images", JSONArray(images))
         }
 
-        val productTags = mutableListOf<List<String>>(listOf("d", productId), listOf("stall_id", stallId))
+        val productTags = mutableListOf<List<String>>(listOf("d", resolvedProductId), listOf("stall_id", stallId))
         tags.forEach { tag ->
             if (tag.isNotEmpty() && tag[0] == "t" && tag.size > 1) {
                 productTags.add(listOf("t", tag[1]))
