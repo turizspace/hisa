@@ -31,6 +31,7 @@ import com.hisa.ui.components.CompactServiceCard
 import com.hisa.ui.components.HisaTabRow
 import com.hisa.ui.components.StallCard
 import com.hisa.ui.navigation.Routes
+import com.hisa.ui.navigation.navigateToStallEditor
 import com.hisa.util.cleanPubkeyFormat
 import com.hisa.util.normalizeNostrPubkey
 import com.hisa.viewmodel.AuthViewModel
@@ -204,7 +205,8 @@ fun ShopScreen(
                                     onClick = {
                                         val route = com.hisa.ui.navigation.Routes.stallDetail(stall.id, stall.ownerPubkey, stall.eventId)
                                         navController.navigate(route)
-                                    }
+                                    },
+                                    onEdit = { navController.navigateToStallEditor(stall) }
                                 )
                             }
                         }

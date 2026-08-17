@@ -16,8 +16,10 @@ import androidx.navigation.NavHostController
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import com.hisa.data.model.ShippingZone
 import com.hisa.ui.components.HisaScreenScaffold
 import com.hisa.ui.components.HisaTabRow
+import com.hisa.ui.navigation.NAV_RESULT_EDIT_STALL_PAYLOAD
 
 /**
  * Unified Create screen that allows users to switch between creating:
@@ -32,12 +34,22 @@ import com.hisa.ui.components.HisaTabRow
 @Composable
 fun CreateUnifiedScreen(
     onCreateService: (title: String, summary: String, description: String, tags: List<List<String>>, onSuccess: () -> Unit) -> Unit,
-    onCreateStall: (title: String, summary: String, description: String, tags: List<List<String>>, onSuccess: () -> Unit) -> Unit,
+    onCreateStall: (stallId: String, title: String, summary: String, description: String, currency: String, shippingZones: List<ShippingZone>, tags: List<List<String>>, onSuccess: () -> Unit) -> Unit,
     onCreateProduct: ((stallId: String, name: String, description: String, price: String, currency: String, tags: List<List<String>>, onSuccess: () -> Unit) -> Unit)? = null,
     onNavigateBack: () -> Unit,
     navController: NavHostController? = null
 ) {
     var selectedTabIndex by rememberSaveable { mutableStateOf(0) }
+
+    androidx.compose.runtime.LaunchedEffect(navController) {
+        val currentHandle = navController?.currentBackStackEntry?.savedStateHandle
+        val previousHandle = navController?.previousBackStackEntry?.savedStateHandle
+        val stallEditPayload = currentHandle?.get<String>(NAV_RESULT_EDIT_STALL_PAYLOAD)
+            ?: previousHandle?.get<String>(NAV_RESULT_EDIT_STALL_PAYLOAD)
+        if (!stallEditPayload.isNullOrBlank()) {
+            selectedTabIndex = 1
+        }
+    }
     
     val tabs = listOf("Create Service", "Create Stall")
 
