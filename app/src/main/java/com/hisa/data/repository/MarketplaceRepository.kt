@@ -85,7 +85,7 @@ class MarketplaceRepository @Inject constructor(
     private fun upsertStall(stall: Stall) {
         val key = NostrMarketplaceParser.stallKey(stall.id, stall.ownerPubkey)
         val existing = stallsByKey[key]
-        if (existing != null && stall.createdAt < existing.createdAt) {
+        if (existing != null && !isNewerReplacement(stall, existing)) {
             return
         }
 
@@ -120,5 +120,10 @@ class MarketplaceRepository @Inject constructor(
             pendingProfilePubkeys.removeAll(profilePubkeys)
             profileRepository.ensureProfiles(profilePubkeys)
         }
+    }
+
+    private fun isNewerReplacement(candidate: Stall, existing: Stall): Boolean {
+        return candidate.createdAt > existing.createdAt ||
+            (candidate.createdAt == existing.createdAt && candidate.eventId < existing.eventId)
     }
 }

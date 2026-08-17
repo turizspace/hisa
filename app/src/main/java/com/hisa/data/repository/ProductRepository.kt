@@ -112,7 +112,7 @@ class ProductRepository @Inject constructor(
             val next = current.toMutableMap()
             val productsForAuthor = (next[authorPubkey] ?: emptyList()).associateBy { it.id }.toMutableMap()
             val existing = productsForAuthor[product.id]
-            if (existing == null || product.createdAt >= existing.createdAt) {
+            if (existing == null || isNewerReplacement(product, existing)) {
                 productsForAuthor[product.id] = product
             }
             next[authorPubkey] = productsForAuthor.values.sortedByDescending { it.createdAt }
@@ -139,5 +139,10 @@ class ProductRepository @Inject constructor(
 
             next
         }
+    }
+
+    private fun isNewerReplacement(candidate: Product, existing: Product): Boolean {
+        return candidate.createdAt > existing.createdAt ||
+            (candidate.createdAt == existing.createdAt && candidate.eventId < existing.eventId)
     }
 }
