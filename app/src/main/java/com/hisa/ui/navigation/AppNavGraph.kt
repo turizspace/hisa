@@ -326,8 +326,19 @@ fun AppNavGraph(
                     // CreateServiceViewModel delegates to the external signer path.
                     vm.createService(title, summary, description, tags, if (privateKey.isBlank()) null else privateKey, pubKey, onSuccess)
                 },
-                onCreateStall = { title, summary, description, tags, onSuccess ->
-                    vm.createStall(title, summary, description, tags, if (privateKey.isBlank()) null else privateKey, pubKey, onSuccess)
+                onCreateStall = { stallId, title, summary, description, currency, shippingZones, tags, onSuccess ->
+                    vm.createStall(
+                        stallId = stallId,
+                        title = title,
+                        summary = summary,
+                        description = description,
+                        currency = currency,
+                        shippingZones = shippingZones,
+                        tags = tags,
+                        privateKeyHex = if (privateKey.isBlank()) null else privateKey,
+                        pubKey = pubKey,
+                        onSuccess = onSuccess
+                    )
                 },
                 onCreateProduct = { stallId, name, description, price, currency, tags, onSuccess ->
                     vm.createProduct(stallId, name, description, price, currency, tags, if (privateKey.isBlank()) null else privateKey, pubKey, onSuccess)
@@ -348,7 +359,7 @@ fun AppNavGraph(
             val ownerPubkey = backStackEntry.arguments?.getString("ownerPubkey")
             val eventId = backStackEntry.arguments?.getString("eventId")
             if (!stallId.isNullOrBlank() && !ownerPubkey.isNullOrBlank() && !eventId.isNullOrBlank()) {
-                StallDetailScreen()
+                StallDetailScreen(navController = navController)
             } else {
                 Text("Stall not found")
             }
