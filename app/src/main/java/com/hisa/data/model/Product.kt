@@ -9,6 +9,7 @@ package com.hisa.data.model
  */
 data class Product(
     val id: String,                          // From d tag
+    val eventId: String = id,
     val stallId: String,                     // From stall_id tag
     val authorPubkey: String = "",
     val name: String,

@@ -85,6 +85,7 @@ object NostrMarketplaceParser {
 
         return Product(
             id = productId,
+            eventId = event.id,
             stallId = stallId,
             authorPubkey = event.pubkey,
             name = name,
