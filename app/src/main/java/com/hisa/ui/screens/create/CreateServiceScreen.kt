@@ -136,15 +136,6 @@ fun CreateServiceScreen(
                             description,
                             tags
                         ) {
-                            try {
-                                val current = navController?.currentBackStackEntry
-                                val previous = navController?.previousBackStackEntry
-                                listOf(current, previous).forEach { entry ->
-                                    try {
-                                        entry?.savedStateHandle?.set("edit_service_d", dValue)
-                                    } catch (_: Exception) {}
-                                }
-                            } catch (_: Exception) {}
                             onNavigateBack()
                         }
                     }
@@ -452,66 +443,45 @@ fun CreateServiceScreen(
 
     // Listen for uploaded_media_url result and apply to selectedImageUrls when appropriate
     LaunchedEffect(navController) {
-        // Check for edit payload in savedStateHandle (current or previous entry) and prefill form
         try {
             val currentHandle = navController?.currentBackStackEntry?.savedStateHandle
             val prevHandle = navController?.previousBackStackEntry?.savedStateHandle
-            val editD = currentHandle?.get<String>("edit_service_d") ?: prevHandle?.get<String>("edit_service_d")
-            val etitle = currentHandle?.get<String>("edit_service_title") ?: prevHandle?.get<String>("edit_service_title")
-            val esummary = currentHandle?.get<String>("edit_service_summary") ?: prevHandle?.get<String>("edit_service_summary")
-            val edesc = currentHandle?.get<String>("edit_service_description") ?: prevHandle?.get<String>("edit_service_description")
-            val etags = currentHandle?.get<String>("edit_service_tags") ?: prevHandle?.get<String>("edit_service_tags")
-            val eimages = currentHandle?.get<String>("edit_service_image_urls") ?: prevHandle?.get<String>("edit_service_image_urls")
-            val eprice = currentHandle?.get<String>("edit_service_price") ?: prevHandle?.get<String>("edit_service_price")
-            val ecurrency = currentHandle?.get<String>("edit_service_currency") ?: prevHandle?.get<String>("edit_service_currency")
-            val efrequency = currentHandle?.get<String>("edit_service_frequency") ?: prevHandle?.get<String>("edit_service_frequency")
-            val elocation = currentHandle?.get<String>("edit_service_location") ?: prevHandle?.get<String>("edit_service_location")
-            if (!editD.isNullOrBlank()) {
-                dTag = editD
-                title = etitle ?: title
-                summary = esummary ?: summary
-                description = edesc ?: description
-                // parse tags JSON if present
-                if (!etags.isNullOrBlank()) {
-                    try {
-                        val arr = org.json.JSONArray(etags)
-                        val tlist = mutableListOf<String>()
-                        for (i in 0 until arr.length()) {
-                            val inner = arr.getJSONArray(i)
-                            if (inner.length() > 0) {
-                                val key = inner.optString(0, "")
-                                if (key == "t") {
-                                    val v = inner.optString(1, "")
-                                    if (v.isNotBlank()) tlist.add(v)
-                                }
-                            }
+            val payload = currentHandle?.get<String>("edit_service_payload") ?: prevHandle?.get<String>("edit_service_payload")
+
+            if (!payload.isNullOrBlank()) {
+                val editJson = org.json.JSONObject(payload)
+                dTag = editJson.optString("d").takeIf { it.isNotBlank() }
+                title = editJson.optString("title", title)
+                summary = editJson.optString("summary", summary)
+                description = editJson.optString("description", description)
+
+                val tagsArray = editJson.optJSONArray("tags")
+                if (tagsArray != null) {
+                    val tlist = mutableListOf<String>()
+                    for (i in 0 until tagsArray.length()) {
+                        val inner = tagsArray.optJSONArray(i) ?: continue
+                        if (inner.length() > 0 && inner.optString(0) == "t") {
+                            inner.optString(1).takeIf { it.isNotBlank() }?.let { tlist.add(it) }
                         }
-                        if (tlist.isNotEmpty()) selectedTagsList = tlist
-                    } catch (_: Exception) {}
+                    }
+                    if (tlist.isNotEmpty()) selectedTagsList = tlist
                 }
-                if (!eimages.isNullOrBlank()) {
-                    selectedImageUrls = eimages.split('\n').map { it.trim() }.filter { it.isNotBlank() }
+
+                val imagesArray = editJson.optJSONArray("images")
+                if (imagesArray != null) {
+                    selectedImageUrls = (0 until imagesArray.length())
+                        .mapNotNull { imagesArray.optString(it).takeIf { it.isNotBlank() } }
                     coverImageUrl = selectedImageUrls.firstOrNull()
                 }
-                // Prefill price/currency/frequency/location if present
-                try { if (!eprice.isNullOrBlank()) price = eprice } catch (_: Exception) {}
-                try { if (!ecurrency.isNullOrBlank()) currency = ecurrency } catch (_: Exception) {}
-                try { if (!efrequency.isNullOrBlank()) frequency = efrequency } catch (_: Exception) {}
-                try { if (!elocation.isNullOrBlank()) location = elocation } catch (_: Exception) {}
-                // Clean saved payload so subsequent opens are fresh
+
+                editJson.optString("price").takeIf { it.isNotBlank() }?.let { price = it }
+                editJson.optString("currency").takeIf { it.isNotBlank() }?.let { currency = it }
+                editJson.optString("frequency").takeIf { it.isNotBlank() }?.let { frequency = it }
+                editJson.optString("location").takeIf { it.isNotBlank() }?.let { location = it }
+
                 try {
-                    currentHandle?.remove<String>("edit_service_d")
-                    currentHandle?.remove<String>("edit_service_title")
-                    currentHandle?.remove<String>("edit_service_summary")
-                    currentHandle?.remove<String>("edit_service_description")
-                    currentHandle?.remove<String>("edit_service_tags")
-                    currentHandle?.remove<String>("edit_service_image_urls")
-                    prevHandle?.remove<String>("edit_service_d")
-                    prevHandle?.remove<String>("edit_service_title")
-                    prevHandle?.remove<String>("edit_service_summary")
-                    prevHandle?.remove<String>("edit_service_description")
-                    prevHandle?.remove<String>("edit_service_tags")
-                    prevHandle?.remove<String>("edit_service_image_urls")
+                    currentHandle?.remove<String>("edit_service_payload")
+                    prevHandle?.remove<String>("edit_service_payload")
                 } catch (_: Exception) {}
             }
         } catch (_: Exception) {}

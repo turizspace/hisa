@@ -38,7 +38,7 @@ class FeedRepository @Inject constructor(
     val isLoading: StateFlow<Boolean> = _isLoading
 
     private var subscriptionListenerId: String? = null
-    private val servicesByEventId = ConcurrentHashMap<String, ServiceListing>()
+    private val servicesByReplaceableKey = ConcurrentHashMap<String, ServiceListing>()
     private val pendingProfilePubkeys = ConcurrentHashMap.newKeySet<String>()
     private val emitLock = Any()
 
@@ -55,9 +55,9 @@ class FeedRepository @Inject constructor(
     private fun restoreCachedServices() {
         val cachedServices = feedCacheStore.readServices()
         if (cachedServices.isNotEmpty()) {
-            servicesByEventId.clear()
+            servicesByReplaceableKey.clear()
             cachedServices.forEach { service ->
-                servicesByEventId[service.eventId] = service
+                servicesByReplaceableKey[serviceKey(service)] = service
             }
             emitSnapshot()
         }
@@ -73,7 +73,7 @@ class FeedRepository @Inject constructor(
         subscriptionListenerId?.let(subscriptionManager::unsubscribe)
         subscriptionListenerId = null
         started = false
-        servicesByEventId.clear()
+        servicesByReplaceableKey.clear()
         pendingProfilePubkeys.clear()
         _services.value = emptyList()
         _categories.value = emptyList()
@@ -101,12 +101,13 @@ class FeedRepository @Inject constructor(
     private fun upsertService(service: ServiceListing) {
         ServiceRepository.cacheService(service)
 
-        val existing = servicesByEventId[service.eventId]
-        if (existing != null && service.createdAt < existing.createdAt) {
+        val key = serviceKey(service)
+        val existing = servicesByReplaceableKey[key]
+        if (existing != null && !isNewerReplacement(service, existing)) {
             return
         }
 
-        servicesByEventId[service.eventId] = service
+        servicesByReplaceableKey[key] = service
         if (service.pubkey.isNotBlank()) {
             pendingProfilePubkeys.add(service.pubkey)
         }
@@ -128,7 +129,7 @@ class FeedRepository @Inject constructor(
             emitJob = null
         }
 
-        val updated = servicesByEventId.values.sortedByDescending { it.createdAt }
+        val updated = servicesByReplaceableKey.values.sortedByDescending { it.createdAt }
         _services.value = updated
         feedCacheStore.writeServices(updated)
         _categories.value = updated.flatMap { listing ->
@@ -146,5 +147,16 @@ class FeedRepository @Inject constructor(
             pendingProfilePubkeys.removeAll(profilePubkeys)
             profileRepository.ensureProfiles(profilePubkeys)
         }
+    }
+
+    private fun serviceKey(service: ServiceListing): String {
+        return service.dTag?.takeIf { it.isNotBlank() }
+            ?.let { "30402:${service.pubkey}:$it" }
+            ?: service.eventId
+    }
+
+    private fun isNewerReplacement(candidate: ServiceListing, existing: ServiceListing): Boolean {
+        return candidate.createdAt > existing.createdAt ||
+            (candidate.createdAt == existing.createdAt && candidate.eventId < existing.eventId)
     }
 }

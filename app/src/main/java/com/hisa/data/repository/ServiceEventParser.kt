@@ -29,6 +29,7 @@ object ServiceEventParser {
 
             val title = tagMap["title"]?.firstOrNull()?.getOrNull(1)
             val summary = tagMap["summary"]?.firstOrNull()?.getOrNull(1)
+            val dTag = tagMap["d"]?.firstOrNull()?.getOrNull(1)
 
             val priceTag = tagMap["price"]?.firstOrNull()
             val priceAmount = priceTag?.getOrNull(1) ?: ""
@@ -69,6 +70,7 @@ object ServiceEventParser {
 
             return ServiceListing(
                 eventId = eventId,
+                dTag = dTag,
                 title = finalTitle,
                 summary = finalSummary,
                 content = content.takeIf { it.isNotBlank() },

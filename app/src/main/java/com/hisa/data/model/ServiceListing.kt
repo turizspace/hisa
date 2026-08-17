@@ -5,6 +5,7 @@ import kotlinx.serialization.Serializable
 @Serializable
 data class ServiceListing(
     val eventId: String,
+    val dTag: String? = null,
     val title: String,
     val summary: String,
     val content: String?,

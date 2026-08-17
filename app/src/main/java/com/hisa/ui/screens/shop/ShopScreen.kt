@@ -124,57 +124,55 @@ fun ShopScreen(
                                     },
                                     onEdit = { svc ->
                                         try {
-                                            val current = navController.currentBackStackEntry
-                                            val previous = navController.previousBackStackEntry
-                                            listOf(current, previous).forEach { entry ->
-                                                try {
-                                                    val existingD = try {
-                                                        svc.rawTags.firstOrNull { it.isNotEmpty() && it[0] == "d" }?.getOrNull(1) as? String
-                                                    } catch (_: Exception) { null }
-                                                    if (!existingD.isNullOrBlank()) {
-                                                        entry?.savedStateHandle?.set("edit_service_d", existingD)
-                                                    }
-                                                    entry?.savedStateHandle?.set("edit_service_title", svc.title)
-                                                    entry?.savedStateHandle?.set("edit_service_summary", svc.summary ?: "")
-                                                    entry?.savedStateHandle?.set("edit_service_description", svc.content ?: "")
-                                                    val tagsJson = org.json.JSONArray()
-                                                    svc.rawTags.forEach { tag ->
-                                                        val arr = org.json.JSONArray()
-                                                        tag.forEach { arr.put(it) }
-                                                        tagsJson.put(arr)
-                                                    }
-                                                    entry?.savedStateHandle?.set("edit_service_tags", tagsJson.toString())
-                                                    val images = svc.rawTags
-                                                        .filter { it.isNotEmpty() && it[0] == "image" }
-                                                        .mapNotNull { it.getOrNull(1) as? String } +
-                                                        svc.rawTags
-                                                            .filter { it.isNotEmpty() && it[0] == "imeta" }
-                                                            .flatMap { tag ->
-                                                                tag.drop(1).mapNotNull { part ->
-                                                                    when {
-                                                                        part.startsWith("url ") -> part.removePrefix("url ").trim()
-                                                                        part.startsWith("http://") || part.startsWith("https://") -> part.trim()
-                                                                        else -> null
-                                                                    }
+                                            val payload = org.json.JSONObject().apply {
+                                                val listingDTag = svc.dTag?.takeIf { it.isNotBlank() }
+                                                    ?: svc.rawTags.firstOrNull { it.isNotEmpty() && it[0] == "d" }
+                                                    ?.getOrNull(1)
+                                                    ?.takeIf { it.isNotBlank() }
+                                                listingDTag?.let { put("d", it) }
+                                                put("title", svc.title)
+                                                put("summary", svc.summary ?: "")
+                                                put("description", svc.content ?: "")
+
+                                                val tagsJson = org.json.JSONArray()
+                                                svc.rawTags.forEach { tag ->
+                                                    val arr = org.json.JSONArray()
+                                                    tag.forEach { arr.put(it) }
+                                                    tagsJson.put(arr)
+                                                }
+                                                put("tags", tagsJson)
+
+                                                val images = svc.rawTags
+                                                    .filter { it.isNotEmpty() && it[0] == "image" }
+                                                    .mapNotNull { it.getOrNull(1) as? String } +
+                                                    svc.rawTags
+                                                        .filter { it.isNotEmpty() && it[0] == "imeta" }
+                                                        .flatMap { tag ->
+                                                            tag.drop(1).mapNotNull { part ->
+                                                                when {
+                                                                    part.startsWith("url ") -> part.removePrefix("url ").trim()
+                                                                    part.startsWith("http://") || part.startsWith("https://") -> part.trim()
+                                                                    else -> null
                                                                 }
                                                             }
-                                                    if (images.isNotEmpty()) entry?.savedStateHandle?.set("edit_service_image_urls", images.joinToString("\n"))
-                                                    try {
-                                                        val priceTag = svc.rawTags.firstOrNull { it.size > 1 && it[0] == "price" }
-                                                        val pAmount = priceTag?.getOrNull(1) as? String
-                                                        val pCurrency = priceTag?.getOrNull(2) as? String
-                                                        val pFreq = priceTag?.getOrNull(3) as? String
-                                                        if (!pAmount.isNullOrBlank()) entry?.savedStateHandle?.set("edit_service_price", pAmount)
-                                                        if (!pCurrency.isNullOrBlank()) entry?.savedStateHandle?.set("edit_service_currency", pCurrency)
-                                                        if (!pFreq.isNullOrBlank()) entry?.savedStateHandle?.set("edit_service_frequency", pFreq)
-                                                    } catch (_: Exception) {}
-                                                    try {
-                                                        val locTag = svc.rawTags.firstOrNull { it.size > 1 && it[0] == "location" }
-                                                        val loc = locTag?.getOrNull(1) as? String
-                                                        if (!loc.isNullOrBlank()) entry?.savedStateHandle?.set("edit_service_location", loc)
-                                                    } catch (_: Exception) {}
-                                                } catch (_: Exception) {}
+                                                        }
+                                                if (images.isNotEmpty()) {
+                                                    put("images", org.json.JSONArray(images))
+                                                }
+
+                                                svc.rawTags.firstOrNull { it.size > 1 && it[0] == "price" }?.let { priceTag ->
+                                                    priceTag.getOrNull(1)?.let { put("price", it) }
+                                                    priceTag.getOrNull(2)?.let { put("currency", it) }
+                                                    priceTag.getOrNull(3)?.let { put("frequency", it) }
+                                                }
+
+                                                svc.rawTags.firstOrNull { it.size > 1 && it[0] == "location" }
+                                                    ?.getOrNull(1)
+                                                    ?.takeIf { it.isNotBlank() }
+                                                    ?.let { put("location", it) }
                                             }
+                                            navController.currentBackStackEntry?.savedStateHandle?.set("edit_service_payload", payload.toString())
+                                            navController.previousBackStackEntry?.savedStateHandle?.set("edit_service_payload", payload.toString())
                                         } catch (_: Exception) {}
                                         navController.navigate(com.hisa.ui.navigation.Routes.CREATE_SERVICE)
                                     },
