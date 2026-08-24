@@ -39,6 +39,7 @@ class MetadataRepository @Inject constructor(
         setInstance(this)
     }
     suspend fun getMetadataForPubkey(pubkey: String, beforeTimestamp: Long? = null): Metadata? = withContext(Dispatchers.IO) {
+        nostrClient.refreshStoredRelays()
         var result: Metadata? = null
         val filterObj = org.json.JSONObject().apply {
             put("kinds", org.json.JSONArray().put(0))

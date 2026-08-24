@@ -5,12 +5,18 @@ import android.content.ClipboardManager
 import android.content.Context
 import android.graphics.Bitmap
 import android.widget.Toast
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.MarqueeAnimationMode
+import androidx.compose.foundation.background
+import androidx.compose.foundation.basicMarquee
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
@@ -26,13 +32,23 @@ import androidx.compose.material.icons.outlined.Payments
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toArgb
+import androidx.compose.ui.graphics.vector.rememberVectorPainter
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
+import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.navigation.NavHostController
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import com.hisa.util.Constants
+import com.hisa.data.model.Metadata
+import com.hisa.data.repository.ZapSponsor
+import com.hisa.data.repository.ZapSponsorsRepository
+import com.hisa.ui.util.LocalProfileRepository
 import androidx.compose.ui.graphics.asImageBitmap
+import coil.compose.AsyncImage
 import com.google.zxing.BarcodeFormat
 import com.google.zxing.qrcode.QRCodeWriter
 import kotlinx.coroutines.launch
@@ -51,9 +67,22 @@ import okhttp3.Request
 import org.json.JSONObject
 
 @HiltViewModel
-class DonateViewModel @Inject constructor() : ViewModel() {
+class DonateViewModel @Inject constructor(
+    private val zapSponsorsRepository: ZapSponsorsRepository
+) : ViewModel() {
     private val _invoice = MutableStateFlow<String?>(null)
     val invoice: StateFlow<String?> = _invoice
+    val sponsors: StateFlow<List<ZapSponsor>> = zapSponsorsRepository.sponsors
+    val isLoadingSponsors: StateFlow<Boolean> = zapSponsorsRepository.isLoading
+
+    init {
+        zapSponsorsRepository.start()
+    }
+
+    override fun onCleared() {
+        zapSponsorsRepository.stop()
+        super.onCleared()
+    }
 
     fun generateInvoice(amount: Long, lightningAddress: String) {
         viewModelScope.launch {
@@ -94,8 +123,12 @@ class DonateViewModel @Inject constructor() : ViewModel() {
 fun DonateScreen(navController: NavHostController? = null) {
     val context = LocalContext.current
     var amount by remember { mutableStateOf(Constants.DEFAULT_DONATION_AMOUNT_SATS.toString()) }
-    val viewModel: DonateViewModel = viewModel()
+    val viewModel: DonateViewModel = hiltViewModel()
     val invoice by viewModel.invoice.collectAsState()
+    val sponsors by viewModel.sponsors.collectAsState()
+    val isLoadingSponsors by viewModel.isLoadingSponsors.collectAsState()
+    val profileRepository = LocalProfileRepository.current
+    val sponsorProfiles by profileRepository.profiles.collectAsState()
     var showQr by remember { mutableStateOf(false) }
 
     Scaffold(
@@ -118,11 +151,14 @@ fun DonateScreen(navController: NavHostController? = null) {
                 .padding(16.dp),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
-        Text(
-            "Support Hisa Development",
-            style = MaterialTheme.typography.headlineMedium,
-            modifier = Modifier.padding(bottom = 16.dp)
-        )
+        if (isLoadingSponsors || sponsors.isNotEmpty()) {
+            HisaSponsorsTicker(
+                sponsors = sponsors,
+                profiles = sponsorProfiles,
+                isLoading = isLoadingSponsors,
+                modifier = Modifier.padding(bottom = 16.dp)
+            )
+        }
 
         Text(
             "Hisa is open-source software. Your donations help keep development active and support new features.",
@@ -440,4 +476,111 @@ fun DonateScreen(navController: NavHostController? = null) {
         }
     }
 }
+}
+
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun HisaSponsorsTicker(
+    sponsors: List<ZapSponsor>,
+    profiles: Map<String, Metadata>,
+    isLoading: Boolean,
+    modifier: Modifier = Modifier
+) {
+    Column(
+        modifier = modifier.fillMaxWidth(),
+        horizontalAlignment = Alignment.Start
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                text = "Hisa sponsors",
+                style = MaterialTheme.typography.titleMedium
+            )
+            if (isLoading) {
+                Spacer(modifier = Modifier.width(8.dp))
+                CircularProgressIndicator(
+                    modifier = Modifier.size(16.dp),
+                    strokeWidth = 2.dp
+                )
+            }
+        }
+
+        if (sponsors.isNotEmpty()) {
+            Spacer(modifier = Modifier.height(8.dp))
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(16.dp))
+                    .background(MaterialTheme.colorScheme.surfaceVariant)
+                    .padding(vertical = 8.dp)
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .basicMarquee(
+                            iterations = Int.MAX_VALUE,
+                            animationMode = MarqueeAnimationMode.Immediately
+                        )
+                        .padding(horizontal = 12.dp),
+                    horizontalArrangement = Arrangement.spacedBy(16.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    sponsors.forEach { sponsor ->
+                        SponsorIdentity(
+                            sponsor = sponsor,
+                            metadata = profiles[sponsor.pubkey]
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun SponsorIdentity(
+    sponsor: ZapSponsor,
+    metadata: Metadata?
+) {
+    val fallbackName = sponsor.pubkey.take(8) + "…"
+    val displayName = metadata?.displayName?.takeIf(String::isNotBlank)
+        ?: metadata?.name?.takeIf(String::isNotBlank)
+        ?: fallbackName
+    val picture = metadata?.picture?.takeIf(String::isNotBlank)
+
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier.widthIn(max = 156.dp)
+    ) {
+        Box(
+            modifier = Modifier
+                .size(32.dp)
+                .clip(CircleShape)
+                .background(MaterialTheme.colorScheme.surface),
+            contentAlignment = Alignment.Center
+        ) {
+            if (picture != null) {
+                AsyncImage(
+                    model = picture,
+                    contentDescription = "$displayName's profile picture",
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier.fillMaxSize(),
+                    placeholder = rememberVectorPainter(Icons.Default.AccountCircle),
+                    error = rememberVectorPainter(Icons.Default.AccountCircle)
+                )
+            } else {
+                Icon(
+                    imageVector = Icons.Default.AccountCircle,
+                    contentDescription = "$displayName's profile picture",
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        }
+        Spacer(modifier = Modifier.width(6.dp))
+        Text(
+            text = displayName,
+            style = MaterialTheme.typography.labelSmall,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
+        )
+    }
 }

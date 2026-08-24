@@ -46,10 +46,13 @@ class ProfileRepository @Inject constructor(
     fun ensureProfiles(pubkeys: Set<String>) {
         if (pubkeys.isEmpty()) return
 
+        nostrClient.refreshStoredRelays()
+
         var shouldFlush = false
         pubkeys.asSequence()
             .map(String::trim)
             .filter { it.isNotBlank() && it != "unknown" }
+            .map(String::lowercase)
             .distinct()
             .forEach { pubkey ->
                 profileCache.getCachedProfile(pubkey)?.let { cached ->
@@ -121,7 +124,7 @@ class ProfileRepository @Inject constructor(
         }
 
         updateProfile(
-            pubkey = event.pubkey,
+            pubkey = event.pubkey.lowercase(),
             metadata = metadata,
             createdAt = event.createdAt,
             persist = true

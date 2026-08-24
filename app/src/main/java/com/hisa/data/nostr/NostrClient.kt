@@ -16,6 +16,7 @@ import javax.inject.Inject
 import javax.inject.Singleton
 import timber.log.Timber
 import com.hisa.util.Constants
+import com.hisa.util.AuthPreferenceStore
 import com.hisa.util.RelayHealth
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -72,6 +73,17 @@ class NostrClient @Inject constructor(
      */
     fun configuredRelays(): List<String> {
         return relayUrls.toList()
+    }
+
+    /** Refreshes the relay pool from the logged-in user's persisted preferences. */
+    fun refreshStoredRelays() {
+        val storedRelays = AuthPreferenceStore.readRelays(context)
+            ?.split("\n")
+            ?.filter(String::isNotBlank)
+            .orEmpty()
+        if (storedRelays.isNotEmpty()) {
+            updateRelays(storedRelays)
+        }
     }
 
     /**
