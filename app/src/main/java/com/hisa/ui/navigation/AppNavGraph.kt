@@ -145,10 +145,17 @@ fun AppNavGraph(
         }
     }
     
-    when (initState) {
+    val currentInitState = initState
+    when (currentInitState) {
         is AuthViewModel.InitState.Loading -> {
             Box(modifier = Modifier.fillMaxSize()) {
                 CircularProgressIndicator()
+            }
+            return
+        }
+        is AuthViewModel.InitState.Failed -> {
+            Box(modifier = Modifier.fillMaxSize()) {
+                Text("Unable to restore the local session: ${currentInitState.message}")
             }
             return
         }
@@ -171,10 +178,8 @@ fun AppNavGraph(
 
     }
 
-    val startRoute = when (val state = initState) {
-        is AuthViewModel.InitState.Loading -> Routes.LOGIN
-        is AuthViewModel.InitState.Ready -> if (state.initialRoute == "main") Routes.MAIN else Routes.LOGIN
-    }
+    val readyState = currentInitState as? AuthViewModel.InitState.Ready ?: return
+    val startRoute = if (readyState.initialRoute == "main") Routes.MAIN else Routes.LOGIN
 
     NavHost(
         navController = navController,
