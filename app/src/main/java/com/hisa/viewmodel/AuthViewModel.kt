@@ -16,7 +16,11 @@ import com.hisa.util.AuthPreferenceStore
 import com.hisa.util.KeyGenerator
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import org.bitcoinj.core.ECKey
 import com.hisa.util.Constants
 import com.hisa.util.RelayHealth
@@ -35,7 +39,7 @@ class AuthViewModel @Inject constructor(
     private val _relays = MutableStateFlow<List<String>>(emptyList())
     val relays: StateFlow<List<String>> = _relays
     init {
-        viewModelScope.launch {
+        viewModelScope.launch(Dispatchers.IO) {
             _relays.value = getStoredRelays()
         }
     }
@@ -237,11 +241,14 @@ class AuthViewModel @Inject constructor(
         null
     }
 
-    private val sharedPrefs = AuthPreferenceStore.prefs(getApplication<Application>().applicationContext)
+    private val sharedPrefs by lazy {
+        AuthPreferenceStore.prefs(getApplication<Application>().applicationContext)
+    }
 
     sealed class InitState {
         object Loading : InitState()
         data class Ready(val initialRoute: String) : InitState()
+        data class Failed(val message: String) : InitState()
     }
 
     private val _initState = MutableStateFlow<InitState>(InitState.Loading)
@@ -259,49 +266,158 @@ class AuthViewModel @Inject constructor(
     private val _isLoggingOut = MutableStateFlow(false)
     val isLoggingOut: StateFlow<Boolean> = _isLoggingOut
 
-    init {
-        // Populate reactive dark theme from persisted prefs once sharedPrefs is available
-        _darkTheme.value = sharedPrefs?.getBoolean("dark_theme", false) ?: false
+    private var initializationJob: Job? = null
 
-        viewModelScope.launch {
+    init {
+        startLocalInitialization()
+    }
+
+    /** Retry only the bounded local session restore used by SplashActivity. */
+    fun retryInitialization() {
+        startLocalInitialization()
+    }
+
+    private fun startLocalInitialization() {
+        initializationJob?.cancel()
+        _initState.value = InitState.Loading
+        _pubKey.value = null
+        _privateKey.value = null
+        _loginSuccess.value = false
+
+        initializationJob = viewModelScope.launch {
             try {
-                val savedNsec = sharedPrefs.getString("nsec", null)
-                if (!savedNsec.isNullOrBlank()) {
-                    loginWithNsec(savedNsec)
-                    // After obtaining pubkey, attempt to fetch preferred relays (NIP-65/kind 10002)
-                    _pubKey.value?.let { pub ->
-                        try {
-                            subscribeToPreferredRelays(pub)
-                        } catch (e: Exception) {
-                            android.util.Log.w("AuthViewModel", "Failed to subscribe to preferred relays: ${e.localizedMessage}")
-                        }
-                    }
-                    _initState.value = InitState.Ready("main")
-                } else {
-                    // Try persisted external signer (Amber) login first
-                    val savedExternalPackage = sharedPrefs.getString("external_signer_package", null)
-                    val savedExternalPub = sharedPrefs.getString("external_signer_pubkey", null)
-                    if (!savedExternalPackage.isNullOrBlank() && !savedExternalPub.isNullOrBlank()) {
-                        // Restore pubkey in-memory and trigger external signer login flow
-                        updateKeyFromExternal(savedExternalPub)
-                        loginWithExternalSigner(savedExternalPackage)
-                        _initState.value = InitState.Ready("main")
-                    } else {
-                        // Explicitly set to empty strings when no credentials found
-                        _pubKey.value = ""
-                        _privateKey.value = ""
-                        _loginSuccess.value = false
-                        _initState.value = InitState.Ready("login")
-                    }
+                // Only local storage and key derivation are part of readiness. Network,
+                // relay probing, and signer transport setup happen after Ready.
+                val session = withContext(Dispatchers.IO) { restoreLocalSession() }
+                _initState.value = InitState.Ready(session.initialRoute)
+                if (session.initialRoute == "main" && !session.pubkey.isNullOrBlank()) {
+                    startBackgroundSessionInitialization(session)
                 }
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
-                android.util.Log.e("AuthViewModel", "Error during initialization", e)
-                // Ensure state is cleared on error
+                android.util.Log.e("AuthViewModel", "Error during local initialization", e)
                 _pubKey.value = ""
                 _privateKey.value = ""
                 _loginSuccess.value = false
-                _initState.value = InitState.Ready("login")
+                _initState.value = InitState.Failed(
+                    e.localizedMessage ?: "Unable to restore the local session"
+                )
             }
+        }
+    }
+
+    private data class LocalSession(
+        val initialRoute: String,
+        val pubkey: String? = null,
+        val externalSignerPackage: String? = null
+    )
+
+    private fun restoreLocalSession(): LocalSession {
+        // This is the first access to the lazily-created preference handle during
+        // startup. The caller runs this method inside the bounded IO block.
+        _darkTheme.value = sharedPrefs.getBoolean(AuthPreferenceStore.DARK_THEME_KEY, false)
+        val savedNsec = sharedPrefs.getString("nsec", null)
+        if (!savedNsec.isNullOrBlank()) {
+            val restoredPubkey = runCatching { restoreNsecLocally(savedNsec) }.getOrNull()
+            if (!restoredPubkey.isNullOrBlank()) {
+                return LocalSession(initialRoute = "main", pubkey = restoredPubkey)
+            }
+            android.util.Log.w("AuthViewModel", "Stored nsec could not be restored")
+        }
+
+        val savedExternalPackage = sharedPrefs.getString("external_signer_package", null)
+        val savedExternalPubkey = sharedPrefs.getString("external_signer_pubkey", null)
+        val normalizedExternalPubkey = savedExternalPubkey
+            ?.let(::normalizeExternalSignerPubkey)
+        if (!savedExternalPackage.isNullOrBlank() && normalizedExternalPubkey != null) {
+            _pubKey.value = normalizedExternalPubkey
+            _privateKey.value = null
+            _loginSuccess.value = true
+            return LocalSession(
+                initialRoute = "main",
+                pubkey = normalizedExternalPubkey,
+                externalSignerPackage = savedExternalPackage
+            )
+        }
+
+        _pubKey.value = ""
+        _privateKey.value = ""
+        _loginSuccess.value = false
+        return LocalSession(initialRoute = "login")
+    }
+
+    private fun restoreNsecLocally(nsec: String): String? {
+        val privKey = KeyGenerator.nsecToPrivateKey(nsec)
+        if (privKey.size != 32) return null
+
+        return try {
+            val ecKey = ECKey.fromPrivate(privKey)
+            val uncompressed = ecKey.decompress().pubKeyPoint.getEncoded(false)
+            val xOnly = uncompressed.copyOfRange(1, 33)
+            val pubkeyHex = xOnly.joinToString("") { "%02x".format(it) }
+            val privKeyHex = privKey.joinToString("") { "%02x".format(it) }
+            _pubKey.value = pubkeyHex
+            _privateKey.value = privKeyHex
+            _loginSuccess.value = true
+            sharedPrefs.edit()
+                .remove("external_signer_pubkey")
+                .remove("external_signer_package")
+                .apply()
+            com.hisa.data.nostr.ExternalSignerManager.clearConfiguration()
+            pubkeyHex
+        } finally {
+            for (i in privKey.indices) privKey[i] = 0
+        }
+    }
+
+    private fun normalizeExternalSignerPubkey(value: String): String? {
+        val normalized = if (value.startsWith("npub", ignoreCase = true)) {
+            KeyGenerator.npubToPublicKey(value)
+        } else {
+            value.trim()
+        }
+        return normalized
+            ?.lowercase()
+            ?.takeIf { it.matches(Regex("[0-9a-f]{64}")) }
+    }
+
+    private fun startBackgroundSessionInitialization(session: LocalSession) {
+        val pubkey = session.pubkey ?: return
+        viewModelScope.launch(Dispatchers.IO) {
+            if (!session.externalSignerPackage.isNullOrBlank()) {
+                runCatching { signingService.ensureExternalSignerConfigured() }
+                    .onFailure { error ->
+                        android.util.Log.w(
+                            "AuthViewModel",
+                            "External signer setup deferred: ${error.localizedMessage}"
+                        )
+                    }
+            }
+
+            runCatching { nostrClient.refreshStoredRelays() }
+                .onFailure { error ->
+                    android.util.Log.w(
+                        "AuthViewModel",
+                        "Failed to refresh stored relays: ${error.localizedMessage}"
+                    )
+                }
+
+            runCatching { nostrClient.connect() }
+                .onFailure { error ->
+                    android.util.Log.w(
+                        "AuthViewModel",
+                        "Failed to start relay connection: ${error.localizedMessage}"
+                    )
+                }
+
+            runCatching { subscribeToPreferredRelays(pubkey) }
+                .onFailure { error ->
+                    android.util.Log.w(
+                        "AuthViewModel",
+                        "Failed to subscribe to preferred relays: ${error.localizedMessage}"
+                    )
+                }
         }
     }
 
@@ -570,7 +686,7 @@ class AuthViewModel @Inject constructor(
      * proceed to the main UI. Signing operations should be delegated to the external signer.
      */
     fun loginWithExternalSigner(packageName: String) {
-        viewModelScope.launch {
+        viewModelScope.launch(Dispatchers.IO) {
             try {
                 // Persist the signer package so it can be used later when delegating signing
                 try {
