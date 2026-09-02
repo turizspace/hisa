@@ -1,9 +1,13 @@
 package com.hisa.data.nostr
 
 import android.content.Context
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import okhttp3.*
@@ -23,6 +27,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.SharedFlow
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicLong
 
 @Singleton
 class NostrClient @Inject constructor(
@@ -40,19 +45,20 @@ class NostrClient @Inject constructor(
         val cleaned = RelayHealth.normalizeRelayUrls(newRelays)
         val selected = RelayHealth.selectRelayUrls(cleaned, fallback = Constants.ONBOARDING_RELAYS, probeReachability = false)
 
-        // Compare as sets so order or duplication doesn't prevent real updates
-        if (selected.toSet() == relayUrls.toSet()) {
-            Timber.d("updateRelays called but relay set unchanged: %s", selected)
-            return
+        synchronized(connectLock) {
+            // Compare as sets so order or duplication doesn't prevent real updates
+            if (selected.toSet() == relayUrls.toSet()) {
+                Timber.d("updateRelays called but relay set unchanged: %s", selected)
+                return
+            }
+
+            Timber.i("Updating relays -> %s", selected)
+
+            // Disconnect from current relays and swap the list atomically with
+            // connect-generation invalidation.
+            disconnect()
+            relayUrls = selected
         }
-
-        Timber.i("Updating relays -> %s", selected)
-
-        // Disconnect from current relays
-        disconnect()
-
-        // Update relay list (atomic swap)
-        relayUrls = selected
 
         // Connect to new relays
         connect()
@@ -102,6 +108,10 @@ class NostrClient @Inject constructor(
     }
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val connectLock = Any()
+    private val connectGeneration = AtomicLong(0L)
+    @Volatile
+    private var connectJob: Job? = null
     private val webSockets = ConcurrentHashMap<String, WebSocket>()
     private val subscriptions = ConcurrentHashMap<String, String>() // id -> filterJson
     // Assignment of subscription id to one or more relays to avoid sending CLOSE to all relays unnecessarily
@@ -202,26 +212,68 @@ class NostrClient @Inject constructor(
         .build()
 
     fun connect() {
-        if (_connectionState.value == ConnectionState.CONNECTED ||
-            _connectionState.value == ConnectionState.CONNECTING) {
-            return
-        }
+        synchronized(connectLock) {
+            if (_connectionState.value == ConnectionState.CONNECTED ||
+                _connectionState.value == ConnectionState.CONNECTING) {
+                return
+            }
 
+            // Reachability probes use blocking sockets. Keep the complete setup
+            // off the caller's thread; many callers originate from Compose/UI code.
+            _connectionState.value = ConnectionState.CONNECTING
+            val generation = connectGeneration.incrementAndGet()
+            connectJob = scope.launch(Dispatchers.IO) {
+                try {
+                    connectInternal(generation)
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    Timber.e(e, "Relay connection setup failed")
+                    _connectionState.value = ConnectionState.ERROR
+                    attemptReconnect()
+                } finally {
+                    synchronized(connectLock) {
+                        if (connectGeneration.get() == generation) {
+                            connectJob = null
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private suspend fun connectInternal(generation: Long) {
+        currentCoroutineContext().ensureActive()
         val reachableRelays = RelayHealth.selectRelayUrls(relayUrls, fallback = Constants.ONBOARDING_RELAYS, probeReachability = true)
+        currentCoroutineContext().ensureActive()
+        if (connectGeneration.get() != generation) return
         if (reachableRelays.isEmpty()) {
             Timber.w("No reachable relays found from %s; falling back to configured set", relayUrls)
         }
         val connectTargets = reachableRelays.ifEmpty { relayUrls }
-        relayUrls = connectTargets
+        if (connectTargets.isEmpty()) {
+            _connectionState.value = ConnectionState.ERROR
+            return
+        }
+        synchronized(connectLock) {
+            if (connectGeneration.get() != generation) return
+            relayUrls = connectTargets
+        }
 
         _connectionState.value = ConnectionState.CONNECTING
         var openCount = 0
         var errorCount = 0
         relayUrls.forEach { relayUrl ->
+            currentCoroutineContext().ensureActive()
+            if (connectGeneration.get() != generation) return
             try {
                 val request = Request.Builder().url(relayUrl).build()
                 val ws = client.newWebSocket(request, object : WebSocketListener() {
                     override fun onOpen(webSocket: WebSocket, response: Response) {
+                        if (connectGeneration.get() != generation) {
+                            webSocket.close(1000, "Stale connection")
+                            return
+                        }
                         Timber.d("WebSocket opened: %s", relayUrl)
                         webSockets[relayUrl] = webSocket
                         // Mark connected as soon as we have at least one open websocket
@@ -361,6 +413,7 @@ class NostrClient @Inject constructor(
                     }
 
                     override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
+                        if (connectGeneration.get() != generation) return
                         val errorMessage = "WebSocket error ($relayUrl): ${t.localizedMessage}"
                         Timber.e(t, "WebSocket error (%s)", relayUrl)
                         // Expose the error to observers; UI can decide how to display it.
@@ -380,7 +433,8 @@ class NostrClient @Inject constructor(
                     }
 
                     override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
-            Timber.w("WebSocket closed (%s): %d %s", relayUrl, code, reason)
+                        if (connectGeneration.get() != generation) return
+                        Timber.w("WebSocket closed (%s): %d %s", relayUrl, code, reason)
                         webSockets.remove(relayUrl)
                         clearRelayAssignments(relayUrl)
                         if (webSockets.isEmpty()) {
@@ -397,6 +451,11 @@ class NostrClient @Inject constructor(
     }
 
     fun disconnect() {
+        synchronized(connectLock) {
+            connectGeneration.incrementAndGet()
+            connectJob?.cancel()
+            connectJob = null
+        }
         webSockets.forEach { (relayUrl, ws) ->
             ws.close(1000, "Normal closure")
         }
