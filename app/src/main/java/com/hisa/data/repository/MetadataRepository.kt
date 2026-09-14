@@ -5,6 +5,7 @@ import com.hisa.data.nostr.NostrClient
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.firstOrNull
 import kotlinx.coroutines.flow.takeWhile
 import java.util.UUID
@@ -23,6 +24,7 @@ class MetadataRepository @Inject constructor(
     private val subscriptionManager: com.hisa.data.nostr.SubscriptionManager
 ) {
     companion object {
+        private const val METADATA_EOSE_SETTLE_MS = 500L
         @Volatile
         private var _instance: MetadataRepository? = null
         val instance: MetadataRepository
@@ -65,7 +67,9 @@ class MetadataRepository @Inject constructor(
                 // Signal that EOSE arrived
                 if (!finished.isCompleted) finished.complete(Unit)
             },
-            autoCloseOnEose = true
+            // Metadata is sent to a relay quorum. Explicitly close below after
+            // the short settle window, not at the first relay's EOSE.
+            autoCloseOnEose = false
         )
 
         try {
@@ -73,6 +77,7 @@ class MetadataRepository @Inject constructor(
             withTimeoutOrNull(TimeUnit.SECONDS.toMillis(5)) {
                 finished.await()
             }
+            delay(METADATA_EOSE_SETTLE_MS)
 
             val chosen = events
                 .filter { (createdAt, _) -> beforeTimestamp?.let { createdAt <= it } ?: true }

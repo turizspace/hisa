@@ -36,15 +36,26 @@ class NostrClient @Inject constructor(
 ) {
     @Volatile
     private var relayUrls: List<String> = relayUrls
+    @Volatile
+    private var configuredRelayUrls: List<String> = relayUrls
+    @Volatile
+    private var discoveredRelayUrls: List<String> = emptyList()
     /**
      * Dynamically update the relay list and reconnect.
      */
     @Synchronized
     fun updateRelays(newRelays: List<String>) {
-        // Normalize incoming list, remove invalid URLs, and prefer a reachable subset when possible.
-        val cleaned = RelayHealth.normalizeRelayUrls(newRelays)
-        val selected = RelayHealth.selectRelayUrls(cleaned, fallback = Constants.ONBOARDING_RELAYS, probeReachability = false)
+        configuredRelayUrls = RelayHealth.normalizeRelayUrls(newRelays)
+        applyRelayPool(configuredRelayUrls + discoveredRelayUrls)
+    }
 
+    private fun applyRelayPool(candidates: List<String>) {
+        // Normalize incoming list, remove invalid URLs, and prefer a reachable subset when possible.
+        val selected = RelayHealth.selectRelayUrls(
+            RelayHealth.normalizeRelayUrls(candidates),
+            fallback = Constants.ONBOARDING_RELAYS,
+            probeReachability = false
+        )
         synchronized(connectLock) {
             // Compare as sets so order or duplication doesn't prevent real updates
             if (selected.toSet() == relayUrls.toSet()) {
@@ -65,6 +76,19 @@ class NostrClient @Inject constructor(
 
         // Active subscriptions stay in-memory and are replayed by each socket's onOpen,
         // where they can be prioritized instead of being queued in arbitrary map order.
+    }
+
+    /**
+     * Adds relays discovered for a remote identity without changing the user's
+     * persisted NIP-65/manual relay selection. Active subscriptions are replayed
+     * after the pool is refreshed.
+     */
+    @Synchronized
+    fun includeDiscoveredRelays(relays: List<String>) {
+        val additions = RelayHealth.normalizeRelayUrls(relays)
+        if (additions.isEmpty()) return
+        discoveredRelayUrls = RelayHealth.normalizeRelayUrls(discoveredRelayUrls + additions)
+        applyRelayPool(configuredRelayUrls + discoveredRelayUrls)
     }
 
     /**
@@ -643,7 +667,9 @@ class NostrClient @Inject constructor(
         if (entries.isEmpty()) return entries
         val sorted = entries.sortedBy { it.key }
         return when (priority) {
-            SubscriptionPriority.METADATA -> listOf(sorted[Math.floorMod(subscriptionId.hashCode(), sorted.size)])
+            // Metadata is replaceable and is often not replicated uniformly.
+            // Query a small quorum instead of treating one relay's miss as absent.
+            SubscriptionPriority.METADATA -> sorted.take(minOf(3, sorted.size))
             SubscriptionPriority.USER_RELAYS -> sorted.take(minOf(2, sorted.size))
             else -> entries
         }
@@ -657,10 +683,7 @@ class NostrClient @Inject constructor(
         val openRelayUrls = webSockets.keys.sorted()
         if (openRelayUrls.isEmpty()) return true
         return when (priority) {
-            SubscriptionPriority.METADATA -> {
-                val selected = openRelayUrls[Math.floorMod(subscriptionId.hashCode(), openRelayUrls.size)]
-                relayUrl == selected
-            }
+            SubscriptionPriority.METADATA -> relayUrl in openRelayUrls.take(minOf(3, openRelayUrls.size))
             SubscriptionPriority.USER_RELAYS -> relayUrl in openRelayUrls.take(minOf(2, openRelayUrls.size))
             else -> true
         }

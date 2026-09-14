@@ -69,6 +69,20 @@ class ProfileRepository @Inject constructor(
         }
     }
 
+    /** Retry metadata lookup after additional relays have been discovered. */
+    fun refreshProfiles(pubkeys: Set<String>) {
+        val normalized = pubkeys.asSequence()
+            .map(String::trim)
+            .filter { it.isNotBlank() && it != "unknown" }
+            .map(String::lowercase)
+            .toSet()
+        if (normalized.isEmpty()) return
+
+        subscribedPubkeys.removeAll(normalized)
+        pendingPubkeys.removeAll(normalized)
+        ensureProfiles(normalized)
+    }
+
     fun getCachedProfile(pubkey: String): Metadata? =
         profiles.value[pubkey] ?: profileCache.getCachedProfile(pubkey)
 
