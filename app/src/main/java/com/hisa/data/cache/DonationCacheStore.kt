@@ -112,7 +112,7 @@ class DonationCacheStore @Inject constructor(
 
     private companion object {
         const val KEY_PAYMENT_TARGETS = "payment_targets_v1"
-        const val KEY_BADGE_AWARDS = "badge_awards_v1"
+        const val KEY_BADGE_AWARDS = "badge_awards_v2"
         const val KEY_SPONSORS = "sponsors_v1"
         const val KEY_LEGACY_SNAPSHOT = "snapshot_v1"
         const val CACHE_VERSION = 1

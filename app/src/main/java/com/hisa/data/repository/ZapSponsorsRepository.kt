@@ -19,7 +19,6 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 import kotlinx.serialization.Serializable
-import org.bitcoinj.core.Bech32
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -36,23 +35,17 @@ data class ZapSponsor(
  *
  * NIP-57 receipt events are not payment proofs, so this repository follows the
  * NIP validation rules before displaying a sender: the receipt and embedded zap
- * request must be valid Nostr events, the receipt must be signed by the LNURL
- * provider, and the BOLT-11 amount must match the requested amount when present.
+ * request must be valid Nostr events, and the BOLT-11 amount must match the
+ * requested amount when present.
  */
 @Singleton
 class ZapSponsorsRepository @Inject constructor(
     private val nostrClient: NostrClient,
     private val subscriptionManager: SubscriptionManager,
     private val profileRepository: ProfileRepository,
-    private val developerSupportRepository: DeveloperSupportRepository,
     private val donationCacheStore: DonationCacheStore,
     private val appScope: CoroutineScope
 ) {
-    private data class ZapProvider(
-        val pubkey: String,
-        val lnurlPayUrl: String
-    )
-
     private data class ZapContribution(
         val senderPubkey: String,
         val amountMilliSats: Long,
@@ -107,24 +100,9 @@ class ZapSponsorsRepository @Inject constructor(
         nostrClient.connect()
 
         appScope.launch(Dispatchers.IO) {
-            developerSupportRepository.start()
-            val supportProfile = developerSupportRepository.profile.value
-            val provider = supportProfile?.zapProviderPubkey?.let { providerPubkey ->
-                ZapProvider(providerPubkey, supportProfile.lnurlPayUrl.orEmpty())
+            if (started && refreshGeneration.get() == generation) {
+                subscribeToZapReceipts(generation)
             }
-            if (!started || refreshGeneration.get() != generation || provider == null) {
-                _isLoading.value = false
-                if (provider == null) {
-                    _sponsorState.value = _sponsorState.value.copy(
-                        status = DonationSourceStatus.FAILED,
-                        isLoading = false,
-                        error = "Zap provider unavailable",
-                        errorCategory = DonationFailureCategory.PROVIDER_UNAVAILABLE
-                    )
-                }
-                return@launch
-            }
-            subscribeToZapReceipts(provider, generation)
         }
     }
 
@@ -149,7 +127,7 @@ class ZapSponsorsRepository @Inject constructor(
         start()
     }
 
-    private fun subscribeToZapReceipts(provider: ZapProvider, generation: Long) {
+    private fun subscribeToZapReceipts(generation: Long) {
         if (!started) return
 
         val filter = JSONObject().apply {
@@ -161,7 +139,7 @@ class ZapSponsorsRepository @Inject constructor(
             filter = filter,
             onEvent = { receipt ->
                 if (!started || refreshGeneration.get() != generation) return@subscribe
-                parseValidatedContribution(receipt, provider)?.let { contribution ->
+                parseValidatedContribution(receipt)?.let { contribution ->
                     if (contributionsByReceiptId.putIfAbsent(receipt.id, contribution) == null) {
                         scheduleLivePublish()
                     }
@@ -188,11 +166,9 @@ class ZapSponsorsRepository @Inject constructor(
     }
 
     private fun parseValidatedContribution(
-        receipt: NostrEvent,
-        provider: ZapProvider
+        receipt: NostrEvent
     ): ZapContribution? {
         if (receipt.kind != ZAP_RECEIPT_KIND ||
-            receipt.pubkey.lowercase() != provider.pubkey ||
             receipt.tagValues("p").singleOrNull()?.lowercase() != Constants.HISA_DEV_PUBKEY
         ) {
             return null
@@ -208,11 +184,6 @@ class ZapSponsorsRepository @Inject constructor(
             !request.pubkey.isHexPubkey() ||
             request.tagValues("p").singleOrNull()?.lowercase() != Constants.HISA_DEV_PUBKEY
         ) {
-            return null
-        }
-
-        val requestedLnurl = request.tagValues("lnurl").singleOrNull()
-        if (requestedLnurl != null && requestedLnurl.decodeLnurl()?.normalizedLnurlUrl() != provider.lnurlPayUrl) {
             return null
         }
 
@@ -257,39 +228,13 @@ class ZapSponsorsRepository @Inject constructor(
         )
         val sponsorPubkeys = sponsors.mapTo(mutableSetOf()) { it.pubkey }
         appScope.launch(Dispatchers.IO) {
-            val result = profileRepository.ensureFreshProfiles(sponsorPubkeys)
-            if (result.failed.isNotEmpty()) {
-                _sponsorState.value = _sponsorState.value.copy(
-                    error = "Some supporter profiles could not be loaded.",
-                    errorCategory = DonationFailureCategory.PROFILE_METADATA_FAILURE
-                )
-            }
+            profileRepository.ensureFreshProfiles(sponsorPubkeys)
         }
         donationCacheStore.writeSponsors(sponsors)
     }
 
     private fun NostrEvent.isValidNostrEvent(): Boolean =
         EventVerifier.verifyEvent(toJson().toString()).let { it.idMatches && it.signatureValid }
-
-    private fun String.decodeLnurl(): String? = runCatching {
-        val decoded = Bech32.decode(trim().lowercase())
-        if (decoded.hrp != "lnurl") return null
-        var accumulator = 0
-        var bitCount = 0
-        val bytes = ArrayList<Byte>()
-        decoded.data.forEach { word ->
-            accumulator = (accumulator shl 5) or (word.toInt() and 0x1f)
-            bitCount += 5
-            while (bitCount >= 8) {
-                bitCount -= 8
-                bytes += ((accumulator shr bitCount) and 0xff).toByte()
-            }
-        }
-        if (bitCount >= 5 || ((accumulator shl (8 - bitCount)) and 0xff) != 0) return null
-        bytes.toByteArray().decodeToString()
-    }.getOrNull()
-
-    private fun String.normalizedLnurlUrl(): String = trim().removeSuffix("/")
 
     private fun String.isHexPubkey(): Boolean =
         length == 64 && all { it in '0'..'9' || it in 'a'..'f' || it in 'A'..'F' }

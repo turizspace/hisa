@@ -120,7 +120,7 @@ class DonationTargetsRepository @Inject constructor(
         val cachedPaymentTargets = donationCacheStore.readPaymentTargets()
         val cachedBadgeAwards = donationCacheStore.readBadgeAwards()
         val paymentCacheFailure = donationCacheStore.consumeReadFailure("payment_targets_v1")
-        val badgeCacheFailure = donationCacheStore.consumeReadFailure("badge_awards_v1")
+        val badgeCacheFailure = donationCacheStore.consumeReadFailure("badge_awards_v2")
         _paymentTargets.value = cachedPaymentTargets.items
         _badgeAwards.value = cachedBadgeAwards.items.filter(BadgeAwardPolicy::isDisplayable)
         _paymentTargetState.value = DonationSourceState(
@@ -293,6 +293,15 @@ class DonationTargetsRepository @Inject constructor(
             ?.distinctBy { "${it.type}:$it.address" }
             .orEmpty()
 
+        if (targets.isEmpty() && _paymentTargets.value.isNotEmpty()) {
+            _paymentTargetState.value = _paymentTargetState.value.copy(
+                status = DonationSourceStatus.READY,
+                isStale = true,
+                isLoading = false
+            )
+            return
+        }
+
         val updatedAt = System.currentTimeMillis()
         _paymentTargetState.value = DonationSourceState(
             data = targets,
@@ -319,6 +328,7 @@ class DonationTargetsRepository @Inject constructor(
         val author = Constants.HISA_DEV_PUBKEY
         val definitions = badgeDefinitionEvents.values
             .filter { it.pubkey.equals(author, ignoreCase = true) }
+            .filterNot { BadgeAwardPolicy.isHiddenEvent(it.id) }
             .mapNotNull { event ->
                 val dTag = event.tagValues("d").singleOrNull()?.takeIf(String::isNotBlank)
                     ?: return@mapNotNull null
@@ -333,6 +343,7 @@ class DonationTargetsRepository @Inject constructor(
             .toMap()
         val awards = badgeAwardEvents.values
             .filter { it.pubkey.equals(author, ignoreCase = true) }
+            .filterNot { BadgeAwardPolicy.isHiddenEvent(it.id) }
             .flatMap { award ->
                 val definitionAddress = award.tagValues("a").firstOrNull { it.startsWith("30009:") }
                     ?.let(::normalizeDefinitionAddress)
@@ -355,6 +366,16 @@ class DonationTargetsRepository @Inject constructor(
             .distinctBy { "${it.recipientPubkey}:${it.definitionAddress}" }
             .sortedBy { it.name.lowercase() }
             .filter(BadgeAwardPolicy::isDisplayable)
+
+        if (awards.isEmpty() && _badgeAwards.value.isNotEmpty()) {
+            _badgeState.value = _badgeState.value.copy(
+                status = DonationSourceStatus.READY,
+                isStale = true,
+                isLoading = false
+            )
+            return
+        }
+
         _badgeAwards.value = awards
         _badgeState.value = DonationSourceState(
             data = awards,
@@ -390,13 +411,7 @@ class DonationTargetsRepository @Inject constructor(
         // kind-0 metadata often lives on their own NIP-65 relays, so querying
         // only the app's current relay pool produces the fallback pubkey text.
         appScope.launch(Dispatchers.IO) {
-            val result = profileRepository.ensureFreshProfiles(recipientPubkeys)
-            if (result.failed.isNotEmpty()) {
-                _badgeState.value = _badgeState.value.copy(
-                    error = "Some badge recipient profiles could not be loaded.",
-                    errorCategory = DonationFailureCategory.PROFILE_METADATA_FAILURE
-                )
-            }
+            profileRepository.ensureFreshProfiles(recipientPubkeys)
         }
     }
 

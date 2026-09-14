@@ -138,7 +138,6 @@ class DonateViewModel @Inject constructor(
                 badgeAwards = snapshot.badges.data,
                 developer = snapshot.developer.data,
                 isLoadingSponsors = snapshot.sponsors.isLoading,
-                isLoadingTargets = snapshot.targets.isLoading || snapshot.badges.isLoading,
                 isLoadingDeveloper = snapshot.developer.isLoading,
                 invoice = invoice,
                 invoiceError = invoiceError,
@@ -226,7 +225,6 @@ data class DonateUiState(
     val badgeAwards: List<BadgeAward> = emptyList(),
     val developer: DeveloperSupportProfile? = null,
     val isLoadingSponsors: Boolean = false,
-    val isLoadingTargets: Boolean = false,
     val isLoadingDeveloper: Boolean = false,
     val invoice: String? = null,
     val invoiceError: String? = null,
@@ -273,21 +271,6 @@ fun DonateScreen(navController: NavHostController? = null) {
             modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(paddingValues).padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            if (uiState.isLoadingSponsors || uiState.isLoadingTargets || uiState.isLoadingDeveloper) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.Center
-                ) {
-                    CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Text(
-                        "Loading...",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-            }
             Text(
                 "Hisa is open-source software. Your donations help keep development active and support new features.",
                 style = MaterialTheme.typography.bodyLarge
@@ -352,7 +335,7 @@ private fun LightningDonationCard(
         )
         Card(modifier = Modifier.fillMaxWidth()) {
             Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            if (isLoadingAddress) {
+            if (isLoadingAddress && address == null) {
                 LightningCardSkeleton()
             } else if (address != null) {
                 Text(
@@ -419,12 +402,11 @@ private fun PublishedPaymentTargets(
         )
         Card(modifier = Modifier.fillMaxWidth()) {
             Column(modifier = Modifier.padding(16.dp)) {
-                state.updatedAt?.let { Text("Updated ${formatUpdatedAt(it)}", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
-                if (state.status == DonationSourceStatus.LOADING) {
+                if (targets.isEmpty() && state.status == DonationSourceStatus.LOADING) {
                     PaymentTargetSkeletons()
-                } else if (state.status == DonationSourceStatus.FAILED && targets.isEmpty()) {
+                } else if (targets.isEmpty() && state.status == DonationSourceStatus.FAILED) {
                     Text("Payment targets could not be loaded.")
-                } else if (state.status == DonationSourceStatus.EMPTY) {
+                } else if (targets.isEmpty()) {
                     Text("No additional payment targets are currently published.")
                 }
                 state.error?.let {
@@ -513,9 +495,6 @@ private fun paymentTargetVisual(type: String): PaymentTargetVisual {
 
 private val MaterialThemeFallbackTint = Color(0xFF68707A)
 
-private fun formatUpdatedAt(timestamp: Long): String =
-    java.text.DateFormat.getTimeInstance(java.text.DateFormat.SHORT).format(java.util.Date(timestamp))
-
 @Composable
 private fun PublishedBadges(
     awards: List<BadgeAward>,
@@ -536,8 +515,7 @@ private fun PublishedBadges(
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
-        state.updatedAt?.let { Text("Updated ${formatUpdatedAt(it)}", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
-        if (state.status == DonationSourceStatus.LOADING) {
+        if (displayableAwards.isEmpty() && state.status == DonationSourceStatus.LOADING) {
             BadgeSkeletons()
         } else if (state.status == DonationSourceStatus.FAILED && displayableAwards.isEmpty()) {
             Text("Mission badges could not be loaded.")
@@ -602,11 +580,11 @@ private fun HisaSponsorsTicker(
     Column(modifier = Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         SectionHeading(
             title = "Supporters & Patrons",
-            subtitle = "Lightning zaps sent to the developer's Nostr profile."
+            subtitle = "Lightning zaps sent to the developer's profile."
         )
         Card(modifier = Modifier.fillMaxWidth()) {
             Column(modifier = Modifier.padding(16.dp)) {
-                if (state.status == DonationSourceStatus.LOADING || isLoading) {
+                if (sponsors.isEmpty() && (state.status == DonationSourceStatus.LOADING || isLoading)) {
                     SponsorSkeletons()
                 } else if (state.status == DonationSourceStatus.FAILED && sponsors.isEmpty()) {
                     Text("Supporters could not be loaded right now.")
@@ -737,7 +715,6 @@ private fun PaymentTargetSkeletons() {
                 SkeletonBox(modifier = Modifier.width(110.dp).height(14.dp))
                 SkeletonBox(modifier = Modifier.fillMaxWidth().height(11.dp))
             }
-                state.updatedAt?.let { Text("Updated ${formatUpdatedAt(it)}", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
         }
     }
 }
