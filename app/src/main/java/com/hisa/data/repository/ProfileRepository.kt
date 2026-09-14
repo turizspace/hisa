@@ -6,16 +6,22 @@ import com.hisa.data.nostr.NostrEvent
 import com.hisa.data.nostr.NostrClient
 import com.hisa.data.nostr.SubscriptionManager
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicLong
 import javax.inject.Inject
 import javax.inject.Singleton
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
+import kotlinx.coroutines.coroutineScope
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.json.Json
 
@@ -24,16 +30,26 @@ class ProfileRepository @Inject constructor(
     private val nostrClient: NostrClient,
     private val subscriptionManager: SubscriptionManager,
     private val profileCache: ProfileCache,
+    private val remoteRelayDirectory: RemoteRelayDirectory,
     private val appScope: CoroutineScope
 ) {
     companion object {
         private const val PROFILE_CHUNK_SIZE = 50
         private const val FLUSH_DELAY_MS = 75L
+        private const val PROFILE_RELAY_CONCURRENCY = 4
     }
 
     private val json = Json { ignoreUnknownKeys = true }
     private val _profiles = MutableStateFlow<Map<String, Metadata>>(emptyMap())
     val profiles: StateFlow<Map<String, Metadata>> = _profiles
+    private val profileFlows = ConcurrentHashMap<String, MutableStateFlow<Metadata?>>()
+
+    fun profileFlow(pubkey: String): StateFlow<Metadata?> {
+        val normalized = pubkey.trim().lowercase()
+        return profileFlows.getOrPut(normalized) {
+            MutableStateFlow(_profiles.value[normalized])
+        }
+    }
 
     private val latestProfileTimestamps = ConcurrentHashMap<String, Long>()
     private val subscribedPubkeys = ConcurrentHashMap.newKeySet<String>()
@@ -42,6 +58,12 @@ class ProfileRepository @Inject constructor(
 
     @Volatile
     private var flushJob: Job? = null
+    private val refreshGeneration = AtomicLong(0L)
+
+    data class ProfileRefreshResult(
+        val successful: Set<String>,
+        val failed: Set<String>
+    )
 
     fun ensureProfiles(pubkeys: Set<String>) {
         if (pubkeys.isEmpty()) return
@@ -71,6 +93,10 @@ class ProfileRepository @Inject constructor(
 
     /** Retry metadata lookup after additional relays have been discovered. */
     fun refreshProfiles(pubkeys: Set<String>) {
+        refreshProfiles(pubkeys, refreshGeneration.incrementAndGet())
+    }
+
+    private fun refreshProfiles(pubkeys: Set<String>, generation: Long) {
         val normalized = pubkeys.asSequence()
             .map(String::trim)
             .filter { it.isNotBlank() && it != "unknown" }
@@ -80,7 +106,36 @@ class ProfileRepository @Inject constructor(
 
         subscribedPubkeys.removeAll(normalized)
         pendingPubkeys.removeAll(normalized)
+        if (refreshGeneration.get() == generation) ensureProfiles(normalized)
+    }
+
+    suspend fun ensureFreshProfiles(pubkeys: Set<String>): ProfileRefreshResult {
+        val normalized = pubkeys.asSequence()
+            .map(String::trim)
+            .filter { it.isNotBlank() && it != "unknown" }
+            .map(String::lowercase)
+            .toSet()
+        if (normalized.isEmpty()) return ProfileRefreshResult(emptySet(), emptySet())
+
+        val generation = refreshGeneration.incrementAndGet()
         ensureProfiles(normalized)
+        val limiter = Semaphore(PROFILE_RELAY_CONCURRENCY)
+        val results = coroutineScope {
+            normalized.map { pubkey ->
+                async(Dispatchers.IO) {
+                    limiter.withPermit {
+                        runCatching { remoteRelayDirectory.ensureRelayCoverage(pubkey) }
+                            .isSuccess
+                    }.let { pubkey to it }
+                }
+            }.awaitAll()
+        }
+        val successful = results.filter { it.second }.mapTo(mutableSetOf()) { it.first }
+        val failed = normalized - successful
+        if (successful.isNotEmpty() && refreshGeneration.get() == generation) {
+            refreshProfiles(successful, generation)
+        }
+        return ProfileRefreshResult(successful, failed)
     }
 
     fun getCachedProfile(pubkey: String): Metadata? =
@@ -91,12 +146,13 @@ class ProfileRepository @Inject constructor(
             if (flushJob?.isActive == true) return
             flushJob = appScope.launch(Dispatchers.IO) {
                 delay(FLUSH_DELAY_MS)
-                flushPendingPubkeys()
+                flushPendingPubkeys(refreshGeneration.get())
             }
         }
     }
 
-    private fun flushPendingPubkeys() {
+    private fun flushPendingPubkeys(generation: Long) {
+        if (refreshGeneration.get() != generation) return
         val requestedPubkeys = pendingPubkeys.toList()
         pendingPubkeys.removeAll(requestedPubkeys.toSet())
 
@@ -118,7 +174,7 @@ class ProfileRepository @Inject constructor(
                 val listenerId = subscriptionManager.subscribe(
                     filter = filter,
                     onEvent = { event ->
-                        handleProfileEvent(event)
+                        if (refreshGeneration.get() == generation) handleProfileEvent(event)
                     },
                     autoCloseOnEose = true
                 )
@@ -159,9 +215,11 @@ class ProfileRepository @Inject constructor(
             val existing = current[pubkey]
             if (existing == metadata) current else current + (pubkey to metadata)
         }
+        profileFlows[pubkey]?.value = metadata
 
         if (persist) {
             profileCache.cacheProfile(pubkey, metadata)
         }
     }
+
 }
