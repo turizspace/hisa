@@ -38,15 +38,13 @@ class NostrClient @Inject constructor(
     private var relayUrls: List<String> = relayUrls
     @Volatile
     private var configuredRelayUrls: List<String> = relayUrls
-    @Volatile
-    private var discoveredRelayUrls: List<String> = emptyList()
     /**
      * Dynamically update the relay list and reconnect.
      */
     @Synchronized
     fun updateRelays(newRelays: List<String>) {
         configuredRelayUrls = RelayHealth.normalizeRelayUrls(newRelays)
-        applyRelayPool(configuredRelayUrls + discoveredRelayUrls)
+        applyRelayPool(configuredRelayUrls)
     }
 
     private fun applyRelayPool(candidates: List<String>) {
@@ -76,19 +74,6 @@ class NostrClient @Inject constructor(
 
         // Active subscriptions stay in-memory and are replayed by each socket's onOpen,
         // where they can be prioritized instead of being queued in arbitrary map order.
-    }
-
-    /**
-     * Adds relays discovered for a remote identity without changing the user's
-     * persisted NIP-65/manual relay selection. Active subscriptions are replayed
-     * after the pool is refreshed.
-     */
-    @Synchronized
-    fun includeDiscoveredRelays(relays: List<String>) {
-        val additions = RelayHealth.normalizeRelayUrls(relays)
-        if (additions.isEmpty()) return
-        discoveredRelayUrls = RelayHealth.normalizeRelayUrls(discoveredRelayUrls + additions)
-        applyRelayPool(configuredRelayUrls + discoveredRelayUrls)
     }
 
     /**
@@ -145,8 +130,10 @@ class NostrClient @Inject constructor(
     private val relayPublishLastSent = ConcurrentHashMap<String, Long>()
     private val relayRequiresAuth = ConcurrentHashMap<String, Boolean>()
     private var retryCount = 0
-    private val maxRetries = 5
-    private val retryDelay = 3000L // ms
+    @Volatile
+    private var reconnectEnabled = false
+    @Volatile
+    private var reconnectJob: Job? = null
     private val pendingMessages = Collections.synchronizedList(mutableListOf<String>())
     private val pendingSubscriptionRequests = ConcurrentHashMap<String, String>()
     // Throttle map to avoid sending too many REQ messages to the same relay in a short time
@@ -237,6 +224,7 @@ class NostrClient @Inject constructor(
 
     fun connect() {
         synchronized(connectLock) {
+            reconnectEnabled = true
             if (_connectionState.value == ConnectionState.CONNECTED ||
                 _connectionState.value == ConnectionState.CONNECTING) {
                 return
@@ -277,6 +265,7 @@ class NostrClient @Inject constructor(
         val connectTargets = reachableRelays.ifEmpty { relayUrls }
         if (connectTargets.isEmpty()) {
             _connectionState.value = ConnectionState.ERROR
+            attemptReconnect()
             return
         }
         synchronized(connectLock) {
@@ -476,6 +465,9 @@ class NostrClient @Inject constructor(
 
     fun disconnect() {
         synchronized(connectLock) {
+            reconnectEnabled = false
+            reconnectJob?.cancel()
+            reconnectJob = null
             connectGeneration.incrementAndGet()
             connectJob?.cancel()
             connectJob = null
@@ -538,6 +530,17 @@ class NostrClient @Inject constructor(
         } catch (e: Exception) {
             Timber.e(e, "Failed to sendSubscription")
         }
+    }
+
+    /**
+     * Requeue a logical subscription after a relay closes it. The subscription
+     * remains registered so the manager's listeners and request identity stay
+     * intact, but stale relay assignments must be cleared before replaying it.
+     */
+    fun retrySubscription(id: String, filterJson: String) {
+        subscriptionAssignment.remove(id)
+        pendingSubscriptionRequests.remove(id)
+        sendSubscription(id, filterJson)
     }
 
     private fun resubscribeRelay(relayUrl: String, webSocket: WebSocket) {
@@ -700,6 +703,11 @@ class NostrClient @Inject constructor(
     }
 
     companion object {
+        private const val INITIAL_RECONNECT_DELAY_MS = 3_000L
+        private const val MAX_RECONNECT_DELAY_MS = 60_000L
+        private const val RECONNECT_JITTER_MS = 1_000L
+        private const val MAX_RECONNECT_ATTEMPTS = 30
+
         fun shouldSendSubscriptionToRelay(
             subscriptionId: String,
             relayUrl: String,
@@ -847,6 +855,14 @@ class NostrClient @Inject constructor(
         scope.launch {
             withContext(Dispatchers.IO) {
                 try {
+                    synchronized(connectLock) {
+                        reconnectEnabled = false
+                        reconnectJob?.cancel()
+                        reconnectJob = null
+                        connectGeneration.incrementAndGet()
+                        connectJob?.cancel()
+                        connectJob = null
+                    }
                     webSockets.forEach { (_, ws) ->
                         ws.close(1000, "Client closed connection")
                     }
@@ -862,16 +878,25 @@ class NostrClient @Inject constructor(
     }
 
     private fun attemptReconnect() {
-        if (retryCount < maxRetries) {
-            retryCount++
-            scope.launch {
-                withContext(Dispatchers.IO) {
-                    kotlinx.coroutines.delay(retryDelay * retryCount)
-                    connect()
+        synchronized(connectLock) {
+            if (!reconnectEnabled || reconnectJob?.isActive == true) return
+
+            retryCount = (retryCount + 1).coerceAtMost(MAX_RECONNECT_ATTEMPTS)
+            val exponentialDelay = INITIAL_RECONNECT_DELAY_MS *
+                (1L shl (retryCount - 1).coerceAtMost(6))
+            val baseDelay = exponentialDelay.coerceAtMost(MAX_RECONNECT_DELAY_MS)
+            val jitter = kotlin.random.Random.nextLong(0L, RECONNECT_JITTER_MS + 1L)
+            val delayMs = baseDelay + jitter
+
+            reconnectJob = scope.launch(Dispatchers.IO) {
+                try {
+                    Timber.w("Scheduling relay reconnect attempt %d in %dms", retryCount, delayMs)
+                    kotlinx.coroutines.delay(delayMs)
+                    if (reconnectEnabled) connect()
+                } finally {
+                    reconnectJob = null
                 }
             }
-        } else {
-            Timber.e("Max retries reached. Giving up.")
         }
     }
 

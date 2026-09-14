@@ -11,6 +11,8 @@ import javax.inject.Singleton
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 
 @Singleton
 class SubscriptionManager @Inject constructor(
@@ -29,6 +31,7 @@ class SubscriptionManager @Inject constructor(
     }
     private val deliveredEventLock = Any()
     private val subscriptionLock = Any()
+    private val closedRetryJobs = ConcurrentHashMap<String, Job>()
 
     init {
         // Start collecting centralized incoming messages and handle them on the injected scope
@@ -137,6 +140,7 @@ class SubscriptionManager @Inject constructor(
     }
 
     fun unsubscribe(subscriptionId: String) {
+        closedRetryJobs.remove(subscriptionId)?.cancel()
         val listenerRecord = listenerRecords.remove(subscriptionId) ?: return
         var requestIdToClose: String? = null
 
@@ -291,6 +295,7 @@ class SubscriptionManager @Inject constructor(
                         if (record.autoCloseOnEose) {
                             removeRequest(subId)
                             closeRelaySubscription(subId)
+                            closedRetryJobs.remove(subId)?.cancel()
                             Timber.d("Auto-closed one-shot subscription after EOSE: %s", subId)
                         }
                     }
@@ -304,17 +309,10 @@ class SubscriptionManager @Inject constructor(
                     val subId = jsonArray.optString(1, "")
                     val reason = jsonArray.optString(2, "")
                     android.util.Log.w("SubscriptionManager", "[WS CLOSED] subId=$subId reason=$reason")
-                    if (reason.contains("maximum concurrent subscription", ignoreCase = true) ||
-                        reason.contains("too many subscriptions", ignoreCase = true)
-                    ) {
-                        activeSubscriptions[subId]?.let { record ->
-                            Timber.w(
-                                "Relay rejected subscription due to limit: subId=%s autoClose=%s filter=%s",
-                                subId,
-                                record.autoCloseOnEose,
-                                record.filter
-                            )
-                        }
+                    val record = activeSubscriptions[subId]
+                    if (record != null && record.listeners.isNotEmpty()) {
+                        record.hasReachedEose = false
+                        scheduleClosedRetry(subId, record, reason)
                     }
                 }
                 "OK" -> {
@@ -345,6 +343,41 @@ class SubscriptionManager @Inject constructor(
             deliveredEventKeys[key] = Unit
         }
         return true
+    }
+
+    private fun scheduleClosedRetry(
+        requestId: String,
+        record: SubscriptionRecord,
+        reason: String
+    ) {
+        if (closedRetryJobs[requestId]?.isActive == true) return
+
+        val attempt = synchronized(subscriptionLock) {
+            record.closedRetryAttempt += 1
+            record.closedRetryAttempt
+        }
+        if (attempt > MAX_CLOSED_RETRY_ATTEMPTS) {
+            Timber.e(
+                "Subscription closed after retry limit: subId=%s reason=%s filter=%s",
+                requestId,
+                reason,
+                record.filter
+            )
+            return
+        }
+
+        val delayMs = CLOSED_RETRY_DELAYS_MS[attempt - 1]
+        closedRetryJobs[requestId] = collectorScope.launch(Dispatchers.IO) {
+            try {
+                delay(delayMs)
+                val stillActive = activeSubscriptions[requestId]
+                if (stillActive != null && stillActive.listeners.isNotEmpty()) {
+                    nostrClient.retrySubscription(requestId, record.requestPayload)
+                }
+            } finally {
+                closedRetryJobs.remove(requestId)
+            }
+        }
     }
 
     private fun generateSubscriptionId(): String {
@@ -426,7 +459,8 @@ class SubscriptionManager @Inject constructor(
         val requestPayload: String,
         val autoCloseOnEose: Boolean,
         val listeners: ConcurrentHashMap<String, ListenerCallbacks>,
-        @Volatile var hasReachedEose: Boolean = false
+        @Volatile var hasReachedEose: Boolean = false,
+        @Volatile var closedRetryAttempt: Int = 0
     )
 
     private data class ListenerCallbacks(
@@ -440,6 +474,9 @@ class SubscriptionManager @Inject constructor(
 
     // Predefined filters
     companion object {
+        private const val MAX_CLOSED_RETRY_ATTEMPTS = 3
+        private val CLOSED_RETRY_DELAYS_MS = longArrayOf(1_000L, 3_000L, 10_000L)
+
         private fun createFilter(builder: JSONObject.() -> Unit): JSONObject {
             return JSONObject().apply(builder)
         }
