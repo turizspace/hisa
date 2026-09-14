@@ -11,25 +11,19 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.util.concurrent.atomic.AtomicLong
-import okhttp3.OkHttpClient
-import okhttp3.Request
 import org.bitcoinj.core.Bech32
-import org.json.JSONObject
 
 data class DeveloperSupportProfile(
     val metadata: Metadata?,
     val lightningAddress: String?,
-    val lnurlPayUrl: String?,
-    val zapProviderPubkey: String?
+    val lnurlPayUrl: String?
 )
 
 @Singleton
 class DeveloperSupportRepository @Inject constructor(
     private val metadataRepository: MetadataRepository,
-    private val profileRepository: ProfileRepository,
-    private val remoteRelayDirectory: RemoteRelayDirectory
+    private val profileRepository: ProfileRepository
 ) {
-    private val httpClient = OkHttpClient()
     private val _profile = MutableStateFlow<DeveloperSupportProfile?>(null)
     val profile: StateFlow<DeveloperSupportProfile?> = _profile
     private val _sourceState = MutableStateFlow(
@@ -62,14 +56,12 @@ class DeveloperSupportRepository @Inject constructor(
         _isLoading.value = true
         _sourceState.value = _sourceState.value.copy(status = DonationSourceStatus.LOADING, isLoading = true, error = null)
         try {
-            remoteRelayDirectory.ensureRelayCoverage(Constants.HISA_DEV_PUBKEY)
             val cached = profileRepository.getCachedProfile(Constants.HISA_DEV_PUBKEY)
             cached?.toLightningTarget()?.let { lightning ->
                 val cachedProfile = DeveloperSupportProfile(
                     metadata = cached,
                     lightningAddress = lightning.displayValue,
-                    lnurlPayUrl = lightning.lnurlPayUrl,
-                    zapProviderPubkey = null
+                    lnurlPayUrl = lightning.lnurlPayUrl
                 )
                 _profile.value = cachedProfile
                 _sourceState.value = DonationSourceState(
@@ -81,13 +73,11 @@ class DeveloperSupportRepository @Inject constructor(
             val fetched = metadataRepository.getMetadataForPubkey(Constants.HISA_DEV_PUBKEY)
             val metadata = fetched ?: cached
             val lightning = metadata?.toLightningTarget()
-            val providerPubkey = lightning?.lnurlPayUrl?.let(::fetchZapProvider)
             if (refreshGeneration.get() != generation) return@withContext
             _profile.value = DeveloperSupportProfile(
                 metadata = metadata,
                 lightningAddress = lightning?.displayValue,
-                lnurlPayUrl = lightning?.lnurlPayUrl,
-                zapProviderPubkey = providerPubkey
+                lnurlPayUrl = lightning?.lnurlPayUrl
             )
             _sourceState.value = DonationSourceState(
                 data = _profile.value,
@@ -106,16 +96,6 @@ class DeveloperSupportRepository @Inject constructor(
             _sourceState.value = _sourceState.value.copy(isLoading = false)
         }
     }
-
-    private fun fetchZapProvider(lnurlPayUrl: String): String? = runCatching {
-        val request = Request.Builder().url(lnurlPayUrl).build()
-        httpClient.newCall(request).execute().use { response ->
-            if (!response.isSuccessful) return null
-            val json = JSONObject(response.body?.string().orEmpty())
-            val pubkey = json.optString("nostrPubkey").trim().lowercase()
-            pubkey.takeIf { json.optBoolean("allowsNostr") && it.isHexPubkey() }
-        }
-    }.getOrNull()
 
     private fun Metadata.toLightningTarget(): LightningTarget? {
         lud16?.toLnurlPayUrl()?.let { url ->
@@ -152,9 +132,6 @@ class DeveloperSupportRepository @Inject constructor(
             it.startsWith("https://", ignoreCase = true)
         }
     }.getOrNull()
-
-    private fun String.isHexPubkey(): Boolean =
-        length == 64 && all { it in '0'..'9' || it in 'a'..'f' }
 
     private data class LightningTarget(
         val displayValue: String,

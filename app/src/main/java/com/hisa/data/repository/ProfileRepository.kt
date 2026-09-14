@@ -30,7 +30,7 @@ class ProfileRepository @Inject constructor(
     private val nostrClient: NostrClient,
     private val subscriptionManager: SubscriptionManager,
     private val profileCache: ProfileCache,
-    private val remoteRelayDirectory: RemoteRelayDirectory,
+    private val metadataRepository: MetadataRepository,
     private val appScope: CoroutineScope
 ) {
     companion object {
@@ -47,7 +47,9 @@ class ProfileRepository @Inject constructor(
     fun profileFlow(pubkey: String): StateFlow<Metadata?> {
         val normalized = pubkey.trim().lowercase()
         return profileFlows.getOrPut(normalized) {
-            MutableStateFlow(_profiles.value[normalized])
+            MutableStateFlow(
+                _profiles.value[normalized] ?: profileCache.getCachedProfile(normalized)
+            )
         }
     }
 
@@ -118,19 +120,43 @@ class ProfileRepository @Inject constructor(
         if (normalized.isEmpty()) return ProfileRefreshResult(emptySet(), emptySet())
 
         val generation = refreshGeneration.incrementAndGet()
-        ensureProfiles(normalized)
         val limiter = Semaphore(PROFILE_RELAY_CONCURRENCY)
-        val results = coroutineScope {
+        val initialResults = coroutineScope {
             normalized.map { pubkey ->
                 async(Dispatchers.IO) {
                     limiter.withPermit {
-                        runCatching { remoteRelayDirectory.ensureRelayCoverage(pubkey) }
-                            .isSuccess
+                        val cached = profileCache.getCachedProfile(pubkey)
+                        if (cached != null) {
+                            updateProfile(
+                                pubkey = pubkey,
+                                metadata = cached,
+                                createdAt = latestProfileTimestamps[pubkey] ?: 0L,
+                                persist = false
+                            )
+                            return@withPermit true
+                        }
+                        runCatching {
+                            metadataRepository.getMetadataForPubkey(
+                                pubkey = pubkey,
+                                refreshRelays = false
+                            )
+                        }.getOrNull()?.let { metadata ->
+                            updateProfile(
+                                pubkey = pubkey,
+                                metadata = metadata,
+                                createdAt = latestProfileTimestamps[pubkey] ?: 0L,
+                                persist = true
+                            )
+                            true
+                        } ?: false
                     }.let { pubkey to it }
                 }
             }.awaitAll()
         }
-        val successful = results.filter { it.second }.mapTo(mutableSetOf()) { it.first }
+
+        val successful = initialResults
+            .filter { it.second }
+            .mapTo(mutableSetOf()) { it.first }
         val failed = normalized - successful
         if (successful.isNotEmpty() && refreshGeneration.get() == generation) {
             refreshProfiles(successful, generation)
@@ -138,8 +164,10 @@ class ProfileRepository @Inject constructor(
         return ProfileRefreshResult(successful, failed)
     }
 
-    fun getCachedProfile(pubkey: String): Metadata? =
-        profiles.value[pubkey] ?: profileCache.getCachedProfile(pubkey)
+    fun getCachedProfile(pubkey: String): Metadata? {
+        val normalized = pubkey.trim().lowercase()
+        return profiles.value[normalized] ?: profileCache.getCachedProfile(normalized)
+    }
 
     private fun scheduleFlush() {
         synchronized(this) {

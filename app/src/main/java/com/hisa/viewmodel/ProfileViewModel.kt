@@ -49,6 +49,7 @@ class ProfileViewModel @Inject constructor(
     }
 
     private var profileSubscriptionId: String? = null
+    private var latestMetadataCreatedAt = Long.MIN_VALUE
 
     init {
         // Load from cache first
@@ -98,7 +99,8 @@ class ProfileViewModel @Inject constructor(
                                 android.util.Log.w("ProfileViewModel", "Failed to decode metadata content for pubkey $pubkey: ${e.localizedMessage}")
                                 null
                             }
-                            if (meta != null) {
+                            if (meta != null && event.createdAt >= latestMetadataCreatedAt) {
+                                latestMetadataCreatedAt = event.createdAt
                                 if (_allMetadata.value.none { it == meta }) {
                                     val newHistory = _allMetadata.value + meta
                                     _allMetadata.value = newHistory

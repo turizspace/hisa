@@ -15,7 +15,7 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import javax.inject.Inject
-import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.channels.Channel
 import javax.inject.Singleton
 
 @Singleton
@@ -24,7 +24,8 @@ class MetadataRepository @Inject constructor(
     private val subscriptionManager: com.hisa.data.nostr.SubscriptionManager
 ) {
     companion object {
-        private const val METADATA_EOSE_SETTLE_MS = 500L
+        private const val METADATA_EOSE_SETTLE_MS = 750L
+        private const val METADATA_MAX_WAIT_MS = 8_000L
         @Volatile
         private var _instance: MetadataRepository? = null
         val instance: MetadataRepository
@@ -40,8 +41,14 @@ class MetadataRepository @Inject constructor(
     init {
         setInstance(this)
     }
-    suspend fun getMetadataForPubkey(pubkey: String, beforeTimestamp: Long? = null): Metadata? = withContext(Dispatchers.IO) {
-        nostrClient.refreshStoredRelays()
+    suspend fun getMetadataForPubkey(
+        pubkey: String,
+        beforeTimestamp: Long? = null,
+        refreshRelays: Boolean = true
+    ): Metadata? = withContext(Dispatchers.IO) {
+        if (refreshRelays) {
+            nostrClient.refreshStoredRelays()
+        }
         var result: Metadata? = null
         val filterObj = org.json.JSONObject().apply {
             put("kinds", org.json.JSONArray().put(0))
@@ -50,38 +57,47 @@ class MetadataRepository @Inject constructor(
         }
 
         val events = mutableListOf<Pair<Long, String>>()
-        val finished = CompletableDeferred<Unit>()
+        val eoseSignals = Channel<Unit>(Channel.UNLIMITED)
 
         // Subscribe via SubscriptionManager so dedupe/throttling/backoff is applied
         val subId = subscriptionManager.subscribe(filterObj,
             onEvent = { event ->
                 try {
                     if (event.kind == 0) {
-                        events.add(Pair(event.createdAt, event.content))
+                        synchronized(events) {
+                            events.add(Pair(event.createdAt, event.content))
+                        }
                     }
                 } catch (e: Exception) {
                     println("[MetadataRepository] Error handling event callback: ${e.localizedMessage}")
                 }
             },
             onEndOfStoredEvents = {
-                // Signal that EOSE arrived
-                if (!finished.isCompleted) finished.complete(Unit)
+                eoseSignals.trySend(Unit)
             },
-            // Metadata is sent to a relay quorum. Explicitly close below after
-            // the short settle window, not at the first relay's EOSE.
+            // Keep collecting after the first EOSE so a slower relay can still
+            // contribute a newer metadata event.
             autoCloseOnEose = false
         )
 
         try {
-            // Wait for EOSE or timeout
-            withTimeoutOrNull(TimeUnit.SECONDS.toMillis(5)) {
-                finished.await()
+            val receivedEose = withTimeoutOrNull(METADATA_MAX_WAIT_MS) {
+                eoseSignals.receive()
+            } != null
+            if (receivedEose) {
+                while (withTimeoutOrNull(METADATA_EOSE_SETTLE_MS) {
+                        eoseSignals.receive()
+                    } != null
+                ) {
+                    // Reset the quiet-period timer for each relay EOSE.
+                }
             }
-            delay(METADATA_EOSE_SETTLE_MS)
 
-            val chosen = events
-                .filter { (createdAt, _) -> beforeTimestamp?.let { createdAt <= it } ?: true }
-                .maxByOrNull { it.first }
+            val chosen = synchronized(events) {
+                events
+                    .filter { (createdAt, _) -> beforeTimestamp?.let { createdAt <= it } ?: true }
+                    .maxByOrNull { it.first }
+            }
 
             if (chosen != null) {
                 val content = chosen.second
@@ -98,6 +114,7 @@ class MetadataRepository @Inject constructor(
             println("[MetadataRepository] Returning result: $result")
             return@withContext result
         } finally {
+            eoseSignals.close()
             try {
                 subscriptionManager.unsubscribe(subId)
             } catch (e: Exception) {
