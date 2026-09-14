@@ -44,6 +44,7 @@ import androidx.compose.material.icons.filled.PersonOutline
 import androidx.compose.material.icons.filled.SupportAgent
 import androidx.compose.material.icons.filled.WaterDrop
 import androidx.compose.material.icons.filled.NotificationsActive
+import androidx.compose.material.icons.filled.Code
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
@@ -89,6 +90,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.navigation.NavController
@@ -290,6 +292,14 @@ fun MainScreen(
                         scope.launch { drawerState.close() }
                         navController.navigate(Routes.DONATE)
                     },
+                    Triple("Hisa developer", Icons.Default.PersonOutline, false) to {
+                        scope.launch { drawerState.close() }
+                        navController.navigate("profile/${Constants.HISA_DEV_PUBKEY}")
+                    },
+                    Triple("Open source on GitHub", Icons.Filled.Code, false) to {
+                        scope.launch { drawerState.close() }
+                        context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(Constants.GITHUB_URL)))
+                    },
                     Triple("Support", Icons.Default.SupportAgent, false) to {
                         scope.launch { drawerState.close() }
                         val intent = Intent(Intent.ACTION_SENDTO).apply {
@@ -309,6 +319,14 @@ fun MainScreen(
                         onClick = item.second
                     )
                 }
+
+                Spacer(modifier = Modifier.weight(1f))
+                M3Text(
+                    text = "Hisa v${stringResource(com.hisa.R.string.app_version)}",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(start = 28.dp, end = 16.dp, bottom = 20.dp)
+                )
             }
         }
     ) {
