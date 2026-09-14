@@ -8,6 +8,7 @@ import com.hisa.data.nostr.SubscriptionManager
 import com.hisa.data.nostr.tagValues
 import com.hisa.util.Constants
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicLong
 import javax.inject.Inject
 import javax.inject.Singleton
 import kotlinx.coroutines.CoroutineScope
@@ -18,8 +19,6 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 import kotlinx.serialization.Serializable
-import okhttp3.OkHttpClient
-import okhttp3.Request
 import org.bitcoinj.core.Bech32
 import org.json.JSONArray
 import org.json.JSONObject
@@ -44,9 +43,8 @@ data class ZapSponsor(
 class ZapSponsorsRepository @Inject constructor(
     private val nostrClient: NostrClient,
     private val subscriptionManager: SubscriptionManager,
-    private val metadataRepository: MetadataRepository,
     private val profileRepository: ProfileRepository,
-    private val remoteRelayDirectory: RemoteRelayDirectory,
+    private val developerSupportRepository: DeveloperSupportRepository,
     private val donationCacheStore: DonationCacheStore,
     private val appScope: CoroutineScope
 ) {
@@ -61,10 +59,11 @@ class ZapSponsorsRepository @Inject constructor(
         val createdAt: Long
     )
 
-    private val httpClient = OkHttpClient()
     private val contributionsByReceiptId = ConcurrentHashMap<String, ZapContribution>()
     private val _sponsors = MutableStateFlow<List<ZapSponsor>>(emptyList())
     val sponsors: StateFlow<List<ZapSponsor>> = _sponsors
+    private val _sponsorState = MutableStateFlow(DonationSourceState(emptyList<ZapSponsor>()))
+    val sponsorState: StateFlow<DonationSourceState<List<ZapSponsor>>> = _sponsorState
 
     private val _isLoading = MutableStateFlow(false)
     val isLoading: StateFlow<Boolean> = _isLoading
@@ -74,11 +73,20 @@ class ZapSponsorsRepository @Inject constructor(
 
     @Volatile
     private var receiptSubscriptionId: String? = null
+    private val refreshGeneration = AtomicLong(0L)
 
     init {
-        donationCacheStore.read()?.let { cached ->
-            _sponsors.value = cached.sponsors
-        }
+        val cachedSponsors = donationCacheStore.readSponsors()
+        _sponsors.value = cachedSponsors.items
+        val cacheFailure = donationCacheStore.consumeReadFailure("sponsors_v1")
+        _sponsorState.value = DonationSourceState(
+            data = _sponsors.value,
+            status = if (_sponsors.value.isEmpty()) DonationSourceStatus.EMPTY else DonationSourceStatus.READY,
+            error = cacheFailure?.message,
+            errorCategory = cacheFailure?.let { DonationFailureCategory.CACHE_DECODE_FAILURE },
+            isStale = _sponsors.value.isNotEmpty()
+            ,updatedAt = cachedSponsors.updatedAt.takeIf { it > 0L }
+        )
     }
 
     @Volatile
@@ -90,32 +98,46 @@ class ZapSponsorsRepository @Inject constructor(
     fun start() {
         if (started) return
         started = true
+        val generation = refreshGeneration.incrementAndGet()
         initialSnapshotComplete = false
         contributionsByReceiptId.clear()
-        _sponsors.value = emptyList()
         _isLoading.value = true
+        _sponsorState.value = _sponsorState.value.copy(status = DonationSourceStatus.LOADING, isLoading = true, error = null)
         nostrClient.refreshStoredRelays()
         nostrClient.connect()
 
         appScope.launch(Dispatchers.IO) {
-            remoteRelayDirectory.ensureRelayCoverage(Constants.HISA_DEV_PUBKEY)
-            val provider = findZapProvider()
-            if (!started || provider == null) {
+            developerSupportRepository.start()
+            val supportProfile = developerSupportRepository.profile.value
+            val provider = supportProfile?.zapProviderPubkey?.let { providerPubkey ->
+                ZapProvider(providerPubkey, supportProfile.lnurlPayUrl.orEmpty())
+            }
+            if (!started || refreshGeneration.get() != generation || provider == null) {
                 _isLoading.value = false
+                if (provider == null) {
+                    _sponsorState.value = _sponsorState.value.copy(
+                        status = DonationSourceStatus.FAILED,
+                        isLoading = false,
+                        error = "Zap provider unavailable",
+                        errorCategory = DonationFailureCategory.PROVIDER_UNAVAILABLE
+                    )
+                }
                 return@launch
             }
-            subscribeToZapReceipts(provider)
+            subscribeToZapReceipts(provider, generation)
         }
     }
 
     fun stop() {
         started = false
+        refreshGeneration.incrementAndGet()
         initialSnapshotComplete = false
         livePublishJob?.cancel()
         livePublishJob = null
         receiptSubscriptionId?.let(subscriptionManager::unsubscribe)
         receiptSubscriptionId = null
         _isLoading.value = false
+        _sponsorState.value = _sponsorState.value.copy(isLoading = false)
     }
 
     fun refresh() {
@@ -123,42 +145,11 @@ class ZapSponsorsRepository @Inject constructor(
         receiptSubscriptionId = null
         contributionsByReceiptId.clear()
         started = false
+        refreshGeneration.incrementAndGet()
         start()
     }
 
-    private suspend fun findZapProvider(): ZapProvider? {
-        profileRepository.ensureProfiles(setOf(Constants.HISA_DEV_PUBKEY))
-        val metadata = metadataRepository.getMetadataForPubkey(Constants.HISA_DEV_PUBKEY)
-            ?: profileRepository.getCachedProfile(Constants.HISA_DEV_PUBKEY)
-            ?: return null
-        val lnurlPayUrl = metadata.lud16?.toLnurlPayUrl()
-            ?: metadata.lud06?.decodeLnurl()?.normalizedLnurlUrl()
-            ?: return null
-        return fetchZapProvider(lnurlPayUrl)
-    }
-
-    private fun fetchZapProvider(lnurlPayUrl: String): ZapProvider? = runCatching {
-        val request = Request.Builder().url(lnurlPayUrl).build()
-        httpClient.newCall(request).execute().use { response ->
-            if (!response.isSuccessful) return null
-
-            val body = response.body?.string().orEmpty()
-            val responseJson = JSONObject(body)
-            val providerPubkey = responseJson.optString("nostrPubkey")
-                .trim()
-                .lowercase()
-            if (!responseJson.optBoolean("allowsNostr") || !providerPubkey.isHexPubkey()) {
-                return null
-            }
-
-            ZapProvider(
-                pubkey = providerPubkey,
-                lnurlPayUrl = lnurlPayUrl.normalizedLnurlUrl()
-            )
-        }
-    }.getOrNull()
-
-    private fun subscribeToZapReceipts(provider: ZapProvider) {
+    private fun subscribeToZapReceipts(provider: ZapProvider, generation: Long) {
         if (!started) return
 
         val filter = JSONObject().apply {
@@ -169,6 +160,7 @@ class ZapSponsorsRepository @Inject constructor(
         receiptSubscriptionId = subscriptionManager.subscribe(
             filter = filter,
             onEvent = { receipt ->
+                if (!started || refreshGeneration.get() != generation) return@subscribe
                 parseValidatedContribution(receipt, provider)?.let { contribution ->
                     if (contributionsByReceiptId.putIfAbsent(receipt.id, contribution) == null) {
                         scheduleLivePublish()
@@ -181,7 +173,7 @@ class ZapSponsorsRepository @Inject constructor(
                 initialSnapshotComplete = true
                 livePublishJob?.cancel()
                 livePublishJob = null
-                publishSponsors()
+                if (started && refreshGeneration.get() == generation) publishSponsors(generation)
                 _isLoading.value = false
             }
         )
@@ -191,7 +183,7 @@ class ZapSponsorsRepository @Inject constructor(
         if (!initialSnapshotComplete || livePublishJob?.isActive == true) return
         livePublishJob = appScope.launch(Dispatchers.Default) {
             delay(LIVE_UPDATE_DEBOUNCE_MS)
-            if (started && initialSnapshotComplete) publishSponsors()
+            if (started && initialSnapshotComplete) publishSponsors(refreshGeneration.get())
         }
     }
 
@@ -238,7 +230,8 @@ class ZapSponsorsRepository @Inject constructor(
         )
     }
 
-    private fun publishSponsors() {
+    private fun publishSponsors(generation: Long) {
+        if (!started || refreshGeneration.get() != generation) return
         val minimumMilliSats = Constants.MIN_SPONSOR_ZAP_TOTAL_SATS * MILLISATS_PER_SAT
         val sponsors = contributionsByReceiptId.values.toList()
             .groupBy { it.senderPubkey }
@@ -257,34 +250,30 @@ class ZapSponsorsRepository @Inject constructor(
             .take(Constants.MAX_DISPLAYED_ZAP_SPONSORS)
 
         _sponsors.value = sponsors
+        _sponsorState.value = DonationSourceState(
+            data = sponsors,
+            status = if (sponsors.isEmpty()) DonationSourceStatus.EMPTY else DonationSourceStatus.READY,
+            updatedAt = System.currentTimeMillis()
+        )
         val sponsorPubkeys = sponsors.mapTo(mutableSetOf()) { it.pubkey }
         appScope.launch(Dispatchers.IO) {
-            sponsorPubkeys.forEach { pubkey ->
-                runCatching { remoteRelayDirectory.ensureRelayCoverage(pubkey) }
+            val result = profileRepository.ensureFreshProfiles(sponsorPubkeys)
+            if (result.failed.isNotEmpty()) {
+                _sponsorState.value = _sponsorState.value.copy(
+                    error = "Some supporter profiles could not be loaded.",
+                    errorCategory = DonationFailureCategory.PROFILE_METADATA_FAILURE
+                )
             }
-            // The first profile subscription may have started before the
-            // sponsor's NIP-65 relays were added. Force a second lookup so a
-            // transient empty EOSE cannot permanently leave a fallback name.
-            profileRepository.refreshProfiles(sponsorPubkeys)
         }
-        donationCacheStore.read()?.let { cached ->
-            donationCacheStore.write(cached.paymentTargets, cached.badgeAwards, sponsors)
-        } ?: donationCacheStore.write(emptyList(), emptyList(), sponsors)
+        donationCacheStore.writeSponsors(sponsors)
     }
 
     private fun NostrEvent.isValidNostrEvent(): Boolean =
         EventVerifier.verifyEvent(toJson().toString()).let { it.idMatches && it.signatureValid }
 
-    private fun String.toLnurlPayUrl(): String? {
-        val parts = trim().split("@", limit = 2)
-        if (parts.size != 2 || parts.any(String::isBlank)) return null
-        return "https://${parts[1]}/.well-known/lnurlp/${parts[0]}"
-    }
-
     private fun String.decodeLnurl(): String? = runCatching {
         val decoded = Bech32.decode(trim().lowercase())
         if (decoded.hrp != "lnurl") return null
-
         var accumulator = 0
         var bitCount = 0
         val bytes = ArrayList<Byte>()

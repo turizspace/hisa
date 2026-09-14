@@ -80,38 +80,40 @@ import coil.compose.AsyncImage
 import com.google.zxing.BarcodeFormat
 import com.google.zxing.EncodeHintType
 import com.google.zxing.qrcode.QRCodeWriter
-import com.hisa.data.model.Metadata
 import com.hisa.data.repository.BadgeAward
 import com.hisa.data.repository.BadgeAwardPolicy
 import com.hisa.data.repository.DonationTargetsRepository
-import com.hisa.data.repository.MetadataRepository
+import com.hisa.data.repository.DeveloperSupportProfile
+import com.hisa.data.repository.DeveloperSupportRepository
+import com.hisa.data.repository.DonationSourceStatus
+import com.hisa.data.repository.DonationSourceState
+import com.hisa.data.repository.DonationFailureCategory
 import com.hisa.data.repository.PaymentTarget
 import com.hisa.data.repository.ProfileRepository
-import com.hisa.data.repository.RemoteRelayDirectory
 import com.hisa.data.repository.ZapSponsor
 import com.hisa.data.repository.ZapSponsorsRepository
 import com.hisa.ui.components.SkeletonBox
-import com.hisa.data.nostr.NostrClient
 import com.hisa.util.Constants
 import dagger.hilt.android.lifecycle.HiltViewModel
 import javax.inject.Inject
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import org.bitcoinj.core.Bech32
 import org.json.JSONObject
 import java.util.EnumMap
+import java.util.Locale
 
 @HiltViewModel
 class DonateViewModel @Inject constructor(
     private val zapSponsorsRepository: ZapSponsorsRepository,
     private val donationTargetsRepository: DonationTargetsRepository,
-    private val metadataRepository: MetadataRepository,
-    private val nostrClient: NostrClient,
     private val profileRepository: ProfileRepository,
-    private val remoteRelayDirectory: RemoteRelayDirectory
+    private val developerSupportRepository: DeveloperSupportRepository
 ) : ViewModel() {
     private val _invoice = MutableStateFlow<String?>(null)
     val invoice: StateFlow<String?> = _invoice
@@ -119,46 +121,40 @@ class DonateViewModel @Inject constructor(
     val invoiceError: StateFlow<String?> = _invoiceError
     private val _isGeneratingInvoice = MutableStateFlow(false)
     val isGeneratingInvoice: StateFlow<Boolean> = _isGeneratingInvoice
-    private val _lightningAddress = MutableStateFlow<String?>(null)
-    val lightningAddress: StateFlow<String?> = _lightningAddress
-    @Volatile
-    private var lightningLnurlPayUrl: String? = null
-    private val _isLoadingLightningAddress = MutableStateFlow(true)
-    val isLoadingLightningAddress: StateFlow<Boolean> = _isLoadingLightningAddress
-
-    val sponsors: StateFlow<List<ZapSponsor>> = zapSponsorsRepository.sponsors
-    val isLoadingSponsors: StateFlow<Boolean> = zapSponsorsRepository.isLoading
-    val paymentTargets: StateFlow<List<PaymentTarget>> = donationTargetsRepository.paymentTargets
-    val badgeAwards: StateFlow<List<BadgeAward>> = donationTargetsRepository.badgeAwards
-    val isLoadingTargets: StateFlow<Boolean> = donationTargetsRepository.isLoading
+    val uiState: StateFlow<DonateUiState> = run {
+        val sources = combine(
+            zapSponsorsRepository.sponsorState,
+            donationTargetsRepository.paymentTargetState,
+            donationTargetsRepository.badgeState,
+            developerSupportRepository.sourceState,
+        ) { sponsors, targets, badges, developer ->
+            DonateSourceSnapshot(sponsors, targets, badges, developer)
+        }
+        combine(sources, _invoice, _invoiceError, _isGeneratingInvoice) {
+                snapshot, invoice, invoiceError, isGenerating ->
+            DonateUiState(
+                sponsors = snapshot.sponsors.data,
+                paymentTargets = snapshot.targets.data,
+                badgeAwards = snapshot.badges.data,
+                developer = snapshot.developer.data,
+                isLoadingSponsors = snapshot.sponsors.isLoading,
+                isLoadingTargets = snapshot.targets.isLoading || snapshot.badges.isLoading,
+                isLoadingDeveloper = snapshot.developer.isLoading,
+                invoice = invoice,
+                invoiceError = invoiceError,
+                isGeneratingInvoice = isGenerating
+                ,sponsorState = snapshot.sponsors
+                ,paymentTargetState = snapshot.targets
+                ,badgeState = snapshot.badges
+                ,developerState = snapshot.developer
+            )
+        }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), DonateUiState())
+    }
 
     init {
         zapSponsorsRepository.start()
         donationTargetsRepository.start()
-        viewModelScope.launch(Dispatchers.IO) {
-            try {
-                nostrClient.refreshStoredRelays()
-                nostrClient.connect()
-                remoteRelayDirectory.ensureRelayCoverage(Constants.HISA_DEV_PUBKEY)
-                // A cached profile lets the donation form become usable immediately.
-                // The relay fetch below remains authoritative and refreshes it.
-                profileRepository.getCachedProfile(Constants.HISA_DEV_PUBKEY)
-                    ?.lightningDonationTarget()
-                    ?.let(::applyLightningTarget)
-
-                profileRepository.ensureProfiles(setOf(Constants.HISA_DEV_PUBKEY))
-                val fetchedMetadata = metadataRepository
-                    .getMetadataForPubkey(Constants.HISA_DEV_PUBKEY)
-                sequenceOf(
-                    fetchedMetadata,
-                    profileRepository.getCachedProfile(Constants.HISA_DEV_PUBKEY)
-                ).mapNotNull { it?.lightningDonationTarget() }
-                    .firstOrNull()
-                    ?.let(::applyLightningTarget)
-            } finally {
-                _isLoadingLightningAddress.value = false
-            }
-        }
+        viewModelScope.launch(Dispatchers.IO) { developerSupportRepository.start() }
     }
 
     override fun onCleared() {
@@ -168,8 +164,9 @@ class DonateViewModel @Inject constructor(
     }
 
     fun generateInvoice(amount: Long) {
-        val address = _lightningAddress.value
-        val lnurlPayUrl = lightningLnurlPayUrl
+        val support = developerSupportRepository.profile.value
+        val address = support?.lightningAddress
+        val lnurlPayUrl = support?.lnurlPayUrl
         if (amount <= 0L) {
             _invoiceError.value = "Enter an amount greater than zero."
             return
@@ -212,84 +209,47 @@ class DonateViewModel @Inject constructor(
     fun refresh() {
         zapSponsorsRepository.refresh()
         donationTargetsRepository.refresh()
+        viewModelScope.launch(Dispatchers.IO) { developerSupportRepository.refresh() }
     }
 
-    private fun applyLightningTarget(target: LightningDonationTarget) {
-        _lightningAddress.value = target.displayValue
-        lightningLnurlPayUrl = target.lnurlPayUrl
+    fun refreshSponsors() = zapSponsorsRepository.refresh()
+    fun refreshTargets() = donationTargetsRepository.refresh()
+    fun refreshDeveloper() {
+        viewModelScope.launch(Dispatchers.IO) { developerSupportRepository.refresh() }
     }
+
 }
 
-private data class LightningDonationTarget(
-    val displayValue: String,
-    val lnurlPayUrl: String
+data class DonateUiState(
+    val sponsors: List<ZapSponsor> = emptyList(),
+    val paymentTargets: List<PaymentTarget> = emptyList(),
+    val badgeAwards: List<BadgeAward> = emptyList(),
+    val developer: DeveloperSupportProfile? = null,
+    val isLoadingSponsors: Boolean = false,
+    val isLoadingTargets: Boolean = false,
+    val isLoadingDeveloper: Boolean = false,
+    val invoice: String? = null,
+    val invoiceError: String? = null,
+    val isGeneratingInvoice: Boolean = false
+    ,val sponsorState: DonationSourceState<List<ZapSponsor>> = DonationSourceState(emptyList())
+    ,val paymentTargetState: DonationSourceState<List<PaymentTarget>> = DonationSourceState(emptyList())
+    ,val badgeState: DonationSourceState<List<BadgeAward>> = DonationSourceState(emptyList())
+    ,val developerState: DonationSourceState<DeveloperSupportProfile?> = DonationSourceState(null)
 )
 
-private fun Metadata.lightningDonationTarget(): LightningDonationTarget? {
-    lud16?.usableLightningAddress()?.let { address ->
-        val (localPart, domain) = address.split("@", limit = 2)
-        return LightningDonationTarget(
-            displayValue = address,
-            lnurlPayUrl = "https://$domain/.well-known/lnurlp/$localPart"
-        )
-    }
-    lud06?.decodeLnurlPayUrl()?.let { url ->
-        return LightningDonationTarget(displayValue = "LNURL Pay", lnurlPayUrl = url)
-    }
-    return null
-}
-
-private fun String.usableLightningAddress(): String? {
-    val candidate = trim()
-    val parts = candidate.split("@", limit = 2)
-    return candidate.takeIf {
-        parts.size == 2 &&
-            parts[0].isNotBlank() &&
-            parts[1].isNotBlank() &&
-            !parts[0].contains('/') &&
-            !parts[1].contains('/') &&
-            !parts[1].contains(' ')
-    }
-}
-
-private fun String.decodeLnurlPayUrl(): String? = runCatching {
-    val decoded = Bech32.decode(trim().lowercase())
-    if (decoded.hrp != "lnurl") return null
-
-    var accumulator = 0
-    var bitCount = 0
-    val bytes = ArrayList<Byte>()
-    decoded.data.forEach { word ->
-        accumulator = (accumulator shl 5) or (word.toInt() and 0x1f)
-        bitCount += 5
-        while (bitCount >= 8) {
-            bitCount -= 8
-            bytes += ((accumulator shr bitCount) and 0xff).toByte()
-        }
-    }
-    if (bitCount >= 5 || ((accumulator shl (8 - bitCount)) and 0xff) != 0) return null
-    bytes.toByteArray().decodeToString().trim().takeIf {
-        it.startsWith("https://", ignoreCase = true)
-    }
-}.getOrNull()
+private data class DonateSourceSnapshot(
+    val sponsors: DonationSourceState<List<ZapSponsor>>,
+    val targets: DonationSourceState<List<PaymentTarget>>,
+    val badges: DonationSourceState<List<BadgeAward>>,
+    val developer: DonationSourceState<DeveloperSupportProfile?>
+)
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun DonateScreen(navController: NavHostController? = null) {
     val context = LocalContext.current
     val viewModel: DonateViewModel = hiltViewModel()
-    val invoice by viewModel.invoice.collectAsState()
-    val invoiceError by viewModel.invoiceError.collectAsState()
-    val isGeneratingInvoice by viewModel.isGeneratingInvoice.collectAsState()
-    val lightningAddress by viewModel.lightningAddress.collectAsState()
-    val isLoadingLightningAddress by viewModel.isLoadingLightningAddress.collectAsState()
-    val paymentTargets by viewModel.paymentTargets.collectAsState()
-    val badgeAwards by viewModel.badgeAwards.collectAsState()
-    val sponsors by viewModel.sponsors.collectAsState()
-    val isLoadingSponsors by viewModel.isLoadingSponsors.collectAsState()
-    val isLoadingTargets by viewModel.isLoadingTargets.collectAsState()
-    val profileRepository = com.hisa.ui.util.LocalProfileRepository.current
-    val profiles by profileRepository.profiles.collectAsState()
+    val uiState by viewModel.uiState.collectAsState()
     var amount by remember { mutableStateOf(Constants.DEFAULT_DONATION_AMOUNT_SATS.toString()) }
 
     Scaffold(
@@ -313,7 +273,7 @@ fun DonateScreen(navController: NavHostController? = null) {
             modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(paddingValues).padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            if (isLoadingSponsors || isLoadingTargets || isLoadingLightningAddress) {
+            if (uiState.isLoadingSponsors || uiState.isLoadingTargets || uiState.isLoadingDeveloper) {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     verticalAlignment = Alignment.CenterVertically,
@@ -332,29 +292,39 @@ fun DonateScreen(navController: NavHostController? = null) {
                 "Hisa is open-source software. Your donations help keep development active and support new features.",
                 style = MaterialTheme.typography.bodyLarge
             )
-            HisaSponsorsTicker(sponsors, profiles, isLoadingSponsors)
+            HisaSponsorsTicker(
+                sponsors = uiState.sponsors,
+                profileRepository = com.hisa.ui.util.LocalProfileRepository.current,
+                isLoading = uiState.isLoadingSponsors,
+                state = uiState.sponsorState,
+                onRetry = viewModel::refreshSponsors
+            )
             PublishedBadges(
-                awards = badgeAwards,
-                profiles = profiles,
-                isLoading = isLoadingTargets,
+                awards = uiState.badgeAwards,
+                profileRepository = com.hisa.ui.util.LocalProfileRepository.current,
+                state = uiState.badgeState,
+                onRetry = viewModel::refreshTargets,
                 onProfileClick = { navController?.navigate("profile/$it") }
             )
             PublishedPaymentTargets(
-                targets = paymentTargets.filter { it.type != "lightning" },
-                isLoading = isLoadingTargets,
+                targets = uiState.paymentTargets.filter { it.type != "lightning" },
+                state = uiState.paymentTargetState,
+                onRetry = viewModel::refreshTargets,
                 onCopy = { copyTarget(context, it) }
             )
             LightningDonationCard(
-                address = lightningAddress,
-                isLoadingAddress = isLoadingLightningAddress,
+                address = uiState.developer?.lightningAddress,
+                isLoadingAddress = uiState.isLoadingDeveloper,
                 amount = amount,
                 onAmountChange = { amount = it },
-                invoice = invoice,
-                error = invoiceError,
-                isGenerating = isGeneratingInvoice,
+                invoice = uiState.invoice,
+                error = uiState.invoiceError,
+                isGenerating = uiState.isGeneratingInvoice,
                 onGenerate = { viewModel.generateInvoice(amount.toLongOrNull() ?: 0L) },
-                onCopy = { invoice?.let { copyText(context, "Lightning invoice", it) } },
-                onPay = { invoice?.let { openLightningPayment(context, it) } }
+                onCopy = { uiState.invoice?.let { copyText(context, "Lightning invoice", it) } },
+                onPay = { uiState.invoice?.let { openLightningPayment(context, it) } },
+                onRetry = viewModel::refreshDeveloper,
+                sourceState = uiState.developerState
             )
         }
     }
@@ -371,7 +341,9 @@ private fun LightningDonationCard(
     isGenerating: Boolean,
     onGenerate: () -> Unit,
     onCopy: () -> Unit,
-    onPay: () -> Unit
+    onPay: () -> Unit,
+    onRetry: () -> Unit,
+    sourceState: DonationSourceState<DeveloperSupportProfile?>
 ) {
     Column(modifier = Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         SectionHeading(
@@ -405,6 +377,10 @@ private fun LightningDonationCard(
                     style = MaterialTheme.typography.bodySmall
                 )
             }
+            sourceState.error?.let {
+                Text(it, color = MaterialTheme.colorScheme.error)
+                TextButton(onClick = onRetry) { Text("Retry") }
+            }
             error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
             invoice?.let {
                 val bitmap = rememberQrBitmap(it, MaterialTheme.colorScheme.onSurface.toArgb(), MaterialTheme.colorScheme.surface.toArgb())
@@ -432,7 +408,8 @@ private fun LightningDonationCard(
 @Composable
 private fun PublishedPaymentTargets(
     targets: List<PaymentTarget>,
-    isLoading: Boolean,
+    state: DonationSourceState<List<PaymentTarget>>,
+    onRetry: () -> Unit,
     onCopy: (PaymentTarget) -> Unit
 ) {
     Column(modifier = Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -442,10 +419,17 @@ private fun PublishedPaymentTargets(
         )
         Card(modifier = Modifier.fillMaxWidth()) {
             Column(modifier = Modifier.padding(16.dp)) {
-                if (targets.isEmpty() && isLoading) {
+                state.updatedAt?.let { Text("Updated ${formatUpdatedAt(it)}", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+                if (state.status == DonationSourceStatus.LOADING) {
                     PaymentTargetSkeletons()
-                } else if (targets.isEmpty()) {
+                } else if (state.status == DonationSourceStatus.FAILED && targets.isEmpty()) {
+                    Text("Payment targets could not be loaded.")
+                } else if (state.status == DonationSourceStatus.EMPTY) {
                     Text("No additional payment targets are currently published.")
+                }
+                state.error?.let {
+                    Text(it, color = MaterialTheme.colorScheme.error)
+                    TextButton(onClick = onRetry) { Text("Retry") }
                 }
                 targets.forEach { target ->
                     val visual = paymentTargetVisual(target.type)
@@ -529,15 +513,19 @@ private fun paymentTargetVisual(type: String): PaymentTargetVisual {
 
 private val MaterialThemeFallbackTint = Color(0xFF68707A)
 
+private fun formatUpdatedAt(timestamp: Long): String =
+    java.text.DateFormat.getTimeInstance(java.text.DateFormat.SHORT).format(java.util.Date(timestamp))
+
 @Composable
 private fun PublishedBadges(
     awards: List<BadgeAward>,
-    profiles: Map<String, Metadata>,
-    isLoading: Boolean,
+    profileRepository: ProfileRepository,
+    state: DonationSourceState<List<BadgeAward>>,
+    onRetry: () -> Unit,
     onProfileClick: (String) -> Unit
 ) {
     val displayableAwards = awards.filter(BadgeAwardPolicy::isDisplayable)
-    if (displayableAwards.isEmpty() && !isLoading) return
+    if (displayableAwards.isEmpty() && state.status == DonationSourceStatus.EMPTY) return
     Column(modifier = Modifier.fillMaxWidth()) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text("The Mission Badges", style = MaterialTheme.typography.titleLarge)
@@ -548,11 +536,20 @@ private fun PublishedBadges(
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
-        if (displayableAwards.isEmpty() && isLoading) {
+        state.updatedAt?.let { Text("Updated ${formatUpdatedAt(it)}", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+        if (state.status == DonationSourceStatus.LOADING) {
             BadgeSkeletons()
+        } else if (state.status == DonationSourceStatus.FAILED && displayableAwards.isEmpty()) {
+            Text("Mission badges could not be loaded.")
+        }
+        state.error?.let {
+            Text(it, color = MaterialTheme.colorScheme.error)
+            TextButton(onClick = onRetry) { Text("Retry") }
         }
         displayableAwards.forEach { award ->
-            val metadata = profiles[award.recipientPubkey]
+            val metadata by profileRepository
+                .profileFlow(award.recipientPubkey)
+                .collectAsState()
             val displayName = metadata?.displayName?.takeIf(String::isNotBlank)
                 ?: metadata?.name?.takeIf(String::isNotBlank)
                 ?: award.recipientPubkey.take(12) + "..."
@@ -597,8 +594,10 @@ private fun PublishedBadges(
 @Composable
 private fun HisaSponsorsTicker(
     sponsors: List<ZapSponsor>,
-    profiles: Map<String, Metadata>,
-    isLoading: Boolean
+    profileRepository: ProfileRepository,
+    isLoading: Boolean,
+    state: DonationSourceState<List<ZapSponsor>> = DonationSourceState(sponsors),
+    onRetry: () -> Unit
 ) {
     Column(modifier = Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         SectionHeading(
@@ -607,9 +606,11 @@ private fun HisaSponsorsTicker(
         )
         Card(modifier = Modifier.fillMaxWidth()) {
             Column(modifier = Modifier.padding(16.dp)) {
-                if (sponsors.isEmpty() && isLoading) {
+                if (state.status == DonationSourceStatus.LOADING || isLoading) {
                     SponsorSkeletons()
-                } else if (sponsors.isEmpty()) {
+                } else if (state.status == DonationSourceStatus.FAILED && sponsors.isEmpty()) {
+                    Text("Supporters could not be loaded right now.")
+                } else if (state.status == DonationSourceStatus.EMPTY) {
                     Text("No validated sponsors have reached the display threshold yet.")
                 } else {
                     Row(
@@ -623,9 +624,13 @@ private fun HisaSponsorsTicker(
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         sponsors.forEach { sponsor ->
-                            SponsorIdentity(sponsor = sponsor, metadata = profiles[sponsor.pubkey])
+                            SponsorIdentity(sponsor = sponsor, profileRepository = profileRepository)
                         }
                     }
+                }
+                state.error?.let {
+                    Text(it, color = MaterialTheme.colorScheme.error)
+                    TextButton(onClick = onRetry) { Text("Retry") }
                 }
             }
         }
@@ -635,8 +640,9 @@ private fun HisaSponsorsTicker(
 @Composable
 private fun SponsorIdentity(
     sponsor: ZapSponsor,
-    metadata: Metadata?
+    profileRepository: ProfileRepository
 ) {
+    val metadata by profileRepository.profileFlow(sponsor.pubkey).collectAsState()
     val displayName = metadata?.displayName?.takeIf(String::isNotBlank)
         ?: metadata?.name?.takeIf(String::isNotBlank)
         ?: sponsor.pubkey.take(12) + "..."
@@ -677,13 +683,16 @@ private fun SponsorIdentity(
                 overflow = TextOverflow.Ellipsis
             )
             Text(
-                text = "${sponsor.totalMilliSats / 1_000L} sats",
+                text = "${formatSats(sponsor.totalMilliSats / 1_000L)} sats",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
         }
     }
 }
+
+private fun formatSats(amount: Long): String =
+    String.format(Locale.US, "%,d", amount)
 
 @Composable
 private fun SponsorSkeletons() {
@@ -728,6 +737,7 @@ private fun PaymentTargetSkeletons() {
                 SkeletonBox(modifier = Modifier.width(110.dp).height(14.dp))
                 SkeletonBox(modifier = Modifier.fillMaxWidth().height(11.dp))
             }
+                state.updatedAt?.let { Text("Updated ${formatUpdatedAt(it)}", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
         }
     }
 }
