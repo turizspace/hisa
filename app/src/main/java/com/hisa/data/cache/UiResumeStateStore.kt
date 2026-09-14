@@ -92,13 +92,17 @@ class UiResumeStateStore internal constructor(
     }
 
     fun saveFeedScrollPosition(index: Int, offset: Int) {
-        feedListFirstVisibleItemIndex = index
-        feedListFirstVisibleItemOffset = offset
+        sharedPreferences.edit()
+            .putInt(KEY_FEED_LIST_INDEX, index)
+            .putInt(KEY_FEED_LIST_OFFSET, offset)
+            .apply()
     }
 
     fun saveStallsScrollPosition(index: Int, offset: Int) {
-        stallsListFirstVisibleItemIndex = index
-        stallsListFirstVisibleItemOffset = offset
+        sharedPreferences.edit()
+            .putInt(KEY_STALLS_LIST_INDEX, index)
+            .putInt(KEY_STALLS_LIST_OFFSET, offset)
+            .apply()
     }
 
     companion object {

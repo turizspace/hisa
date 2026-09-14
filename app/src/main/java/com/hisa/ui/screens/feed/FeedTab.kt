@@ -21,6 +21,7 @@ import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.activity.compose.BackHandler
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -32,6 +33,7 @@ import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
@@ -57,6 +59,8 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import timber.log.Timber
 import kotlinx.coroutines.flow.collectLatest
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 
 private const val PREVIEW_ITEM_COUNT = 6
 
@@ -76,7 +80,17 @@ fun FeedTab(
     val stallsLoading by stallsViewModel.isLoading.collectAsState()
     val feedUiState by feedViewModel.feedUiState.collectAsState()
     val profileRepository = LocalProfileRepository.current
-    val profiles by profileRepository.profiles.collectAsState()
+    val lifecycleOwner = LocalLifecycleOwner.current
+    var isScreenResumed by remember {
+        mutableStateOf(lifecycleOwner.lifecycle.currentState == Lifecycle.State.RESUMED)
+    }
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            isScreenResumed = event == Lifecycle.Event.ON_RESUME
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
     val showLoading = rememberTabLoadingVisibility(
         isLoading = feedUiState.isLoading || stallsLoading
     )
@@ -135,10 +149,6 @@ fun FeedTab(
         initialFirstVisibleItemIndex = resumeStateStore.feedListFirstVisibleItemIndex,
         initialFirstVisibleItemScrollOffset = resumeStateStore.feedListFirstVisibleItemOffset
     )
-
-    LaunchedEffect(feedUiState.services) {
-        profileRepository.ensureProfiles(feedUiState.services.map { it.pubkey }.toSet())
-    }
 
     val sortedStalls = remember(stalls) { stalls.sortedByDescending { it.createdAt } }
     val normalizedQuery = remember(searchText) { searchText.trim() }
@@ -213,11 +223,11 @@ fun FeedTab(
                 item {
                     val drops = feedUiState.services.take(8)
                     val dropsState = rememberLazyListState()
-                    if (drops.isNotEmpty() && !feedUiState.isLoading && !stallsLoading) {
+                    if (drops.isNotEmpty() && !feedUiState.isLoading && !stallsLoading && isScreenResumed) {
                         LaunchedEffect(drops, feedUiState.isLoading, stallsLoading) {
                             while (true) {
                                 kotlinx.coroutines.delay(3500)
-                                if (!dropsState.isScrollInProgress) {
+                                if (!dropsState.isScrollInProgress && !listState.isScrollInProgress) {
                                     val visible = dropsState.firstVisibleItemIndex
                                     val next = (visible + 1) % drops.size
                                     dropsState.animateScrollToItem(next)
@@ -232,13 +242,14 @@ fun FeedTab(
                         horizontalArrangement = Arrangement.spacedBy(12.dp),
                         modifier = Modifier.padding(top = 8.dp, bottom = 8.dp)
                     ) {
-                        items(drops) { service ->
-                            Box(modifier = Modifier.width(320.dp)) {
+                        items(
+                            items = drops,
+                            key = { "${it.eventId}.${it.pubkey}" }
+                        ) { service ->
+                            Box(modifier = Modifier.width(236.dp)) {
                                 ServicePreviewCard(
                                     service = service,
-                                    publisherMetadata = profiles[service.pubkey],
                                     showTags = false,
-                                    hero = true,
                                     featured = true,
                                     onClick = {
                                         openServiceDetail(navController, service, searchText)
@@ -275,7 +286,6 @@ fun FeedTab(
                                 Box(modifier = Modifier.width(236.dp)) {
                                     ServicePreviewCard(
                                         service = service,
-                                        publisherMetadata = profiles[service.pubkey],
                                         showTags = false,
                                         onClick = {
                                             openServiceDetail(
@@ -371,7 +381,6 @@ fun FeedTab(
                         Box(modifier = Modifier.padding(horizontal = 12.dp)) {
                             ServicePreviewCard(
                                 service = service,
-                                publisherMetadata = profiles[service.pubkey],
                                 showTags = true,
                                 onClick = {
                                     openServiceDetail(
@@ -454,7 +463,6 @@ fun FeedTab(
                     ) { service ->
                         ServicePreviewCard(
                             service = service,
-                            publisherMetadata = profiles[service.pubkey],
                             showTags = false,
                             onClick = {
                                 openServiceDetail(

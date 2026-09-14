@@ -25,7 +25,8 @@ class FeedRepository @Inject constructor(
     private val appScope: CoroutineScope
 ) {
     companion object {
-        private const val EMIT_DEBOUNCE_MS = 120L
+        private const val EMIT_DEBOUNCE_MS = 300L
+        private const val CACHE_PERSIST_DEBOUNCE_MS = 1_000L
     }
 
     private val _services = MutableStateFlow<List<ServiceListing>>(emptyList())
@@ -44,9 +45,13 @@ class FeedRepository @Inject constructor(
 
     @Volatile
     private var emitJob: Job? = null
+    @Volatile
+    private var cachePersistJob: Job? = null
 
     @Volatile
     private var started = false
+    @Volatile
+    private var initialSnapshotComplete = false
 
     init {
         restoreCachedServices()
@@ -74,21 +79,31 @@ class FeedRepository @Inject constructor(
         subscriptionListenerId = null
         started = false
         pendingProfilePubkeys.clear()
+        synchronized(emitLock) {
+            initialSnapshotComplete = false
+            emitJob?.cancel()
+            emitJob = null
+            cachePersistJob?.cancel()
+            cachePersistJob = null
+        }
         ensureStarted()
     }
 
     private fun startSubscription() {
+        initialSnapshotComplete = false
         _isLoading.value = true
         nostrClient.connect()
         subscriptionListenerId = subscriptionManager.subscribe(
             filter = SubscriptionManager.filterNIP99(limit = 200),
             onEvent = { event ->
-                ServiceRepository.parseServiceEvent(event.toJson().toString())?.let { service ->
+                ServiceEventParser.parse(event)?.let { service ->
                     upsertService(service)
                 }
             },
             onEndOfStoredEvents = {
+                initialSnapshotComplete = true
                 emitSnapshot()
+                persistCachedServices()
                 _isLoading.value = false
             }
         )
@@ -107,7 +122,10 @@ class FeedRepository @Inject constructor(
         if (service.pubkey.isNotBlank()) {
             pendingProfilePubkeys.add(service.pubkey)
         }
-        scheduleEmit()
+        if (initialSnapshotComplete) {
+            scheduleEmit()
+            scheduleCachePersist()
+        }
     }
 
     private fun scheduleEmit() {
@@ -118,6 +136,23 @@ class FeedRepository @Inject constructor(
                 emitSnapshot()
             }
         }
+    }
+
+    private fun scheduleCachePersist() {
+        synchronized(emitLock) {
+            if (cachePersistJob?.isActive == true) return
+            cachePersistJob = appScope.launch(Dispatchers.Default) {
+                delay(CACHE_PERSIST_DEBOUNCE_MS)
+                persistCachedServices()
+            }
+        }
+    }
+
+    private fun persistCachedServices() {
+        synchronized(emitLock) {
+            cachePersistJob = null
+        }
+        feedCacheStore.writeServices(servicesByReplaceableKey.values.toList())
     }
 
     private fun emitSnapshot() {
@@ -131,7 +166,6 @@ class FeedRepository @Inject constructor(
         // into an empty feed and overwriting the disk cache.
         if (updated.isEmpty() && _services.value.isNotEmpty()) return
         _services.value = updated
-        feedCacheStore.writeServices(updated)
         _categories.value = updated.flatMap { listing ->
             listing.rawTags
                 .filter { it.isNotEmpty() && it[0] == "t" }
