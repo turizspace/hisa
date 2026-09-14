@@ -16,10 +16,12 @@ import kotlinx.coroutines.flow.stateIn
 
 @HiltViewModel
 class StallsViewModel @Inject constructor(
-    marketplaceRepository: MarketplaceRepository,
+    private val marketplaceRepository: MarketplaceRepository,
     productRepository: ProductRepository,
     profileRepository: ProfileRepository
 ) : ViewModel() {
+    val isLoading: StateFlow<Boolean> = marketplaceRepository.isLoading
+
     val stalls: StateFlow<List<Stall>> = combine(
         marketplaceRepository.stalls,
         profileRepository.profiles,

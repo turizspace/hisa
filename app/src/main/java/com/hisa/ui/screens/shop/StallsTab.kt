@@ -35,6 +35,7 @@ import com.hisa.ui.components.StallPreviewCard
 import com.hisa.ui.navigation.Routes
 import com.hisa.util.normalizeCategory
 import com.hisa.viewmodel.StallsViewModel
+import kotlinx.coroutines.flow.collectLatest
 
 @RequiresApi(Build.VERSION_CODES.O)
 @Composable
@@ -78,7 +79,8 @@ fun StallsTab(
 
     LaunchedEffect(listState) {
         snapshotFlow { listState.firstVisibleItemIndex to listState.firstVisibleItemScrollOffset }
-            .collect { (index, offset) ->
+            .collectLatest { (index, offset) ->
+                kotlinx.coroutines.delay(350)
                 resumeStateStore.saveStallsScrollPosition(index, offset)
             }
     }

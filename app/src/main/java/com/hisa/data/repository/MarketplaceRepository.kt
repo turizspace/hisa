@@ -112,6 +112,9 @@ class MarketplaceRepository @Inject constructor(
         }
 
         val updated = stallsByKey.values.sortedByDescending { it.createdAt }
+        // Preserve cached stalls when a relay returns an empty snapshot during
+        // startup or a temporary reconnect.
+        if (updated.isEmpty() && _stalls.value.isNotEmpty()) return
         _stalls.value = updated
         stallCacheStore.writeStalls(updated)
 

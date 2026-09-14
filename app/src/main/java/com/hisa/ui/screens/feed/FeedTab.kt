@@ -56,6 +56,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import timber.log.Timber
+import kotlinx.coroutines.flow.collectLatest
 
 private const val PREVIEW_ITEM_COUNT = 6
 
@@ -72,10 +73,13 @@ fun FeedTab(
     val resumeStateStore = remember { UiResumeStateStore(context.applicationContext) }
     val stallsViewModel: StallsViewModel = hiltViewModel()
     val stalls by stallsViewModel.stalls.collectAsState()
+    val stallsLoading by stallsViewModel.isLoading.collectAsState()
     val feedUiState by feedViewModel.feedUiState.collectAsState()
     val profileRepository = LocalProfileRepository.current
     val profiles by profileRepository.profiles.collectAsState()
-    val showLoading = rememberTabLoadingVisibility(isLoading = feedUiState.isLoading)
+    val showLoading = rememberTabLoadingVisibility(
+        isLoading = feedUiState.isLoading || stallsLoading
+    )
     val allCategories = remember(feedUiState.categories) {
         feedUiState.categories
     }
@@ -166,7 +170,8 @@ fun FeedTab(
             } else {
                 gridState.firstVisibleItemIndex to gridState.firstVisibleItemScrollOffset
             }
-        }.collect { (index, offset) ->
+        }.collectLatest { (index, offset) ->
+            kotlinx.coroutines.delay(350)
             resumeStateStore.saveFeedScrollPosition(index, offset)
             val isAtTop = index == 0 && offset == 0
             if (isAtTop != previousIsAtTop) {
@@ -208,13 +213,15 @@ fun FeedTab(
                 item {
                     val drops = feedUiState.services.take(8)
                     val dropsState = rememberLazyListState()
-                    if (drops.isNotEmpty()) {
-                        LaunchedEffect(drops) {
+                    if (drops.isNotEmpty() && !feedUiState.isLoading && !stallsLoading) {
+                        LaunchedEffect(drops, feedUiState.isLoading, stallsLoading) {
                             while (true) {
                                 kotlinx.coroutines.delay(3500)
-                                val visible = dropsState.firstVisibleItemIndex
-                                val next = (visible + 1) % drops.size
-                                dropsState.animateScrollToItem(next)
+                                if (!dropsState.isScrollInProgress) {
+                                    val visible = dropsState.firstVisibleItemIndex
+                                    val next = (visible + 1) % drops.size
+                                    dropsState.animateScrollToItem(next)
+                                }
                             }
                         }
                     }
@@ -294,7 +301,7 @@ fun FeedTab(
                 }
 
                 item {
-                    if (filteredStalls.isEmpty() && !feedUiState.isLoading) {
+                    if (filteredStalls.isEmpty() && !feedUiState.isLoading && !stallsLoading) {
                         PreviewSectionEmptyState(
                             text = "No stalls yet. New shops will show up here."
                         )

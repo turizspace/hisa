@@ -73,11 +73,7 @@ class FeedRepository @Inject constructor(
         subscriptionListenerId?.let(subscriptionManager::unsubscribe)
         subscriptionListenerId = null
         started = false
-        servicesByReplaceableKey.clear()
         pendingProfilePubkeys.clear()
-        _services.value = emptyList()
-        _categories.value = emptyList()
-        feedCacheStore.clear()
         ensureStarted()
     }
 
@@ -130,6 +126,10 @@ class FeedRepository @Inject constructor(
         }
 
         val updated = servicesByReplaceableKey.values.sortedByDescending { it.createdAt }
+        // A relay can reach EOSE before returning any events. Keep the last
+        // known-good snapshot instead of turning a transient empty response
+        // into an empty feed and overwriting the disk cache.
+        if (updated.isEmpty() && _services.value.isNotEmpty()) return
         _services.value = updated
         feedCacheStore.writeServices(updated)
         _categories.value = updated.flatMap { listing ->
