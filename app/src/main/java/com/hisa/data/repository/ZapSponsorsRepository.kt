@@ -1,5 +1,6 @@
 package com.hisa.data.repository
 
+import com.hisa.data.cache.DonationCacheStore
 import com.hisa.data.nostr.EventVerifier
 import com.hisa.data.nostr.NostrClient
 import com.hisa.data.nostr.NostrEvent
@@ -11,9 +12,12 @@ import javax.inject.Inject
 import javax.inject.Singleton
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
+import kotlinx.serialization.Serializable
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.bitcoinj.core.Bech32
@@ -21,6 +25,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 
 /** A public sponsor derived from validated NIP-57 zap receipts. */
+@Serializable
 data class ZapSponsor(
     val pubkey: String,
     val totalMilliSats: Long,
@@ -41,6 +46,8 @@ class ZapSponsorsRepository @Inject constructor(
     private val subscriptionManager: SubscriptionManager,
     private val metadataRepository: MetadataRepository,
     private val profileRepository: ProfileRepository,
+    private val remoteRelayDirectory: RemoteRelayDirectory,
+    private val donationCacheStore: DonationCacheStore,
     private val appScope: CoroutineScope
 ) {
     private data class ZapProvider(
@@ -68,14 +75,30 @@ class ZapSponsorsRepository @Inject constructor(
     @Volatile
     private var receiptSubscriptionId: String? = null
 
+    init {
+        donationCacheStore.read()?.let { cached ->
+            _sponsors.value = cached.sponsors
+        }
+    }
+
+    @Volatile
+    private var initialSnapshotComplete = false
+
+    @Volatile
+    private var livePublishJob: Job? = null
+
     fun start() {
         if (started) return
         started = true
+        initialSnapshotComplete = false
+        contributionsByReceiptId.clear()
+        _sponsors.value = emptyList()
         _isLoading.value = true
         nostrClient.refreshStoredRelays()
         nostrClient.connect()
 
         appScope.launch(Dispatchers.IO) {
+            remoteRelayDirectory.ensureRelayCoverage(Constants.HISA_DEV_PUBKEY)
             val provider = findZapProvider()
             if (!started || provider == null) {
                 _isLoading.value = false
@@ -87,9 +110,20 @@ class ZapSponsorsRepository @Inject constructor(
 
     fun stop() {
         started = false
+        initialSnapshotComplete = false
+        livePublishJob?.cancel()
+        livePublishJob = null
         receiptSubscriptionId?.let(subscriptionManager::unsubscribe)
         receiptSubscriptionId = null
         _isLoading.value = false
+    }
+
+    fun refresh() {
+        receiptSubscriptionId?.let(subscriptionManager::unsubscribe)
+        receiptSubscriptionId = null
+        contributionsByReceiptId.clear()
+        started = false
+        start()
     }
 
     private suspend fun findZapProvider(): ZapProvider? {
@@ -137,14 +171,28 @@ class ZapSponsorsRepository @Inject constructor(
             onEvent = { receipt ->
                 parseValidatedContribution(receipt, provider)?.let { contribution ->
                     if (contributionsByReceiptId.putIfAbsent(receipt.id, contribution) == null) {
-                        publishSponsors()
+                        scheduleLivePublish()
                     }
                 }
             },
             onEndOfStoredEvents = {
+                // Do not expose partial ranking while historical receipts are still
+                // arriving. The first visible list is a complete, aggregated snapshot.
+                initialSnapshotComplete = true
+                livePublishJob?.cancel()
+                livePublishJob = null
+                publishSponsors()
                 _isLoading.value = false
             }
         )
+    }
+
+    private fun scheduleLivePublish() {
+        if (!initialSnapshotComplete || livePublishJob?.isActive == true) return
+        livePublishJob = appScope.launch(Dispatchers.Default) {
+            delay(LIVE_UPDATE_DEBOUNCE_MS)
+            if (started && initialSnapshotComplete) publishSponsors()
+        }
     }
 
     private fun parseValidatedContribution(
@@ -192,7 +240,7 @@ class ZapSponsorsRepository @Inject constructor(
 
     private fun publishSponsors() {
         val minimumMilliSats = Constants.MIN_SPONSOR_ZAP_TOTAL_SATS * MILLISATS_PER_SAT
-        val sponsors = contributionsByReceiptId.values
+        val sponsors = contributionsByReceiptId.values.toList()
             .groupBy { it.senderPubkey }
             .map { (pubkey, contributions) ->
                 ZapSponsor(
@@ -209,7 +257,19 @@ class ZapSponsorsRepository @Inject constructor(
             .take(Constants.MAX_DISPLAYED_ZAP_SPONSORS)
 
         _sponsors.value = sponsors
-        profileRepository.ensureProfiles(sponsors.mapTo(mutableSetOf()) { it.pubkey })
+        val sponsorPubkeys = sponsors.mapTo(mutableSetOf()) { it.pubkey }
+        appScope.launch(Dispatchers.IO) {
+            sponsorPubkeys.forEach { pubkey ->
+                runCatching { remoteRelayDirectory.ensureRelayCoverage(pubkey) }
+            }
+            // The first profile subscription may have started before the
+            // sponsor's NIP-65 relays were added. Force a second lookup so a
+            // transient empty EOSE cannot permanently leave a fallback name.
+            profileRepository.refreshProfiles(sponsorPubkeys)
+        }
+        donationCacheStore.read()?.let { cached ->
+            donationCacheStore.write(cached.paymentTargets, cached.badgeAwards, sponsors)
+        } ?: donationCacheStore.write(emptyList(), emptyList(), sponsors)
     }
 
     private fun NostrEvent.isValidNostrEvent(): Boolean =
@@ -273,6 +333,7 @@ class ZapSponsorsRepository @Inject constructor(
         const val ZAP_REQUEST_KIND = 9734
         const val ZAP_RECEIPT_KIND = 9735
         const val MILLISATS_PER_SAT = 1_000L
+        const val LIVE_UPDATE_DEBOUNCE_MS = 1_000L
     }
 }
 
