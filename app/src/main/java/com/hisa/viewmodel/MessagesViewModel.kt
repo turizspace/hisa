@@ -152,6 +152,8 @@ class MessagesViewModel @Inject constructor(
 
     @Volatile
     private var messageEmitJob: Job? = null
+    @Volatile
+    private var messageCacheWriteJob: Job? = null
 
     // Buffer plain (kind 14) messages that arrive while initial loading is active
     private val pendingPlainMessages = ConcurrentLinkedQueue<org.json.JSONObject>()
@@ -202,7 +204,7 @@ class MessagesViewModel @Inject constructor(
         }
         _messages.value = messagesById.values.sortedBy { it.createdAt }
         _conversations.value = getConversations()
-        messageCacheStore.writeMessages(_messages.value)
+        scheduleMessageCacheWrite()
     }
 
     private fun emitMessagesSnapshot() {
@@ -211,7 +213,21 @@ class MessagesViewModel @Inject constructor(
         }
         _messages.value = messagesById.values.sortedBy { it.createdAt }
         _conversations.value = getConversations()
-        messageCacheStore.writeMessages(_messages.value)
+        scheduleMessageCacheWrite()
+    }
+
+    private fun scheduleMessageCacheWrite() {
+        synchronized(messageEmitLock) {
+            if (messageCacheWriteJob?.isActive == true) return
+            messageCacheWriteJob = viewModelScope.launch(Dispatchers.IO) {
+                delay(MESSAGE_CACHE_WRITE_DEBOUNCE_MS)
+                val snapshot = messagesById.values.sortedBy { it.createdAt }
+                messageCacheStore.writeMessages(snapshot)
+                synchronized(messageEmitLock) {
+                    messageCacheWriteJob = null
+                }
+            }
+        }
     }
     
 
@@ -324,9 +340,9 @@ class MessagesViewModel @Inject constructor(
     }
 
     init {
-        restoreCachedMessages()
         viewModelScope.launch(Dispatchers.IO) {
             try {
+                restoreCachedMessages()
                 initialize()
             } catch (e: Exception) {
                 Timber.e(e, "Error during MessagesViewModel initialization")
@@ -338,11 +354,10 @@ class MessagesViewModel @Inject constructor(
         val cached = messageCacheStore.readMessages()
             .filter { message -> !message.id.startsWith("temp-") }
         if (cached.isNotEmpty()) {
-            messagesById.clear()
             cached.forEach { message ->
-                messagesById[message.id] = message
+                messagesById.putIfAbsent(message.id, message)
             }
-            _messages.value = cached.sortedBy { it.createdAt }
+            _messages.value = messagesById.values.sortedBy { it.createdAt }
             _conversations.value = getConversations()
         }
     }
@@ -533,6 +548,7 @@ class MessagesViewModel @Inject constructor(
         private const val CONVERSATION_DM_HISTORY_DAYS = 180L
         private const val CONVERSATION_DM_LIMIT_PER_FILTER = 1000
         private const val MESSAGE_EMIT_DEBOUNCE_MS = 120L
+        private const val MESSAGE_CACHE_WRITE_DEBOUNCE_MS = 1_000L
         // Stable timestamp across VM instances in one process, helps filter dedupe in SubscriptionManager.
         val DIRECT_DM_SINCE: Long =
             (System.currentTimeMillis() / 1000) - (DIRECT_DM_HISTORY_DAYS * 24L * 60L * 60L)
