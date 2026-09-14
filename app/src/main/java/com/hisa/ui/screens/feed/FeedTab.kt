@@ -48,7 +48,6 @@ import com.hisa.ui.components.ServicePreviewCard
 import com.hisa.ui.components.SearchEmptyState
 import com.hisa.ui.components.StallPreviewCard
 import com.hisa.ui.components.rememberTabLoadingVisibility
-import com.hisa.util.normalizeCategory
 import com.hisa.ui.navigation.Routes
 import com.hisa.ui.util.LocalProfileRepository
 import com.hisa.viewmodel.FeedViewModel
@@ -76,7 +75,7 @@ fun FeedTab(
     val context = LocalContext.current
     val resumeStateStore = remember { UiResumeStateStore(context.applicationContext) }
     val stallsViewModel: StallsViewModel = hiltViewModel()
-    val stalls by stallsViewModel.stalls.collectAsState()
+    val filteredStalls by stallsViewModel.filteredStalls.collectAsState()
     val stallsLoading by stallsViewModel.isLoading.collectAsState()
     val feedUiState by feedViewModel.feedUiState.collectAsState()
     val profileRepository = LocalProfileRepository.current
@@ -150,26 +149,13 @@ fun FeedTab(
         initialFirstVisibleItemScrollOffset = resumeStateStore.feedListFirstVisibleItemOffset
     )
 
-    val sortedStalls = remember(stalls) { stalls.sortedByDescending { it.createdAt } }
     val normalizedQuery = remember(searchText) { searchText.trim() }
     val isSearching = normalizedQuery.isNotEmpty()
     val showingDiscovery = remember(showAllServices, isSearching) { !isSearching && !showAllServices }
 
     val filteredServices = feedUiState.services
-    val filteredStalls = remember(sortedStalls, feedUiState.selectedCategory, normalizedQuery) {
-        sortedStalls
-            .filter { stall ->
-                feedUiState.selectedCategory?.takeIf { it.isNotBlank() }?.let { category ->
-                    stall.categories.map(::normalizeCategory).any { it == category }
-                } ?: true
-            }
-            .filter { stall ->
-                if (normalizedQuery.isEmpty()) return@filter true
-                stall.name.contains(normalizedQuery, ignoreCase = true) ||
-                    stall.description.contains(normalizedQuery, ignoreCase = true) ||
-                    stall.ownerDisplayName.contains(normalizedQuery, ignoreCase = true) ||
-                    stall.categories.any { it.contains(normalizedQuery, ignoreCase = true) }
-            }
+    LaunchedEffect(feedUiState.selectedCategory, normalizedQuery) {
+        stallsViewModel.setFilters(feedUiState.selectedCategory, normalizedQuery)
     }
 
     LaunchedEffect(listState, gridState, showingDiscovery, isSearching) {
@@ -192,7 +178,7 @@ fun FeedTab(
     }
 
     // Show shimmer only on initial load when both cache is empty and we're loading
-    if (showLoading && feedUiState.services.isEmpty() && stalls.isEmpty()) {
+    if (showLoading && feedUiState.services.isEmpty() && filteredStalls.isEmpty()) {
         FeedSkeletonLoader(
             modifier = Modifier.fillMaxSize(),
             itemCount = 5

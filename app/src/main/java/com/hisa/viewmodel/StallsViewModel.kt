@@ -7,9 +7,11 @@ import com.hisa.data.model.Stall
 import com.hisa.data.repository.MarketplaceRepository
 import com.hisa.data.repository.ProductRepository
 import com.hisa.data.repository.ProfileRepository
+import com.hisa.util.normalizeCategory
 import dagger.hilt.android.lifecycle.HiltViewModel
 import javax.inject.Inject
 import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.stateIn
@@ -21,6 +23,8 @@ class StallsViewModel @Inject constructor(
     profileRepository: ProfileRepository
 ) : ViewModel() {
     val isLoading: StateFlow<Boolean> = marketplaceRepository.isLoading
+    private val selectedCategory = MutableStateFlow<String?>(null)
+    private val searchQuery = MutableStateFlow("")
 
     val stalls: StateFlow<List<Stall>> = combine(
         marketplaceRepository.stalls,
@@ -50,7 +54,35 @@ class StallsViewModel @Inject constructor(
         initialValue = emptyList()
     )
 
+    val filteredStalls: StateFlow<List<Stall>> = combine(
+        stalls,
+        selectedCategory,
+        searchQuery
+    ) { listings, category, query ->
+        val normalizedQuery = query.trim()
+        listings
+            .sortedByDescending { it.createdAt }
+            .filter { stall ->
+                category?.takeIf { it.isNotBlank() }?.let { activeCategory ->
+                    stall.categories.map(::normalizeCategory).any { it == activeCategory }
+                } ?: true
+            }
+            .filter { stall ->
+                normalizedQuery.isEmpty() ||
+                    stall.name.contains(normalizedQuery, ignoreCase = true) ||
+                    stall.description.contains(normalizedQuery, ignoreCase = true) ||
+                    stall.ownerDisplayName.contains(normalizedQuery, ignoreCase = true) ||
+                    stall.categories.any { it.contains(normalizedQuery, ignoreCase = true) }
+            }
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+
+    fun setFilters(category: String?, query: String) {
+        selectedCategory.value = category?.let(::normalizeCategory)?.takeIf { it.isNotBlank() }
+        searchQuery.value = query
+    }
+
     init {
+        setFilters(null, "")
         marketplaceRepository.ensureStarted()
         productRepository.ensureStarted()
     }

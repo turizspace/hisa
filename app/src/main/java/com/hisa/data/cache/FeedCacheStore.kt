@@ -39,7 +39,9 @@ class FeedCacheStore @Inject constructor(
                         price = cached.price,
                         tags = cached.tags,
                         pubkey = cached.pubkey,
-                        rawTags = emptyList(),
+                        rawTags = cached.rawTags.ifEmpty {
+                            cached.tags.map { listOf("t", it) }
+                        },
                         rawEvent = null,
                         createdAt = cached.createdAt
                     )
@@ -86,6 +88,7 @@ class FeedCacheStore @Inject constructor(
         val content: String?,
         val price: String,
         val tags: List<String>,
+        val rawTags: List<List<String>> = emptyList(),
         val pubkey: String,
         val createdAt: Long
     )
@@ -99,6 +102,7 @@ class FeedCacheStore @Inject constructor(
             content = content?.take(4000),
             price = price.take(120),
             tags = tags.take(20),
+            rawTags = rawTags.take(40).map { it.take(8) },
             pubkey = pubkey,
             createdAt = createdAt
         )

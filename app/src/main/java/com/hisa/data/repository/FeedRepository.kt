@@ -15,6 +15,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
+import java.util.concurrent.atomic.AtomicLong
 
 @Singleton
 class FeedRepository @Inject constructor(
@@ -39,6 +40,7 @@ class FeedRepository @Inject constructor(
     val isLoading: StateFlow<Boolean> = _isLoading
 
     private var subscriptionListenerId: String? = null
+    private val subscriptionGeneration = AtomicLong(0L)
     private val servicesByReplaceableKey = ConcurrentHashMap<String, ServiceListing>()
     private val pendingProfilePubkeys = ConcurrentHashMap.newKeySet<String>()
     private val emitLock = Any()
@@ -54,12 +56,14 @@ class FeedRepository @Inject constructor(
     private var initialSnapshotComplete = false
 
     init {
-        restoreCachedServices()
+        appScope.launch(Dispatchers.IO) {
+            restoreCachedServices()
+        }
     }
 
     private fun restoreCachedServices() {
         val cachedServices = feedCacheStore.readServices()
-        if (cachedServices.isNotEmpty()) {
+        if (cachedServices.isNotEmpty() && servicesByReplaceableKey.isEmpty()) {
             servicesByReplaceableKey.clear()
             cachedServices.forEach { service ->
                 servicesByReplaceableKey[serviceKey(service)] = service
@@ -71,10 +75,11 @@ class FeedRepository @Inject constructor(
     fun ensureStarted() {
         if (started) return
         started = true
-        startSubscription()
+        startSubscription(subscriptionGeneration.incrementAndGet())
     }
 
     fun refresh() {
+        subscriptionGeneration.incrementAndGet()
         subscriptionListenerId?.let(subscriptionManager::unsubscribe)
         subscriptionListenerId = null
         started = false
@@ -89,27 +94,32 @@ class FeedRepository @Inject constructor(
         ensureStarted()
     }
 
-    private fun startSubscription() {
+    private fun startSubscription(generation: Long) {
         initialSnapshotComplete = false
         _isLoading.value = true
         nostrClient.connect()
         subscriptionListenerId = subscriptionManager.subscribe(
             filter = SubscriptionManager.filterNIP99(limit = 200),
             onEvent = { event ->
-                ServiceEventParser.parse(event)?.let { service ->
-                    upsertService(service)
+                if (subscriptionGeneration.get() == generation) {
+                    ServiceEventParser.parse(event)?.let { service ->
+                        upsertService(service, generation)
+                    }
                 }
             },
             onEndOfStoredEvents = {
-                initialSnapshotComplete = true
-                emitSnapshot()
-                persistCachedServices()
-                _isLoading.value = false
+                if (subscriptionGeneration.get() == generation) {
+                    initialSnapshotComplete = true
+                    emitSnapshot(generation)
+                    persistCachedServices(generation)
+                    _isLoading.value = false
+                }
             }
         )
     }
 
-    private fun upsertService(service: ServiceListing) {
+    private fun upsertService(service: ServiceListing, generation: Long) {
+        if (subscriptionGeneration.get() != generation) return
         ServiceRepository.cacheService(service)
 
         val key = serviceKey(service)
@@ -123,39 +133,41 @@ class FeedRepository @Inject constructor(
             pendingProfilePubkeys.add(service.pubkey)
         }
         if (initialSnapshotComplete) {
-            scheduleEmit()
-            scheduleCachePersist()
+            scheduleEmit(generation)
+            scheduleCachePersist(generation)
         }
     }
 
-    private fun scheduleEmit() {
+    private fun scheduleEmit(generation: Long) {
         synchronized(emitLock) {
             if (emitJob?.isActive == true) return
             emitJob = appScope.launch(Dispatchers.Default) {
                 delay(EMIT_DEBOUNCE_MS)
-                emitSnapshot()
+                if (subscriptionGeneration.get() == generation) emitSnapshot(generation)
             }
         }
     }
 
-    private fun scheduleCachePersist() {
+    private fun scheduleCachePersist(generation: Long) {
         synchronized(emitLock) {
             if (cachePersistJob?.isActive == true) return
             cachePersistJob = appScope.launch(Dispatchers.Default) {
                 delay(CACHE_PERSIST_DEBOUNCE_MS)
-                persistCachedServices()
+                if (subscriptionGeneration.get() == generation) persistCachedServices(generation)
             }
         }
     }
 
-    private fun persistCachedServices() {
+    private fun persistCachedServices(generation: Long? = null) {
+        if (generation != null && subscriptionGeneration.get() != generation) return
         synchronized(emitLock) {
             cachePersistJob = null
         }
         feedCacheStore.writeServices(servicesByReplaceableKey.values.toList())
     }
 
-    private fun emitSnapshot() {
+    private fun emitSnapshot(generation: Long? = null) {
+        if (generation != null && subscriptionGeneration.get() != generation) return
         synchronized(emitLock) {
             emitJob = null
         }
