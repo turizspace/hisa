@@ -52,13 +52,11 @@ fun ServicePreviewCard(
     modifier: Modifier = Modifier,
     showTags: Boolean = false,
     onClick: () -> Unit = {},
-    hero: Boolean = false,
     featured: Boolean = false
 ) {
     val profileRepository = LocalProfileRepository.current
-    val profiles by profileRepository.profiles.collectAsState()
-    val cachedPublisherMetadata = profiles[service.pubkey]
-    val resolvedPublisherMetadata = publisherMetadata ?: cachedPublisherMetadata
+    val profileMetadata by profileRepository.profileFlow(service.pubkey).collectAsState()
+    val resolvedPublisherMetadata = publisherMetadata ?: profileMetadata
 
     val authorHandle = remember(service.pubkey, resolvedPublisherMetadata?.displayName, resolvedPublisherMetadata?.name) {
         (resolvedPublisherMetadata?.displayName?.ifBlank { null }
@@ -91,7 +89,6 @@ fun ServicePreviewCard(
         secondaryText = supportingText,
         modifier = modifier,
         onClick = onClick,
-        hero = hero,
         featured = featured
     )
 }
@@ -137,9 +134,9 @@ private fun MarketplacePreviewCard(
     secondaryText: String,
     modifier: Modifier = Modifier,
     onClick: () -> Unit = {},
-    hero: Boolean = false,
     featured: Boolean = false
 ) {
+    val mediaHeight = 140.dp
     Card(
         modifier = modifier
             .fillMaxWidth()
@@ -151,18 +148,11 @@ private fun MarketplacePreviewCard(
         elevation = CardDefaults.cardElevation(defaultElevation = 3.dp)
     ) {
         Column(modifier = Modifier.fillMaxSize()) {
-            // Image area - supports hero (larger, edge-to-edge) and featured badge with glow
-            val imageHeight = if (modifier == Modifier) 96.dp else  if (false) 96.dp else 96.dp
+            // Keep media height stable so image and no-image cards align in every list.
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(
-                        when {
-                            hero -> 220.dp
-                            !imageUrl.isNullOrBlank() -> 140.dp
-                            else -> 96.dp
-                        }
-                    )
+                    .height(mediaHeight)
                     .background(MaterialTheme.colorScheme.surfaceVariant)
             ) {
                 if (!imageUrl.isNullOrBlank()) {
