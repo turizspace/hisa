@@ -60,7 +60,7 @@ object ServiceRepository {
             filter = filter,
             onEvent = { event ->
                 if (event.id == eventId) {
-                    ServiceEventParser.parse(event.toJson().toString())?.let { service ->
+                    ServiceEventParser.parse(event)?.let { service ->
                         cacheService(service)
                         result = service
                     }
