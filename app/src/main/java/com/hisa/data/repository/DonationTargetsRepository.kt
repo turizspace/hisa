@@ -203,7 +203,8 @@ class DonationTargetsRepository @Inject constructor(
                     ?: return@flatMap emptyList()
                 val definition = definitions[definitionAddress] ?: return@flatMap emptyList()
                 award.tagValues("p")
-                    .map(String::lowercase)
+                    .map { it.trim().lowercase() }
+                    .filter(String::isNotBlank)
                     .map { recipient ->
                     BadgeAward(
                         awardEventId = award.id,
